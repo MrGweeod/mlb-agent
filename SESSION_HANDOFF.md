@@ -1,5 +1,5 @@
 # MLB Parlay Agent — Session Handoff
-*April 14, 2026 — Phase 1 complete*
+*April 14, 2026 — Phase 1 complete, Phase 2 ready to start*
 
 ---
 
@@ -23,7 +23,7 @@ Phase 2 modules (mlb_stats.py, coverage.py, etc.) are stubs or absent.
 | File | Status | Notes |
 |------|--------|-------|
 | `bot.py` | Done | MLBBot class, scheduled tasks enabled, /dashboard stub added |
-| `src/utils/db.py` | Done | All tables `mlb_*` prefixed; `pitcher_profiles` table added; `bats`/`throws` on player_positions |
+| `src/utils/db.py` | Done | All tables `mlb_*` prefixed; `pitcher_profiles` table added; two post-commit fixes (see below) |
 | `src/utils/odds_math.py` | Done | Straight copy |
 | `src/engine/parlay_builder.py` | Done | Tier thresholds updated for MLB slate sizes (Tier 1 ≥10 games) |
 | `src/bot/runner.py` | Done | Table names updated to `mlb_*`; no nba_api calls present |
@@ -34,10 +34,16 @@ Phase 2 modules (mlb_stats.py, coverage.py, etc.) are stubs or absent.
 | `src/tracker/outcome_resolver.py` | **Skeleton only** | nba_api removed; all stat/box score logic stubbed with TODO comments |
 | `src/__init__.py` and all sub-package `__init__.py` | Done | Full src/ tree importable |
 
+### Post-commit fixes to `src/utils/db.py` (commit 603541a)
+
+- `get_player_position()` now returns `{"position": ..., "bats": ...}` instead of a bare string
+- `get_player_handedness(player_id)` added — returns just the `bats` value (`"L"`, `"R"`, `"S"`, or `None`)
+- `set_player_position()` signature simplified to `(player_id, position, bats=None)` — `throws` parameter removed; column stays in schema as nullable but nothing writes to it. Pitcher hand is handled separately via `pitcher_profiles.hand`.
+
 ### Database tables created by `init_db()` on first import of `src/utils/db.py`
 
 ```
-mlb_player_game_logs        mlb_player_positions (+ bats, throws)
+mlb_player_game_logs        mlb_player_positions (bats nullable; throws nullable, unused)
 mlb_player_props_cache      mlb_qualifying_legs_cache
 mlb_bayes_scores_cache      mlb_injury_cache
 mlb_recommendations         mlb_recommendation_legs (+ pitcher_id, prop_category)
@@ -50,7 +56,9 @@ pitcher_profiles            ← new table, no NBA equivalent
 
 ---
 
-## Phase 2 — Next Session
+## Phase 2 — Next Session Starts Here
+
+**First file: `src/apis/mlb_stats.py`** — new file wrapping MLB-StatsAPI. Nothing else in Phase 2 can be written without it.
 
 Phase 2 is the adaptation layer: replace NBA data sources with MLB equivalents.
 Build order per blueprint Section 10:
@@ -141,6 +149,7 @@ Tier 1: 10+ games  |  Tier 2: 5–9  |  Tier 3: 2–4  |  Tier 4: ≤1 (no parla
 
 ## How to work with Claude Code on this project
 
+- **Start next session by opening this file and reading the Phase 2 section**
 - Phase 2 starts with `src/apis/mlb_stats.py` — nothing else can be completed without it
 - After writing mlb_stats.py, immediately write a quick smoke test (fetch one player's game log for 2026)
 - Commit at the end of each logical unit; push before ending a session
