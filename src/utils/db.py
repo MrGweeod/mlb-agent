@@ -288,37 +288,52 @@ def set_player_log(player_id, games):
     conn.close()
 
 
-def get_player_position(player_id: str, max_age_hours: int = 168) -> str | None:
-    """Return cached position for a player, or None if missing/expired (TTL 7 days)."""
+def get_player_position(player_id: str, max_age_hours: int = 168) -> dict | None:
+    """Return {"position": ..., "bats": ...} for a player, or None if missing/expired (TTL 7 days)."""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "SELECT position, fetched_at FROM mlb_player_positions WHERE player_id = %s",
+        "SELECT position, bats, fetched_at FROM mlb_player_positions WHERE player_id = %s",
         (player_id,)
     )
     row = cur.fetchone()
     cur.close()
     conn.close()
     if row and hours_since(row["fetched_at"]) < max_age_hours:
-        return row["position"]
+        return {"position": row["position"], "bats": row["bats"]}
     return None
 
 
-def set_player_position(player_id: str, position: str, bats: str = None, throws: str = None):
+def get_player_handedness(player_id: str, max_age_hours: int = 168) -> str | None:
+    """Return bats value ('L', 'R', or 'S') for a player, or None if missing/expired (TTL 7 days)."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT bats, fetched_at FROM mlb_player_positions WHERE player_id = %s",
+        (player_id,)
+    )
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if row and hours_since(row["fetched_at"]) < max_age_hours:
+        return row["bats"]
+    return None
+
+
+def set_player_position(player_id: str, position: str, bats: str = None):
     """Write or update a player's position in the cache."""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO mlb_player_positions (player_id, position, bats, throws, fetched_at)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO mlb_player_positions (player_id, position, bats, fetched_at)
+        VALUES (%s, %s, %s, %s)
         ON CONFLICT (player_id) DO UPDATE
             SET position = EXCLUDED.position,
                 bats = EXCLUDED.bats,
-                throws = EXCLUDED.throws,
                 fetched_at = EXCLUDED.fetched_at
         """,
-        (player_id, position, bats, throws, now_utc())
+        (player_id, position, bats, now_utc())
     )
     conn.commit()
     cur.close()
