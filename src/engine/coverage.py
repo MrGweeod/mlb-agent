@@ -39,7 +39,18 @@ from src.utils.db import get_player_handedness
 
 BASE_URL = "https://statsapi.mlb.com/api/v1"
 
-MINIMUM_OVERALL_GAMES = 20
+def get_season_minimum(games_played: int) -> int:
+    """
+    Return the minimum games threshold for the current point in the season.
+
+    Ramps up from 8 (first two weeks) to 20 (full season) so early-season
+    players aren't blanket-excluded when sample sizes are still building.
+    """
+    if games_played < 15:
+        return 8
+    if games_played < 30:
+        return 12
+    return 20
 
 # Prop type → stat field in MLB-StatsAPI gameLog splits (all confirmed live)
 PROP_STAT_MAP: dict[str, str] = {
@@ -187,8 +198,8 @@ def calculate_coverage(
           pitcher_hand          str|None  'L' or 'R'
           batter_hand           str|None  'L', 'R', or 'S'
 
-        Returns None when the player has fewer than 20 overall games this
-        season (minimum sample gate per blueprint Section 4.2).
+        Returns None when the player has fewer than get_season_minimum()
+        overall games (8/12/20 depending on season depth per blueprint §4.2).
 
     ## Split path
     When pitcher_hand is known AND the prop type is supported in statSplits
@@ -229,8 +240,8 @@ def calculate_coverage(
     full_log = get_batter_game_log(player_id, season)
     overall_over, overall_games = _count_coverage(full_log, stat_field, line)
 
-    # Minimum 20 games overall — return None below threshold (blueprint §4.2)
-    if overall_games < MINIMUM_OVERALL_GAMES:
+    # Seasonal ramp-up minimum — return None below threshold (blueprint §4.2)
+    if overall_games < get_season_minimum(overall_games):
         return None
 
     overall_rate = overall_over / overall_games
