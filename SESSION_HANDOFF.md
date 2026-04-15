@@ -98,9 +98,72 @@ to starter-based filtering but is the best available signal without per-game loo
 - vs RHP (Skenes 694973): coverage_rate=0.567, games_used=142, mult=1.0
 - LHB correctly lower coverage vs same-hand pitcher — baseball makes sense.
 
-Phase 2 also needs `src/apis/rotowire.py` (Priority 7 — update target URLs to MLB lineup/injury pages).
+---
 
-**Note on parlay_builder.py**: still contains NBA-era imports (`get_player_id`, `get_game_log`, `calc_stat_value` from coverage.py). These will break at runtime. Must be cleaned up before or alongside main.py — remove the `best_player_legs` NBA game-log path and replace with MLB equivalent or drop combined-hit-rate validation entirely (the hybrid builder `build_hybrid_parlays` doesn't use it).
+## New Module Design Notes (April 2026)
+
+### trend_analysis.py
+
+- Game log is **oldest-first** from mlb_stats — no reversal needed for chronological calcs.
+- Streak iterates `reversed(game_log)` (most-recent-first).
+- PA stability proxy: `atBats` field from game log entry. pa_pass threshold: avg ≥ 3.0 AB/game over last 10.
+- Windows: last 10 stat values for slope/std; last 20 for momentum comparison (avg_10 > avg_20).
+- trend_score components: pa_slope (+2/-1), stat_slope (+2/-1), momentum (+1). Max = 5, typical HOT = 4–5.
+- Caches results in `_process_cache` dict keyed by (player_id, stat, best_line) — session-level.
+
+### matchup.py
+
+- Fetches `/people/{id}/stats?stats=season&group=pitching&season={year}` for cumulative season stats.
+- Uses API-provided `era` and `whip` strings directly; computes K/9 from `strikeOuts / inningsPitched * 9`.
+- IP parsing: "145.1" means 145⅓ innings (digit after `.` = outs, not decimal tenths).
+- Skips pitchers with < 5.0 IP (too few starts to be meaningful — filters openers called up same day).
+- Percentile ranks (1–100): era_rank/whip_rank → lower is better (rank 1); k9_rank → higher is better (rank 1).
+- Normalisation midpoints: ERA=4.0, K/9=8.5, WHIP=1.25.
+
+### enrich_legs.py
+
+**Caller contract** — main.py must build and pass:
+```python
+pitcher_id_map = {batter_team_abbr: opposing_pitcher_id}   # e.g. {"NYY": 477132}
+opponent_map   = {batter_team_abbr: opposing_team_abbr}    # e.g. {"NYY": "BOS"}
+```
+Built by iterating `mlb_stats.get_schedule(date)` and calling `mlb_stats.get_lineup(game_pk)` for each game.
+
+Adjustment routing summary:
+| stat | formula |
+|------|---------|
+| hits | `-k9_adj×0.70 + era_adj×0.20 + whip_adj×0.10` |
+| totalBases | `era_adj×0.60 + (-k9_adj)×0.25 + whip_adj×0.15` |
+| rbi | `era_adj×0.55 + whip_adj×0.30 + (-k9_adj)×0.15` |
+| homeRuns | `era_adj×0.75 + (-k9_adj)×0.25` |
+| walks | `whip_adj×0.80 + era_adj×0.20` |
+| runsScored | `era_adj×0.50 + whip_adj×0.30 + (-k9_adj)×0.20` |
+| stolenBases | `0.0` |
+| strikeouts (batter K) | `k9_adj×0.90 + (-era_adj)×0.10` |
+| pitcher props | `0.0` (TODO: team K-rate) |
+
+### leg_scorer.py
+
+Composite weights:
+| Factor | Anchor | Swing |
+|--------|--------|-------|
+| Recency-weighted coverage | 60% | 40% |
+| EV | 0% | 25% |
+| Trend score | 15% | 15% |
+| Opponent adjustment | 15% | 15% |
+| PA stability | 10% | 5% |
+
+- Recency weighting: MLB log is oldest-first. `games[-5:]` = 3×, `games[-10:-5]` = 2×, `games[:-10]` = 1×.
+- PA stability factor: `min(pa_avg_10 / 4.0, 1.0)`. Fallback 0.5 when `pa_avg_10` not in leg dict.
+- Pitcher props fall back to `coverage_pct / 100` for recency-weighted coverage (pitcher prop coverage TBD).
+- `team_to_blocked` parameter is accepted for API compatibility with parlay_builder but currently unused in scoring.
+
+### parlay_builder.py — Cleanup needed before first run
+
+Still contains NBA-era imports in the legacy `build_parlays()` function:
+- `from src.engine.coverage import get_game_log, get_player_id, calc_stat_value`
+
+These will raise ImportError at runtime. The hybrid builder `build_hybrid_parlays()` does NOT use them — only the legacy `build_parlays()` does. Fix: either delete `build_parlays()` and its helpers (`best_player_legs`, `combined_hit_rate`) entirely, or replace the nba imports with MLB equivalents. Do this in the same PR as main.py.
 
 ---
 
@@ -176,11 +239,13 @@ Tier 1: 10+ games  |  Tier 2: 5–9  |  Tier 3: 2–4  |  Tier 4: ≤1 (no parla
 
 ## How to work with Claude Code on this project
 
-- **Start next session by opening this file and reading the Phase 2 section**
-- Phase 2 starts with `src/apis/mlb_stats.py` — nothing else can be completed without it
-- After writing mlb_stats.py, immediately write a quick smoke test (fetch one player's game log for 2026)
+- **Start next session by opening this file** — read the Phase 2 progress table and design notes
+- **Next up**: `src/apis/rotowire.py` (Priority 7) then Phase 3 (`main.py`)
+- venv is at `.venv/` — activate with `source .venv/bin/activate` or prefix `.venv/bin/python`
+- numpy was added to `.venv` this session; all other deps (psycopg2, anthropic, discord.py) are now installed
 - Commit at the end of each logical unit; push before ending a session
 - Query `mlb_scored_legs` after each pipeline run to verify pool composition
 - All DB calls go through `get_conn()` which retries on OperationalError (3× with 2s sleep)
+- Unit tests for modules without DB: stub `src.utils.db` in `sys.modules` before importing (see session commands)
 
 *Please gamble responsibly.*
