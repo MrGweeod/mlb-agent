@@ -1,5 +1,5 @@
 # MLB Parlay Agent — Session Handoff
-*April 14, 2026 — Phase 1 complete, Phase 2 ready to start*
+*April 15, 2026 — Phase 2 coverage.py complete*
 
 ---
 
@@ -56,22 +56,47 @@ pitcher_profiles            ← new table, no NBA equivalent
 
 ---
 
-## Phase 2 — Next Session Starts Here
-
-**First file: `src/apis/mlb_stats.py`** — new file wrapping MLB-StatsAPI. Nothing else in Phase 2 can be written without it.
+## Phase 2 — Progress
 
 Phase 2 is the adaptation layer: replace NBA data sources with MLB equivalents.
 Build order per blueprint Section 10:
 
-| Priority | File | Action |
-|----------|------|--------|
-| 1 | `src/apis/mlb_stats.py` | **New file** — wraps MLB-StatsAPI for game logs, box scores, schedule, transactions. This unblocks everything else. |
-| 2 | `src/engine/coverage.py` | Adapt from NBA — add handedness-split coverage path, update stat fields, change min games to 20 |
-| 3 | `src/pipelines/trend_analysis.py` | Adapt — change windows to 10/20 games, replace minutes_stability with PA stability |
-| 4 | `src/apis/matchup.py` | Rewrite — pitcher ERA/K9/WHIP profiles replace team DEF_RATING |
-| 5 | `src/pipelines/enrich_legs.py` | Adapt — route pitcher signals by prop type per blueprint Section 5.2 |
-| 6 | `src/engine/leg_scorer.py` | Adapt — replace minutes_stability with pa_stability, update signal sources |
-| 7 | `src/apis/rotowire.py` | Adapt — update target URLs to MLB lineup/injury pages |
+| Priority | File | Status | Notes |
+|----------|------|--------|-------|
+| 1 | `src/apis/mlb_stats.py` | **Done** | Wraps MLB-StatsAPI: schedule, game logs, box scores, lineup, transactions, pitcher hand, player info |
+| 2 | `src/engine/coverage.py` | **Done** | Handedness-split coverage via statSplits+Poisson; exact game-log fallback; 20-game minimum gate |
+| 3 | `src/pipelines/trend_analysis.py` | Pending | Adapt — change windows to 10/20 games, replace minutes_stability with PA stability |
+| 4 | `src/apis/matchup.py` | Pending | Rewrite — pitcher ERA/K9/WHIP profiles replace team DEF_RATING |
+| 5 | `src/pipelines/enrich_legs.py` | Pending | Adapt — route pitcher signals by prop type per blueprint Section 5.2 |
+| 6 | `src/engine/leg_scorer.py` | Pending | Adapt — replace minutes_stability with pa_stability, update signal sources |
+| 7 | `src/apis/rotowire.py` | Pending | Adapt — update target URLs to MLB lineup/injury pages |
+
+**Next session starts at:** `src/pipelines/trend_analysis.py` (Priority 3)
+
+---
+
+## coverage.py — Design Notes (April 2026)
+
+### API limitation discovered
+`MLB-StatsAPI gameLog` ignores `sitCodes` — returns all games regardless.
+Per-game handedness filtering is not available from the API without N additional calls.
+
+### Approach used
+- **Split path**: `statSplits&sitCodes=vl/vr` → aggregate stats (gamesPlayed + counting totals)
+  per pitcher handedness. Poisson approximation converts avg_stat_per_game → P(stat >= line).
+- **Fallback path**: exact game-by-game count from `gameLog` (proportion of games where stat >= line).
+- **Which path**: split used when pitcher_hand known + stat supported + split_games >= 10.
+  `stolenBases` and `runs` are null in statSplits → always fallback.
+
+### statSplits gamesPlayed caveat
+`gamesPlayed` in statSplits counts games where batter had *any* PA vs that pitcher type
+(including relievers), not just "opposing starter was LHP/RHP". Overcounts relative
+to starter-based filtering but is the best available signal without per-game lookups.
+
+### Verified with Freeman 2025
+- vs LHP (Kershaw 477132): coverage_rate=0.371, games_used=97, mult=1.0
+- vs RHP (Skenes 694973): coverage_rate=0.567, games_used=142, mult=1.0
+- LHB correctly lower coverage vs same-hand pitcher — baseball makes sense.
 
 Phase 2 also needs `src/engine/claude_agent.py` and `src/apis/sportsgameodds.py` (Phase 1 blueprint items not yet done — copy from NBA agent with sport filter change).
 
