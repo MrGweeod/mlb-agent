@@ -220,6 +220,11 @@ def init_db():
             prop_category TEXT,
             pitcher_era_rank INTEGER,
             batter_vs_hand_coverage REAL,
+            game_pk INTEGER,
+            player_id TEXT,
+            opposing_pitcher_id TEXT,
+            lineup_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
+            last_updated TEXT,
             logged_at TEXT NOT NULL
         )
     """)
@@ -727,7 +732,8 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
         INSERT INTO mlb_scored_legs
             (run_date, player_name, team, opponent, stat, line, direction, odds,
              coverage_pct, p_over, ev_per_unit, trend_pass, trend_score,
-             opponent_adjustment, position, in_parlay, logged_at)
+             opponent_adjustment, position, in_parlay,
+             game_pk, player_id, opposing_pitcher_id, logged_at)
         VALUES %s
         """,
         [
@@ -748,6 +754,9 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
                 leg.get("opponent_adjustment"),
                 leg.get("position"),
                 leg.get("odd_id") in parlay_odd_ids,
+                leg.get("game_pk"),
+                str(leg.get("player_id")) if leg.get("player_id") else None,
+                str(leg.get("opposing_pitcher_id")) if leg.get("opposing_pitcher_id") else None,
                 ts,
             )
             for leg in legs
@@ -803,6 +812,97 @@ def set_pitcher_profile(pitcher_id: str, team_id: str, era: float, era_rank: int
     conn.commit()
     cur.close()
     conn.close()
+
+
+def get_pending_lineup_legs(run_date: str) -> list[dict]:
+    """
+    Return today's scored legs where lineup_confirmed is FALSE and game_pk is set.
+
+    Used by lineup_poller to find legs that need re-scoring once lineups are posted.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, game_pk, player_id, player_name, team, stat, line, direction,
+               opposing_pitcher_id, coverage_pct, p_over, ev_per_unit,
+               trend_score, opponent_adjustment, position, in_parlay
+        FROM mlb_scored_legs
+        WHERE run_date = %s
+          AND lineup_confirmed = FALSE
+          AND game_pk IS NOT NULL
+        """,
+        (run_date,)
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return rows
+
+
+def update_leg_after_rescore(leg_id: int, coverage_pct: float | None,
+                              p_over: float | None, ev_per_unit: float | None,
+                              trend_score: float | None, opponent_adjustment: float | None):
+    """Update a scored leg's scoring fields and mark lineup_confirmed after re-scoring."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE mlb_scored_legs
+        SET coverage_pct = %s,
+            p_over = %s,
+            ev_per_unit = %s,
+            trend_score = %s,
+            opponent_adjustment = %s,
+            lineup_confirmed = TRUE,
+            last_updated = %s
+        WHERE id = %s
+        """,
+        (coverage_pct, p_over, ev_per_unit, trend_score, opponent_adjustment,
+         now_utc(), leg_id)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def mark_lineup_confirmed(leg_id: int):
+    """Mark a scored leg as lineup_confirmed without changing its scores."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE mlb_scored_legs SET lineup_confirmed = TRUE, last_updated = %s WHERE id = %s",
+        (now_utc(), leg_id)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_scored_legs(run_date: str) -> list[dict]:
+    """
+    Return all scored legs for a given date, ordered by stat then ev_per_unit desc.
+
+    Used by the web API to serve today's leg table.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, player_name, team, opponent, stat, line, direction, odds,
+               coverage_pct, p_over, ev_per_unit, trend_pass, trend_score,
+               opponent_adjustment, position, in_parlay, result, actual_value,
+               lineup_confirmed, last_updated, logged_at
+        FROM mlb_scored_legs
+        WHERE run_date = %s
+        ORDER BY stat, ev_per_unit DESC NULLS LAST
+        """,
+        (run_date,)
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return rows
 
 
 init_db()

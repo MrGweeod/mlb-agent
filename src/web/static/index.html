@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>MLB Parlay Agent</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --border: #2a2d3a;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --accent: #3b82f6;
+    --green: #22c55e;
+    --yellow: #eab308;
+    --red: #ef4444;
+    --purple: #a855f7;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 14px;
+    min-height: 100vh;
+  }
+
+  /* ── Auth screen ── */
+  #auth-screen {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 24px;
+    gap: 16px;
+  }
+  #auth-screen h1 { font-size: 22px; font-weight: 700; }
+  #auth-screen p { color: var(--muted); font-size: 13px; }
+  #pw-input {
+    width: 100%;
+    max-width: 320px;
+    padding: 12px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 15px;
+    outline: none;
+  }
+  #pw-input:focus { border-color: var(--accent); }
+  #auth-btn {
+    width: 100%;
+    max-width: 320px;
+    padding: 12px;
+    background: var(--accent);
+    border: none;
+    border-radius: 8px;
+    color: #fff;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  #auth-error { color: var(--red); font-size: 13px; display: none; }
+
+  /* ── Main app ── */
+  #app { display: none; }
+
+  header {
+    position: sticky;
+    top: 0;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 16px;
+    z-index: 10;
+  }
+  .header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .header-title { font-size: 17px; font-weight: 700; }
+  .header-date { font-size: 12px; color: var(--muted); }
+  #refresh-btn {
+    padding: 6px 12px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 13px;
+    cursor: pointer;
+  }
+  #refresh-btn:active { opacity: 0.7; }
+
+  /* ── Filters ── */
+  .filters {
+    padding: 10px 16px;
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    border-bottom: 1px solid var(--border);
+    scrollbar-width: none;
+  }
+  .filters::-webkit-scrollbar { display: none; }
+  .filter-chip {
+    padding: 5px 12px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    color: var(--muted);
+    font-size: 12px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.15s;
+  }
+  .filter-chip.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+
+  /* ── Sort bar ── */
+  .sort-bar {
+    padding: 8px 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--muted);
+    border-bottom: 1px solid var(--border);
+  }
+  .sort-btn {
+    padding: 4px 10px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--muted);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .sort-btn.active { color: var(--text); border-color: var(--accent); }
+  #toggle-unders {
+    margin-left: auto;
+    padding: 4px 10px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--muted);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  #toggle-unders.on { color: var(--text); border-color: var(--purple); }
+
+  /* ── Stats summary ── */
+  .summary {
+    padding: 10px 16px;
+    display: flex;
+    gap: 16px;
+    font-size: 12px;
+    color: var(--muted);
+    border-bottom: 1px solid var(--border);
+  }
+  .summary span { color: var(--text); font-weight: 600; }
+
+  /* ── Leg cards ── */
+  #legs-list { padding: 8px 0 80px; }
+
+  .leg-card {
+    margin: 6px 12px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 6px 12px;
+    cursor: pointer;
+    transition: border-color 0.15s;
+  }
+  .leg-card:active { border-color: var(--accent); }
+  .leg-card.in-parlay { border-left: 3px solid var(--green); }
+  .leg-card.lineup-pending { opacity: 0.65; }
+
+  .leg-player {
+    font-weight: 600;
+    font-size: 14px;
+    grid-column: 1;
+  }
+  .leg-matchup {
+    font-size: 11px;
+    color: var(--muted);
+    grid-column: 1;
+  }
+  .leg-prop {
+    font-size: 13px;
+    grid-column: 1;
+    margin-top: 4px;
+  }
+  .leg-prop .stat-name { color: var(--muted); }
+  .leg-prop .direction-over { color: var(--green); font-weight: 600; }
+  .leg-prop .direction-under { color: var(--purple); font-weight: 600; }
+
+  .leg-scores {
+    grid-column: 2;
+    grid-row: 1 / span 3;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 4px;
+    justify-content: center;
+  }
+  .coverage-badge {
+    padding: 3px 8px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+  .cov-high  { background: #166534; color: #86efac; }
+  .cov-mid   { background: #713f12; color: #fde68a; }
+  .cov-low   { background: #3f1515; color: #fca5a5; }
+  .ev-badge  { font-size: 11px; color: var(--muted); }
+  .ev-pos    { color: var(--green); }
+  .ev-neg    { color: var(--red); }
+  .odds-text { font-size: 11px; color: var(--muted); }
+  .lineup-tag { font-size: 10px; color: var(--yellow); }
+
+  /* ── Expanded detail ── */
+  .leg-detail {
+    display: none;
+    grid-column: 1 / -1;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+    margin-top: 8px;
+    font-size: 12px;
+    color: var(--muted);
+    display: none;
+  }
+  .leg-card.expanded .leg-detail { display: grid; }
+  .detail-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px 16px;
+  }
+  .detail-row { display: flex; flex-direction: column; gap: 2px; }
+  .detail-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .detail-value { color: var(--text); font-weight: 600; font-size: 13px; }
+
+  /* ── Empty / loading ── */
+  .center-msg {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 60px 24px;
+    gap: 12px;
+    color: var(--muted);
+    font-size: 14px;
+  }
+  .spinner {
+    width: 32px; height: 32px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<!-- ── Auth screen ── -->
+<div id="auth-screen">
+  <h1>⚾ MLB Parlay Agent</h1>
+  <p>Enter your access password to view today's legs.</p>
+  <input id="pw-input" type="password" placeholder="Password" autocomplete="current-password">
+  <button id="auth-btn">Access Dashboard</button>
+  <div id="auth-error">Incorrect password. Try again.</div>
+</div>
+
+<!-- ── Main app ── -->
+<div id="app">
+  <header>
+    <div class="header-row">
+      <div>
+        <div class="header-title">⚾ Parlay Legs</div>
+        <div class="header-date" id="header-date"></div>
+      </div>
+      <button id="refresh-btn">Refresh</button>
+    </div>
+  </header>
+
+  <div class="filters" id="stat-filters">
+    <div class="filter-chip active" data-stat="all">All</div>
+    <div class="filter-chip" data-stat="hits">Hits</div>
+    <div class="filter-chip" data-stat="totalBases">Total Bases</div>
+    <div class="filter-chip" data-stat="rbi">RBI</div>
+    <div class="filter-chip" data-stat="homeRuns">HRs</div>
+    <div class="filter-chip" data-stat="strikeouts">Ks</div>
+    <div class="filter-chip" data-stat="stolenBases">SBs</div>
+    <div class="filter-chip" data-stat="walks">Walks</div>
+    <div class="filter-chip" data-stat="runsScored">Runs</div>
+    <div class="filter-chip" data-stat="inningsPitched">IPs</div>
+  </div>
+
+  <div class="sort-bar">
+    <span>Sort:</span>
+    <button class="sort-btn active" data-sort="coverage">Coverage</button>
+    <button class="sort-btn" data-sort="ev">EV</button>
+    <button class="sort-btn" data-sort="player">Player</button>
+    <button id="toggle-unders">Overs only</button>
+  </div>
+
+  <div class="summary" id="summary-bar">
+    <div>Legs: <span id="leg-count">—</span></div>
+    <div>Parlay: <span id="parlay-count">—</span></div>
+    <div>Avg cov: <span id="avg-cov">—</span></div>
+  </div>
+
+  <div id="legs-list">
+    <div class="center-msg">
+      <div class="spinner"></div>
+      <div>Loading legs…</div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── State ────────────────────────────────────────────────────────────────────
+let password = '';
+let allLegs = [];
+let activeStat = 'all';
+let sortKey = 'coverage';
+let showUnders = true;
+
+// ── Auth ─────────────────────────────────────────────────────────────────────
+function tryAuth() {
+  const pw = document.getElementById('pw-input').value.trim();
+  if (!pw) return;
+  password = pw;
+  fetchLegs().then(ok => {
+    if (ok) {
+      document.getElementById('auth-screen').style.display = 'none';
+      document.getElementById('app').style.display = 'block';
+    } else {
+      password = '';
+      document.getElementById('auth-error').style.display = 'block';
+    }
+  });
+}
+
+document.getElementById('auth-btn').addEventListener('click', tryAuth);
+document.getElementById('pw-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') tryAuth();
+});
+
+// ── Data fetching ─────────────────────────────────────────────────────────────
+async function fetchLegs() {
+  try {
+    const res = await fetch(`/api/legs?password=${encodeURIComponent(password)}`);
+    if (res.status === 401) return false;
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    allLegs = await res.json();
+    render();
+    return true;
+  } catch (err) {
+    showError(err.message);
+    return true; // auth was ok, just a fetch error
+  }
+}
+
+document.getElementById('refresh-btn').addEventListener('click', () => {
+  document.getElementById('legs-list').innerHTML =
+    '<div class="center-msg"><div class="spinner"></div><div>Refreshing…</div></div>';
+  fetchLegs();
+});
+
+// ── Filters ───────────────────────────────────────────────────────────────────
+document.getElementById('stat-filters').addEventListener('click', e => {
+  const chip = e.target.closest('.filter-chip');
+  if (!chip) return;
+  document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+  chip.classList.add('active');
+  activeStat = chip.dataset.stat;
+  render();
+});
+
+document.querySelectorAll('.sort-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.sort-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    sortKey = btn.dataset.sort;
+    render();
+  });
+});
+
+const toggleBtn = document.getElementById('toggle-unders');
+toggleBtn.addEventListener('click', () => {
+  showUnders = !showUnders;
+  toggleBtn.textContent = showUnders ? 'Overs only' : 'Show unders';
+  toggleBtn.classList.toggle('on', !showUnders);
+  render();
+});
+
+// ── Rendering ─────────────────────────────────────────────────────────────────
+function covClass(pct) {
+  if (pct === null || pct === undefined) return 'cov-low';
+  if (pct >= 0.65) return 'cov-high';
+  if (pct >= 0.52) return 'cov-mid';
+  return 'cov-low';
+}
+
+function fmtPct(val) {
+  if (val === null || val === undefined) return '—';
+  return (val * 100).toFixed(0) + '%';
+}
+
+function fmtEv(val) {
+  if (val === null || val === undefined) return '—';
+  const s = (val >= 0 ? '+' : '') + (val * 100).toFixed(1) + '%';
+  return s;
+}
+
+function fmtLine(line, direction) {
+  if (line === null || line === undefined) return '—';
+  const dir = direction === 'under' ? 'U' : 'O';
+  return `${dir} ${line}`;
+}
+
+function statLabel(stat) {
+  const map = {
+    hits: 'Hits', totalBases: 'Total Bases', rbi: 'RBI',
+    homeRuns: 'Home Runs', stolenBases: 'SB', walks: 'Walks',
+    runsScored: 'Runs', strikeouts: 'Strikeouts',
+    inningsPitched: 'IP', hitsAllowed: 'Hits Allowed', earnedRuns: 'ER',
+  };
+  return map[stat] || stat;
+}
+
+function render() {
+  const today = new Date().toLocaleDateString('en-US', {weekday:'short', month:'short', day:'numeric'});
+  document.getElementById('header-date').textContent = today;
+
+  let legs = allLegs.filter(l => {
+    if (activeStat !== 'all' && l.stat !== activeStat) return false;
+    if (!showUnders && l.direction === 'under') return false;
+    return true;
+  });
+
+  legs = legs.slice().sort((a, b) => {
+    if (sortKey === 'coverage') return (b.coverage_pct || 0) - (a.coverage_pct || 0);
+    if (sortKey === 'ev') return (b.ev_per_unit || -99) - (a.ev_per_unit || -99);
+    if (sortKey === 'player') return (a.player_name || '').localeCompare(b.player_name || '');
+    return 0;
+  });
+
+  const parlayLegs = legs.filter(l => l.in_parlay);
+  const avgCov = legs.length
+    ? legs.reduce((s, l) => s + (l.coverage_pct || 0), 0) / legs.length
+    : 0;
+
+  document.getElementById('leg-count').textContent = legs.length;
+  document.getElementById('parlay-count').textContent = parlayLegs.length;
+  document.getElementById('avg-cov').textContent = fmtPct(avgCov);
+
+  if (!legs.length) {
+    document.getElementById('legs-list').innerHTML =
+      '<div class="center-msg"><div>No legs match the current filter.</div></div>';
+    return;
+  }
+
+  const html = legs.map(leg => {
+    const covCls = covClass(leg.coverage_pct);
+    const evCls  = (leg.ev_per_unit || 0) >= 0 ? 'ev-pos' : 'ev-neg';
+    const inParlay = leg.in_parlay ? 'in-parlay' : '';
+    const lineupPending = !leg.lineup_confirmed ? 'lineup-pending' : '';
+    const dirCls = leg.direction === 'under' ? 'direction-under' : 'direction-over';
+
+    return `
+    <div class="leg-card ${inParlay} ${lineupPending}" data-id="${leg.id}" onclick="toggleCard(this)">
+      <div class="leg-player">${leg.player_name || '—'}</div>
+      <div class="leg-matchup">${leg.team || '—'} vs ${leg.opponent || '—'}</div>
+      <div class="leg-prop">
+        <span class="stat-name">${statLabel(leg.stat)}</span>
+        &nbsp;
+        <span class="${dirCls}">${fmtLine(leg.line, leg.direction)}</span>
+        ${leg.odds ? `<span style="color:var(--muted)"> (${leg.odds})</span>` : ''}
+      </div>
+
+      <div class="leg-scores">
+        <div class="coverage-badge ${covCls}">${fmtPct(leg.coverage_pct)}</div>
+        <div class="ev-badge ${evCls}">EV ${fmtEv(leg.ev_per_unit)}</div>
+        ${!leg.lineup_confirmed ? '<div class="lineup-tag">lineup pending</div>' : ''}
+        ${leg.in_parlay ? '<div style="font-size:10px;color:var(--green)">IN PARLAY</div>' : ''}
+      </div>
+
+      <div class="leg-detail">
+        <div class="detail-grid">
+          <div class="detail-row">
+            <div class="detail-label">P(Over)</div>
+            <div class="detail-value">${fmtPct(leg.p_over)}</div>
+          </div>
+          <div class="detail-row">
+            <div class="detail-label">Trend Score</div>
+            <div class="detail-value">${leg.trend_score !== null && leg.trend_score !== undefined ? leg.trend_score.toFixed(1) : '—'}</div>
+          </div>
+          <div class="detail-row">
+            <div class="detail-label">Opp Adj</div>
+            <div class="detail-value">${leg.opponent_adjustment !== null ? (leg.opponent_adjustment > 0 ? '+' : '') + (leg.opponent_adjustment * 100).toFixed(0) + '%' : '—'}</div>
+          </div>
+          <div class="detail-row">
+            <div class="detail-label">Position</div>
+            <div class="detail-value">${leg.position || '—'}</div>
+          </div>
+          <div class="detail-row">
+            <div class="detail-label">Result</div>
+            <div class="detail-value">${leg.result || 'pending'}</div>
+          </div>
+          <div class="detail-row">
+            <div class="detail-label">Actual</div>
+            <div class="detail-value">${leg.actual_value !== null && leg.actual_value !== undefined ? leg.actual_value : '—'}</div>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+
+  document.getElementById('legs-list').innerHTML = html;
+}
+
+function toggleCard(card) {
+  card.classList.toggle('expanded');
+  const detail = card.querySelector('.leg-detail');
+  if (detail) detail.style.display = card.classList.contains('expanded') ? 'grid' : 'none';
+}
+
+function showError(msg) {
+  document.getElementById('legs-list').innerHTML =
+    `<div class="center-msg"><div style="color:var(--red)">${msg}</div></div>`;
+}
+
+// Auto-refresh every 5 minutes while page is open
+setInterval(() => { if (password) fetchLegs(); }, 5 * 60 * 1000);
+</script>
+</body>
+</html>

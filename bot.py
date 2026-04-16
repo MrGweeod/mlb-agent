@@ -45,6 +45,8 @@ from src.bot.formatter import (
     format_status_embed,
     format_calibration_embed,
 )
+from src.web.server import start_server
+from src.pipelines.lineup_poller import poll_and_refresh
 
 load_dotenv()
 
@@ -80,14 +82,16 @@ class MLBBot(discord.Client):
 
     async def setup_hook(self):
         """
-        Sync slash commands to the guild on startup.
+        Sync slash commands to the guild and start the web server on startup.
 
         Guild-scoped syncs take effect immediately (vs global syncs which
         can take up to an hour), so this is preferred for local development.
+        The web server shares this asyncio event loop with the bot.
         """
         self.tree.copy_global_to(guild=GUILD)
         await self.tree.sync(guild=GUILD)
         print(f"Slash commands synced to guild {GUILD_ID}")
+        self._web_runner = await start_server()
 
     async def on_ready(self):
         """Log a confirmation message and start scheduled tasks when bot connects."""
@@ -98,6 +102,9 @@ class MLBBot(discord.Client):
         if not scheduled_resolve.is_running():
             scheduled_resolve.start()
             print("Scheduled resolve+run started (9:00am ET daily: resolve then pipeline)")
+        if not lineup_poll.is_running():
+            lineup_poll.start()
+            print("Lineup poller started (every 30min, 6:00–8:00pm ET)")
 
 
 client = MLBBot()
@@ -378,6 +385,36 @@ async def scheduled_resolve():
 async def scheduled_resolve_error(exception: Exception):
     """Log unhandled exceptions from scheduled_resolve to stdout."""
     print(f"[scheduler] scheduled_resolve unhandled error: {exception}")
+
+
+# ── Lineup poller ─────────────────────────────────────────────────────────────
+
+@tasks.loop(minutes=30)
+async def lineup_poll():
+    """
+    Every 30 minutes, check if today's pending legs have confirmed lineups and
+    re-score them. Only active between 6:00 PM and 8:00 PM ET to avoid redundant
+    polling outside the window when lineups are actually posted.
+
+    DST-aware: ZoneInfo("America/New_York") handles the EST/EDT switch.
+    """
+    from datetime import datetime
+    now_et = datetime.now(ET)
+    if not (18 <= now_et.hour < 20):
+        return  # outside the 6–8 PM ET window — do nothing
+
+    print("[lineup_poll] polling lineup confirmations...")
+    try:
+        updated = await client.loop.run_in_executor(None, poll_and_refresh)
+        print(f"[lineup_poll] {updated} leg(s) updated")
+    except Exception as exc:
+        print(f"[lineup_poll] error: {exc}")
+
+
+@lineup_poll.error
+async def lineup_poll_error(exception: Exception):
+    """Log unhandled exceptions from lineup_poll to stdout."""
+    print(f"[lineup_poll] unhandled error: {exception}")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

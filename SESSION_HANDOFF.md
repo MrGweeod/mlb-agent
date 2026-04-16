@@ -1,5 +1,5 @@
 # MLB Parlay Agent — Session Handoff
-*April 16, 2026 — Phase 2 complete*
+*April 16, 2026 — Phase 2 complete + lineup poller, web server, mobile app*
 
 ---
 
@@ -71,7 +71,7 @@ Build order per blueprint Section 10:
 | 6 | `src/engine/leg_scorer.py` | **Done** | PA stability replaces teammate injury as Factor 5; recency-weighted coverage from MLB oldest-first log |
 | 7 | `src/apis/rotowire.py` | **Done** | Context-only scraper; `get_lineup_notes` + `get_injury_notes`; never gates legs; returns [] on failure |
 
-**Next session starts at:** `main.py` (Phase 3) — feeds validated, pre-main fixes complete
+**Next session starts at:** `main.py` (Phase 3) — feeds validated, pre-main fixes complete, lineup poller + web server running
 
 ### Pre-main.py Bug Fixes (April 16, session 3)
 
@@ -95,6 +95,66 @@ Positive = bettor-friendly price; negative = book-favourite. Returns 0.0 on miss
 Result: 813 → 1 transaction on 2026-04-16 (only Bido DFA remained — correct).
 
 **main.py is now unblocked.**
+
+---
+
+## Phase A/B/C — Lineup Poller, Web Server, Mobile App (April 16, session 4)
+
+### Phase A — Background Lineup Poller (`src/pipelines/lineup_poller.py`)
+
+New module. Public API: `poll_and_refresh(season=None) -> int`.
+
+**How it works:**
+1. Calls `_ensure_schema()` — `ALTER TABLE ADD COLUMN IF NOT EXISTS` for 5 new columns on `mlb_scored_legs`: `game_pk INTEGER`, `player_id TEXT`, `opposing_pitcher_id TEXT`, `lineup_confirmed BOOLEAN DEFAULT FALSE`, `last_updated TEXT`.
+2. Fetches today's unconfirmed legs (`get_pending_lineup_legs`) filtered to `game_pk IS NOT NULL`.
+3. Groups by `game_pk`, calls `get_lineup(game_pk)` once per game.
+4. For confirmed lineups: re-calculates coverage with `calculate_coverage()`, calls `score_leg()` for new composite, updates DB via `update_leg_after_rescore()`.
+5. Players not found in the confirmed batting order are marked confirmed (scratched/DH exclusion).
+6. Returns count of legs updated.
+
+**Bot wiring:** `lineup_poll` task runs every 30 minutes. Inside the task, a `datetime.now(ET).hour` guard restricts execution to 18–19 (6:00–8:00 PM ET). Uses `run_in_executor(None, poll_and_refresh)` since `poll_and_refresh` is synchronous.
+
+**DB changes in `src/utils/db.py`:**
+- `mlb_scored_legs` CREATE TABLE now includes the 5 new columns.
+- `log_scored_legs()` INSERT now writes `game_pk`, `player_id`, `opposing_pitcher_id` from the leg dict (all optional, default None).
+- New helpers: `get_pending_lineup_legs()`, `update_leg_after_rescore()`, `mark_lineup_confirmed()`, `get_scored_legs()`.
+
+### Phase B — Web Server (`src/web/server.py`)
+
+aiohttp server started in `MLBBot.setup_hook()` via `await start_server()`. Shares the discord.py asyncio event loop. Listens on `PORT` env var (default 8080 — Railway sets this automatically).
+
+**Routes:**
+| Route | Auth | Returns |
+|-------|------|---------|
+| `GET /` | None | `src/web/static/index.html` |
+| `GET /api/legs` | Required | JSON array of today's scored legs |
+| `GET /api/health` | None | `{"status":"ok","date":"YYYY-MM-DD"}` |
+
+**Auth:** `WEB_APP_PASSWORD` checked against `?password=` query param or `Authorization: Bearer` header. If `WEB_APP_PASSWORD` is unset, all requests pass (open access). Default in `.env`: `changeme` — change before deploying.
+
+**`requirements.txt`:** `aiohttp==3.13.5` added.
+
+### Phase C — Mobile Web App (`src/web/static/index.html`)
+
+Self-contained single-file HTML/CSS/JS. No external dependencies.
+
+**Features:**
+- Password entry screen (calls `/api/legs?password=<pw>` to verify)
+- Stat filter chips (All / Hits / Total Bases / RBI / HRs / Ks / SBs / Walks / Runs / IPs)
+- Sort by Coverage, EV, or Player name
+- Toggle to hide under-direction props
+- Summary bar: total legs, parlay legs, average coverage
+- Card view: player, matchup, prop (stat+line+odds), coverage badge (green/yellow/red), EV, lineup-pending tag, in-parlay tag
+- Tap to expand detail: P(Over), trend score, opponent adj, position, result, actual value
+- Auto-refresh every 5 minutes
+- Mobile-first dark theme
+
+**Verified live (2026-04-16):**
+- `/api/health` → `{"status":"ok","date":"2026-04-16"}` ✓
+- `GET /` → serves index.html (title match confirmed) ✓
+- `GET /api/legs?password=changeme` → JSON array (1 existing row) ✓
+- `Authorization: Bearer changeme` header → JSON array ✓
+- No-auth → 401 JSON ✓
 
 ---
 
