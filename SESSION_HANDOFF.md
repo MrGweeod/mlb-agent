@@ -1,5 +1,5 @@
 # MLB Parlay Agent — Session Handoff
-*April 15, 2026 — Phase 2 Priorities 3–6 complete*
+*April 16, 2026 — Phase 2 complete*
 
 ---
 
@@ -69,9 +69,9 @@ Build order per blueprint Section 10:
 | 4 | `src/apis/matchup.py` | **Done** | Pitcher ERA/K9/WHIP → [-1,+1] batter adj; pitcher_profiles DB cache (24h TTL) |
 | 5 | `src/pipelines/enrich_legs.py` | **Done** | Prop routing per §5.2: hits→K/9, TB/RBI→ERA, walks→WHIP, SB→0; takes pitcher_id_map + opponent_map from caller |
 | 6 | `src/engine/leg_scorer.py` | **Done** | PA stability replaces teammate injury as Factor 5; recency-weighted coverage from MLB oldest-first log |
-| 7 | `src/apis/rotowire.py` | Pending | Adapt — update target URLs to MLB lineup/injury pages |
+| 7 | `src/apis/rotowire.py` | **Done** | Context-only scraper; `get_lineup_notes` + `get_injury_notes`; never gates legs; returns [] on failure |
 
-**Next session starts at:** `src/apis/rotowire.py` (Priority 7), then `main.py` (Phase 3)
+**Next session starts at:** `main.py` (Phase 3)
 
 ---
 
@@ -158,12 +158,21 @@ Composite weights:
 - Pitcher props fall back to `coverage_pct / 100` for recency-weighted coverage (pitcher prop coverage TBD).
 - `team_to_blocked` parameter is accepted for API compatibility with parlay_builder but currently unused in scoring.
 
-### parlay_builder.py — Cleanup needed before first run
+### rotowire.py
 
-Still contains NBA-era imports in the legacy `build_parlays()` function:
-- `from src.engine.coverage import get_game_log, get_player_id, calc_stat_value`
+- URLs: `daily-lineups.php` and `injury-report.php` (baseball).
+- `_TextExtractor(HTMLParser)` strips script/style/noscript blocks; returns visible text chunks.
+- `date` parameter accepted for API compatibility; RotoWire URLs don't take a date param (always current day).
+- No BeautifulSoup dependency — uses stdlib `html.parser` only.
+- Both functions return `[]` silently on network errors, HTTP errors, or parse failures (logged at DEBUG).
+- Verified live: both pages return nav/content text (~hundreds of chunks) — first 5 lines are nav items.
 
-These will raise ImportError at runtime. The hybrid builder `build_hybrid_parlays()` does NOT use them — only the legacy `build_parlays()` does. Fix: either delete `build_parlays()` and its helpers (`best_player_legs`, `combined_hit_rate`) entirely, or replace the nba imports with MLB equivalents. Do this in the same PR as main.py.
+### parlay_builder.py — Cleaned up (April 16)
+
+Legacy `build_parlays()` and its helpers (`best_player_legs`, `combined_hit_rate`,
+`validate_and_trim`, `_compatible_subset`) removed. NBA-era import
+`from src.engine.coverage import get_game_log, get_player_id, calc_stat_value` removed.
+`build_hybrid_parlays()` is the only builder — file is importable without errors.
 
 ---
 
@@ -242,7 +251,7 @@ Tier 1: 10+ games  |  Tier 2: 5–9  |  Tier 3: 2–4  |  Tier 4: ≤1 (no parla
 - **Start next session by opening this file** — read the Phase 2 progress table and design notes
 - **Next up**: `src/apis/rotowire.py` (Priority 7) then Phase 3 (`main.py`)
 - venv is at `.venv/` — activate with `source .venv/bin/activate` or prefix `.venv/bin/python`
-- numpy was added to `.venv` this session; all other deps (psycopg2, anthropic, discord.py) are now installed
+- `requirements.txt` created (pinned versions from `.venv`); numpy is listed — Railway will install it
 - Commit at the end of each logical unit; push before ending a session
 - Query `mlb_scored_legs` after each pipeline run to verify pool composition
 - All DB calls go through `get_conn()` which retries on OperationalError (3× with 2s sleep)

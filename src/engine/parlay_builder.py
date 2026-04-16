@@ -2,7 +2,6 @@ import time
 from itertools import combinations
 from collections import defaultdict, Counter
 from src.utils.odds_math import american_to_decimal
-from src.engine.coverage import get_game_log, get_player_id, calc_stat_value
 from src.engine.leg_scorer import score_legs_composite
 
 MAX_LEG_ODDS = -200
@@ -42,109 +41,6 @@ def parlay_american_odds(legs):
 
 def avg_coverage(legs):
     return round(sum(l["coverage_pct"] for l in legs) / len(legs), 1)
-
-def combined_hit_rate(games, legs):
-    if not games:
-        return 0.0
-    hit = 0
-    for game in games:
-        if all(
-            calc_stat_value(game, leg["stat"]) is not None and
-            calc_stat_value(game, leg["stat"]) > leg["best_line"]
-            for leg in legs
-        ):
-            hit += 1
-    return round((hit / len(games)) * 100, 1)
-
-def _compatible_subset(legs: list) -> list:
-    """Filter a list of same-player legs to a mutually compatible subset.
-    Greedily keeps the highest-coverage leg and drops anything that overlaps with it."""
-    if len(legs) <= 1:
-        return legs
-    # Sort by coverage descending so we keep the best legs first
-    sorted_legs = sorted(legs, key=lambda x: x["coverage_pct"], reverse=True)
-    kept = [sorted_legs[0]]
-    for candidate in sorted_legs[1:]:
-        if all(not stats_overlap(candidate["stat"], k["stat"]) for k in kept):
-            kept.append(candidate)
-    return kept
-
-def best_player_legs(pid, player_legs):
-    # First remove any stat-overlapping legs — sportsbook won't allow them together
-    player_legs = _compatible_subset(player_legs)
-    if len(player_legs) == 1:
-        return player_legs
-
-    nba_id = get_player_id(pid)
-    if not nba_id:
-        return [max(player_legs, key=lambda x: x["coverage_pct"])]
-    games = get_game_log(nba_id)
-    if not games:
-        return [max(player_legs, key=lambda x: x["coverage_pct"])]
-
-    rate_all = combined_hit_rate(games, player_legs)
-    if rate_all >= COMBINED_THRESHOLD:
-        return player_legs
-    if len(player_legs) >= 3:
-        best_pair = None
-        best_rate = 0.0
-        for pair in combinations(player_legs, 2):
-            rate = combined_hit_rate(games, list(pair))
-            if rate >= COMBINED_THRESHOLD and rate > best_rate:
-                best_rate = rate
-                best_pair = list(pair)
-        if best_pair:
-            return best_pair
-    return [max(player_legs, key=lambda x: x["coverage_pct"])]
-
-def validate_and_trim(legs):
-    by_player = defaultdict(list)
-    for leg in legs:
-        pid = leg.get("player_id")
-        if pid:
-            by_player[pid].append(leg)
-    final_legs = []
-    for pid, player_legs in by_player.items():
-        final_legs.extend(best_player_legs(pid, player_legs))
-    return final_legs
-
-def build_parlays(qualifying_legs):
-    eligible = [l for l in qualifying_legs if is_within_odds_cap(l["best_odds"])]
-    eligible.sort(key=lambda x: x["coverage_pct"], reverse=True)
-    if len(eligible) < 2:
-        return []
-    valid_parlays = []
-
-    def build(current_legs, remaining):
-        if len(current_legs) >= 2:
-            trimmed = validate_and_trim(current_legs)
-            if len(trimmed) >= 2:
-                odds = parlay_american_odds(trimmed)
-                if MIN_PARLAY_ODDS <= odds <= MAX_PARLAY_ODDS:
-                    valid_parlays.append({
-                        "legs": trimmed,
-                        "parlay_odds": f"+{odds}",
-                        "num_legs": len(trimmed),
-                        "avg_coverage": avg_coverage(trimmed),
-                        "confidence": round(
-                            (avg_coverage(trimmed) / 100) ** len(trimmed) * 100, 2
-                        )
-                    })
-        if len(current_legs) >= MAX_LEGS:
-            return
-        for i, leg in enumerate(remaining):
-            build(current_legs + [leg], remaining[i+1:])
-
-    build([], eligible[:6])
-    seen = set()
-    unique_parlays = []
-    for p in valid_parlays:
-        key = frozenset(l["odd_id"] for l in p["legs"])
-        if key not in seen:
-            seen.add(key)
-            unique_parlays.append(p)
-    unique_parlays.sort(key=lambda x: (-x["avg_coverage"], -x["confidence"]))
-    return unique_parlays[:TOP_PARLAYS]
 
 # ── Hybrid Parlay Builder ─────────────────────────────────────────────────────
 

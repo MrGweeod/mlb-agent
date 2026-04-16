@@ -1,0 +1,7 @@
+anthropic==0.95.0
+discord.py==2.7.1
+MLB-StatsAPI==1.9.0
+numpy==2.2.6
+psycopg2-binary==2.9.11
+python-dotenv==1.2.2
+requests==2.33.1
