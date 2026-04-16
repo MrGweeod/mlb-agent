@@ -71,7 +71,7 @@ Build order per blueprint Section 10:
 | 6 | `src/engine/leg_scorer.py` | **Done** | PA stability replaces teammate injury as Factor 5; recency-weighted coverage from MLB oldest-first log |
 | 7 | `src/apis/rotowire.py` | **Done** | Context-only scraper; `get_lineup_notes` + `get_injury_notes`; never gates legs; returns [] on failure |
 
-**Next session starts at:** `main.py` (Phase 3)
+**Next session starts at:** `main.py` (Phase 3) — all feeds validated, see WORKING_NOTES.md
 
 ---
 
@@ -199,15 +199,41 @@ Legacy `build_parlays()` and its helpers (`best_player_legs`, `combined_hit_rate
 
 ## Open Validation Questions (Blueprint Section 16)
 
-These must be answered before Phase 2 scoring logic is finalised:
+Tested live 2026-04-16 via `validate_feeds.py`. See WORKING_NOTES.md for full output.
 
-| Question | Why it matters |
-|----------|---------------|
-| Does SGO return DraftKings MLB props with `fairOdds` populated? | If missing, EV factor weight drops to 0 |
-| Are pitcher prop markets available on DraftKings in MA? | If not, exclude pitcher prop category from pipeline |
-| Typical lineup card lead time before first pitch? | Determines whether 5:30PM run catches all confirmations |
-| Does MLB-StatsAPI provide real-time box scores same day? | Outcome resolver may need to run next morning |
-| Are alt lines available for MLB pitcher props on SGO? | Affects swing leg pool diversity |
+| Question | Answer |
+|----------|--------|
+| Does SGO return DraftKings MLB props with `fairOdds` populated? | **YES** — `fairOverUnder` populated 20/20 in first 20 props. EV factor stays at full weight. |
+| Are pitcher prop markets available on DraftKings in MA? | Unknown — DK `available=false` for all props tested (markets post closer to first pitch). Re-check at 5–6PM ET. |
+| Typical lineup card lead time before first pitch? | Unknown — Test 4 (Nationals @ Pirates, 4:35PM ET) showed batting orders empty at test time (~11AM). Check again post-noon. |
+| Does MLB-StatsAPI provide real-time box scores same day? | Not tested this session — games hadn't started. |
+| Are alt lines available for MLB pitcher props on SGO? | **Likely no / rare** — 0 altLines on DK for tested prop. DK `available=false` may be the cause; recheck post-lineup-post. |
+
+### SGO Structure Notes (from live test)
+
+- `fairOverUnder` (not `fairOdds`) is the fair-line field on each market — `prop.get("fairOverUnder")`
+- `bookOdds` and `fairOdds` also exist at the top level but are string formatted (`"+134"`)
+- `byBookmaker.draftkings.odds` is the single book-odds field — no separate `overOdds`/`underOdds`
+- `statID` is the prop category field (e.g., `"batting_hits+runs+rbi"`, `"hitting_hits"`) — used for prop routing
+- `oddID` format: `"{statID}-{PLAYER_NAME}_{num}_MLB-game-ou-{direction}"` — note the numeric suffix before `_MLB`
+- SGO surfaces combination props (hits+runs+rbi) as a single market — may need filtering in `get_player_props()`
+
+### Transaction Wire Filter Bug (discovered Test 5)
+
+`get_transactions()` returned **813 entries** on 2026-04-16, almost all `typeCode='NUM'`
+(uniform number changes) and foreign-league `SFA`/`ASG`/`SGN` transactions.
+
+Root cause: `toTeam` is absent (`None`) for many foreign-league entries, so
+`toTeam.sport.id in (1, None)` passes them through. Fix in `main.py` before first run:
+filter to `typeCode in ("SC", "DES", "CU", "OU")` before calling `is_il_placement()`.
+True IL placements are `typeCode="SC"` only — the current `is_il_placement()` checks this
+internally, but the volume of noise makes logging unusable. Add pre-filter at call site.
+
+### Player ID Correction
+
+MLB person ID `660670` = **Ronald Acuña Jr.** (not Juan Soto as noted in handoff).
+Juan Soto's correct ID = **665742**. Test 2 field-structure validation is still valid
+(all stat fields confirmed present); the wrong player was used for the test.
 
 ---
 
