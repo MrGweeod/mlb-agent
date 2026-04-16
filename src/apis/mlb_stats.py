@@ -325,6 +325,17 @@ def get_lineup(game_pk: int) -> dict:
 
 # ── 7. get_transactions ──────────────────────────────────────────────────────
 
+RELEVANT_TYPE_CODES = {"SC", "DES", "CU", "OU"}
+"""
+Transaction typeCodes relevant to the injury/roster pipeline:
+  SC  — Status Change (IL placements, reinstatements, 60-day moves)
+  DES — Designated for Assignment
+  CU  — Called Up from minors
+  OU  — Optioned to minors
+All other codes (NUM, ASG, SFA, SGN, etc.) are noise for injury tracking.
+"""
+
+
 def get_transactions(date: str) -> list[dict]:
     """
     Return MLB Transaction Wire entries for a given date.
@@ -363,13 +374,14 @@ def get_transactions(date: str) -> list[dict]:
         r.raise_for_status()
         all_txns = r.json().get("transactions", [])
 
-        # Keep only MLB-level transactions. The description always starts with
-        # the team name for MLB transactions; minor league ones name the affiliate.
-        # We filter by checking if toTeam.sport.id == 1 (MLB) when available,
-        # otherwise keep all and let the caller filter by description.
+        # Keep only roster-relevant MLB-level transactions.
+        # typeCode whitelist eliminates number changes, foreign-league moves, and
+        # minor-league assignments that flooded the result set (813 entries on
+        # 2026-04-16 due to toTeam=None passing the old sport.id check).
         mlb_txns = [
             t for t in all_txns
-            if t.get("toTeam", {}).get("sport", {}).get("id") in (1, None)
+            if t.get("typeCode") in RELEVANT_TYPE_CODES
+            and t.get("toTeam", {}).get("sport", {}).get("id") in (1, None)
         ]
 
         _set(key, mlb_txns)

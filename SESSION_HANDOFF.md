@@ -71,7 +71,30 @@ Build order per blueprint Section 10:
 | 6 | `src/engine/leg_scorer.py` | **Done** | PA stability replaces teammate injury as Factor 5; recency-weighted coverage from MLB oldest-first log |
 | 7 | `src/apis/rotowire.py` | **Done** | Context-only scraper; `get_lineup_notes` + `get_injury_notes`; never gates legs; returns [] on failure |
 
-**Next session starts at:** `main.py` (Phase 3) — all feeds validated, see WORKING_NOTES.md
+**Next session starts at:** `main.py` (Phase 3) — feeds validated, pre-main fixes complete
+
+### Pre-main.py Bug Fixes (April 16, session 3)
+
+| Fix | File | Status |
+|-----|------|--------|
+| 1 — SGO stat field normalization | `src/apis/sportsgameodds.py` | **Done** |
+| 2 — `ev_per_unit` on every prop dict | `src/apis/sportsgameodds.py` | **Done** |
+| 3 — Transaction filter noise (813→1) | `src/apis/mlb_stats.py` | **Done** |
+
+**Fix 1**: Added `_SGO_STAT_ID_MAP` after `PROP_STATS`. Maps SGO statID strings
+(`"hitting_hits"`, `"pitching_strikeouts"`, etc.) to internal pipeline keys (`"hits"`,
+`"strikeouts"`, etc.). Unknown statIDs pass through unchanged and print a warning line.
+Combination props (`"batting_hits+runs+rbi"`) intentionally unmapped — will appear in logs.
+
+**Fix 2**: Added `_compute_ev(fair_line, standard_odds)` helper. `ev_per_unit` now set on
+every prop dict in `get_player_props()`. Formula: `0.50 - implied_probability(book_odds)`.
+Positive = bettor-friendly price; negative = book-favourite. Returns 0.0 on missing inputs.
+
+**Fix 3**: Added `RELEVANT_TYPE_CODES = {"SC", "DES", "CU", "OU"}` module constant in
+`mlb_stats.py`. Filter now requires BOTH typeCode in whitelist AND sport.id check.
+Result: 813 → 1 transaction on 2026-04-16 (only Bido DFA remained — correct).
+
+**main.py is now unblocked.**
 
 ---
 

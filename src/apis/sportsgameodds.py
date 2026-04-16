@@ -29,6 +29,55 @@ PROP_STATS = [
     'earnedRuns',
 ]
 
+# Maps SGO statID strings to internal pipeline stat keys.
+# Built from live validation — see WORKING_NOTES.md 2026-04-16.
+# Add entries here if new SGO statIDs appear in production logs.
+_SGO_STAT_ID_MAP: dict[str, str] = {
+    # Batter hitting props — "hitting_" prefix confirmed by live statID format
+    "hitting_hits":          "hits",
+    "hitting_totalBases":    "totalBases",
+    "hitting_rbi":           "rbi",
+    "hitting_homeRuns":      "homeRuns",
+    "hitting_stolenBases":   "stolenBases",
+    "hitting_baseOnBalls":   "walks",       # MLB API field name for walks
+    "hitting_walks":         "walks",       # alternate SGO naming
+    "hitting_runs":          "runsScored",  # MLB API field name
+    "hitting_runsScored":    "runsScored",  # alternate SGO naming
+    # Pitcher performance props — "pitching_" prefix
+    "pitching_strikeouts":     "strikeouts",
+    "pitching_inningsPitched": "inningsPitched",
+    "pitching_hitsAllowed":    "hitsAllowed",
+    "pitching_hits":           "hitsAllowed",  # alternate SGO naming for hits allowed
+    "pitching_earnedRuns":     "earnedRuns",
+    "pitching_runs":           "earnedRuns",   # alternate SGO naming
+    # Combination props (batting_ prefix, confirmed live: "batting_hits+runs+rbi")
+    # No single internal key — these pass through unchanged and are logged as unmapped.
+}
+
+
+def _compute_ev(fair_line: float | None, standard_odds: str | None) -> float:
+    """
+    Compute EV per unit from SGO fair line and DraftKings book odds.
+
+    fair_line is the SGO fairOverUnder — the line at which both sides
+    have equal expected value. When book odds are worse than fair odds,
+    EV is negative. When better, EV is positive.
+
+    Returns 0.0 when either input is missing or unparseable.
+    """
+    try:
+        if fair_line is None or standard_odds is None:
+            return 0.0
+        odds = int(str(standard_odds).replace("+", ""))
+        if odds < 0:
+            implied = abs(odds) / (abs(odds) + 100)
+        else:
+            implied = 100 / (odds + 100)
+        return round(0.50 - implied, 4)
+    except Exception:
+        return 0.0
+
+
 USAGE_WARN_PCT = 0.80  # warn at 80% of monthly quota
 
 
@@ -300,17 +349,25 @@ def get_player_props(game, include_unders=True):
                 if not all_lines:
                     continue
                 all_lines.sort(key=lambda x: x['line'])
-                props.append({
-                    'stat': prop.get('statID'),
+                raw_stat_id = prop.get('statID', '')
+                normalized_stat = _SGO_STAT_ID_MAP.get(raw_stat_id, raw_stat_id)
+                fair_line  = prop.get('fairOverUnder')
+                book_odds  = dk.get('odds')
+                leg_dict = {
+                    'stat': normalized_stat,
                     'player_id': prop.get('playerID'),
                     'player_name': prop.get('marketName', '').replace(' Over/Under', ''),
                     'standard_line': dk.get('overUnder'),
-                    'standard_odds': dk.get('odds'),
+                    'standard_odds': book_odds,
                     'all_lines': all_lines,
-                    'fair_line': prop.get('fairOverUnder'),
+                    'fair_line': fair_line,
+                    'ev_per_unit': _compute_ev(fair_line, book_odds),
                     'odd_id': prop.get('oddID'),
                     'direction': direction,
-                })
+                }
+                if leg_dict['stat'] not in PROP_STATS:
+                    print(f"  [SGO] unmapped statID: {raw_stat_id!r} → {leg_dict['stat']!r}")
+                props.append(leg_dict)
 
     # Cache the full alt-line ladder under a team-pair key so the Odds API
     # fallback adapter can merge these alt lines into its standard-line props
