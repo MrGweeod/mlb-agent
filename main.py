@@ -70,10 +70,10 @@ def _load_team_abbr_map() -> dict[int, str]:
     if _team_abbr_cache:
         return _team_abbr_cache
     try:
-        for t in statsapi.teams(sportId=1):
+        for t in statsapi.get("teams", {"sportId": 1}).get("teams", []):
             _team_abbr_cache[t["id"]] = t["abbreviation"]
     except Exception as e:
-        print(f"  [main] statsapi.teams() error: {e}")
+        print(f"  [main] statsapi.get(teams) error: {e}")
     return _team_abbr_cache
 
 
