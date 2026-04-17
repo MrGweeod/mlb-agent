@@ -44,6 +44,22 @@ def avg_coverage(legs):
 
 # ── Hybrid Parlay Builder ─────────────────────────────────────────────────────
 
+def _anchor_floor(stat: str) -> float:
+    """
+    Return the minimum coverage_pct for a leg to enter the anchor/connector pool.
+
+    Batter strikeout props use a higher floor (68%) because K-rate coverage is
+    more sensitive to pitcher matchup variance than other hitting stats.
+    All other hitting props use 62%.
+
+    Note: pitcher strikeout props are excluded upstream in main.py
+    (_PITCHER_POSITIONS filter) before reaching this builder.
+    """
+    if stat == "strikeouts":
+        return 68.0
+    return 62.0
+
+
 def _tier_params(num_games: int) -> dict | None:
     """
     Return constraint params for the hybrid builder based on today's slate size.
@@ -51,17 +67,21 @@ def _tier_params(num_games: int) -> dict | None:
     Larger slates have more legs to choose from, so we can afford strict filters.
     Smaller slates relax coverage floors to surface valid parlays on thin schedules.
 
+    anchor_min_cov (62.0) is the default hitting prop floor passed to pool
+    construction.  Per-stat floors are enforced via _anchor_floor() at the
+    point of pool filtering — batter strikeout props use 68.0 instead.
+
     Returns None for Tier 4 (≤1 game) — no point building parlays on a near-empty slate.
     """
     if num_games >= 10:
         # Tier 1 — full slate (MLB: 10+ games), strictest filters
-        return dict(anchor_min_cov=70.0, swing_min_cov=55.0, min_anchors=2, tier=1)
+        return dict(anchor_min_cov=62.0, swing_min_cov=55.0, min_anchors=2, tier=1)
     elif num_games >= 5:
         # Tier 2 — moderate slate, relaxed swing coverage floor
-        return dict(anchor_min_cov=70.0, swing_min_cov=45.0, min_anchors=2, tier=2)
+        return dict(anchor_min_cov=62.0, swing_min_cov=45.0, min_anchors=2, tier=2)
     elif num_games >= 2:
         # Tier 3 — thin slate, further relaxed to find any valid parlays
-        return dict(anchor_min_cov=70.0, swing_min_cov=40.0, min_anchors=2, tier=3)
+        return dict(anchor_min_cov=62.0, swing_min_cov=40.0, min_anchors=2, tier=3)
     else:
         # Tier 4 — 0 or 1 game, not enough to build a parlay
         return None
@@ -85,9 +105,9 @@ def build_hybrid_parlays(all_legs, raw_props=None, top_n=5, num_games=15, blocke
     both anchor and swing slots in the same parlay (deduplicated by odd_id).
 
     Thresholds scale with slate size via _tier_params():
-      Tier 1 (10+ games): anchor 70%, swing 55%
-      Tier 2 (5–9 games):  anchor 70%, swing 45%
-      Tier 3 (2–4 games):  anchor 70%, swing 40%
+      Tier 1 (10+ games): anchor 62% (strikeouts 68%), swing 55%
+      Tier 2 (5–9 games):  anchor 62% (strikeouts 68%), swing 45%
+      Tier 3 (2–4 games):  anchor 62% (strikeouts 68%), swing 40%
       Tier 4 (≤1 game):   returns [] immediately
 
     raw_props is accepted for backwards-compatibility but unused — both pools
@@ -104,7 +124,6 @@ def build_hybrid_parlays(all_legs, raw_props=None, top_n=5, num_games=15, blocke
     if params is None:
         return []
 
-    ANCHOR_MIN_COV    = params["anchor_min_cov"]
     SWING_MIN_COV     = params["swing_min_cov"]
     ANCHOR_HEAVY_MIN  = -1000  # heavy bucket lower bound
     ANCHOR_HEAVY_MAX  = -500   # heavy bucket upper bound (2–3 legs)
@@ -138,7 +157,7 @@ def build_hybrid_parlays(all_legs, raw_props=None, top_n=5, num_games=15, blocke
     all_anchors = [
         l for l in all_legs
         if l.get("best_odds")
-        and l.get("coverage_pct", 0) >= ANCHOR_MIN_COV
+        and l.get("coverage_pct", 0) >= _anchor_floor(l.get("stat", ""))
         and l.get("trend_pass", True)
         and ANCHOR_HEAVY_MIN <= _odds_int(l) <= ANCHOR_MID_MAX
     ]
@@ -157,7 +176,7 @@ def build_hybrid_parlays(all_legs, raw_props=None, top_n=5, num_games=15, blocke
     all_connectors = [
         l for l in all_legs
         if l.get("best_odds")
-        and l.get("coverage_pct", 0) >= ANCHOR_MIN_COV
+        and l.get("coverage_pct", 0) >= _anchor_floor(l.get("stat", ""))
         and l.get("trend_pass", True)
         and CONNECTOR_MIN_ODDS <= _odds_int(l) <= CONNECTOR_MAX_ODDS
     ]
