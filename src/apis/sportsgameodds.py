@@ -29,29 +29,32 @@ PROP_STATS = [
     'earnedRuns',
 ]
 
-# Maps SGO statID strings to internal pipeline stat keys.
-# Built from live validation — see WORKING_NOTES.md 2026-04-16.
+# Maps SGO statID strings (as they appear in the API's "statID" field and as
+# odd-key prefixes) to internal pipeline stat keys.
+# Live-validated 2026-04-17: SGO uses "batting_" prefix (not "hitting_").
 # Add entries here if new SGO statIDs appear in production logs.
 _SGO_STAT_ID_MAP: dict[str, str] = {
-    # Batter hitting props — "hitting_" prefix confirmed by live statID format
-    "hitting_hits":          "hits",
-    "hitting_totalBases":    "totalBases",
-    "hitting_rbi":           "rbi",
-    "hitting_homeRuns":      "homeRuns",
-    "hitting_stolenBases":   "stolenBases",
-    "hitting_baseOnBalls":   "walks",       # MLB API field name for walks
-    "hitting_walks":         "walks",       # alternate SGO naming
-    "hitting_runs":          "runsScored",  # MLB API field name
-    "hitting_runsScored":    "runsScored",  # alternate SGO naming
+    # Batter hitting props — "batting_" prefix (live API format)
+    "batting_hits":          "hits",
+    "batting_totalBases":    "totalBases",
+    "batting_RBI":           "rbi",         # SGO uses uppercase RBI
+    "batting_rbi":           "rbi",         # lowercase variant guard
+    "batting_homeRuns":      "homeRuns",
+    "batting_stolenBases":   "stolenBases",
+    "batting_basesOnBalls":  "walks",       # SGO field name for walks
+    "batting_walks":         "walks",       # alternate SGO naming
+    "batting_runs":          "runsScored",  # SGO field name for runs scored
+    "batting_runsScored":    "runsScored",  # alternate SGO naming
+    "batting_strikeouts":    "strikeouts",  # batter Ks
     # Pitcher performance props — "pitching_" prefix
     "pitching_strikeouts":     "strikeouts",
     "pitching_inningsPitched": "inningsPitched",
     "pitching_hitsAllowed":    "hitsAllowed",
-    "pitching_hits":           "hitsAllowed",  # alternate SGO naming for hits allowed
+    "pitching_hits":           "hitsAllowed",  # SGO alternate naming for hits allowed
     "pitching_earnedRuns":     "earnedRuns",
     "pitching_runs":           "earnedRuns",   # alternate SGO naming
-    # Combination props (batting_ prefix, confirmed live: "batting_hits+runs+rbi")
-    # No single internal key — these pass through unchanged and are logged as unmapped.
+    # Combination props — logged as unmapped, not used in pipeline
+    # e.g. "batting_hits+runs+rbi"
 }
 
 
@@ -323,10 +326,17 @@ def get_player_props(game, include_unders=True):
     props = []
     directions = [("over", "game-ou-over"), ("under", "game-ou-under")] if include_unders else [("over", "game-ou-over")]
     for stat in PROP_STATS:
+        # Derive the API key prefixes for this internal stat from _SGO_STAT_ID_MAP.
+        # e.g. 'hits' → ['batting_hits'], 'walks' → ['batting_basesOnBalls', 'batting_walks']
+        api_prefixes = [ak for ak, iv in _SGO_STAT_ID_MAP.items() if iv == stat]
+        if not api_prefixes:
+            continue
         for direction, key_fragment in directions:
             matches = [
                 v for k, v in odds.items()
-                if k.startswith(stat) and 'MLB' in k and key_fragment in k
+                if any(k.startswith(p) for p in api_prefixes)
+                and 'MLB' in k
+                and key_fragment in k
             ]
             for prop in matches:
                 dk = prop.get('byBookmaker', {}).get('draftkings', {})
