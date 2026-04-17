@@ -313,7 +313,7 @@ def _attach_trend_signals(legs: list[dict], season: int) -> None:
         if not game_log:
             continue
 
-        role = "anchor" if leg.get("coverage_pct", 0) >= 70.0 else "swing"
+        role = "anchor" if leg.get("coverage_pct", 0) >= 62.0 else "swing"
         signals = get_trend_signal(
             player_id=str(player_id),
             stat=stat,
