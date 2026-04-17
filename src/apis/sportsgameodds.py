@@ -74,6 +74,13 @@ _STAT_NAME_SUFFIX: dict[str, str] = {
     "inningsPitched": " Innings Pitched",
 }
 
+# Stat IDs that should be silently skipped — combination props and fantasy
+# score markets that the pipeline doesn't model.  Any statID containing
+# 'fantasyScore' or 'fantasy_score' is also skipped (substring check).
+_BLOCKED_STAT_IDS: frozenset[str] = frozenset({
+    "batting_hits+runs+rbi",
+})
+
 
 def _compute_ev(fair_line: float | None, standard_odds: str | None) -> float:
     """
@@ -377,6 +384,10 @@ def get_player_props(game, include_unders=True):
                     continue
                 all_lines.sort(key=lambda x: x['line'])
                 raw_stat_id = prop.get('statID', '')
+                if (raw_stat_id in _BLOCKED_STAT_IDS
+                        or 'fantasyScore' in raw_stat_id
+                        or 'fantasy_score' in raw_stat_id):
+                    continue
                 normalized_stat = _SGO_STAT_ID_MAP.get(raw_stat_id, raw_stat_id)
                 fair_line  = prop.get('fairOverUnder')
                 book_odds  = dk.get('odds')

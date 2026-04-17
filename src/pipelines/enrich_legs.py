@@ -134,7 +134,7 @@ def enrich_legs(
     # Pre-fetch all unique pitcher profiles before the per-leg loop
     unique_pitcher_ids = set(pitcher_id_map.values())
     profiles: dict[int, dict | None] = {}
-    for pid in sorted(unique_pitcher_ids):
+    for pid in sorted(pid for pid in unique_pitcher_ids if pid is not None):
         profiles[pid] = get_pitcher_matchup_profile(pid, season)
 
     enriched = 0

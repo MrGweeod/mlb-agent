@@ -250,7 +250,7 @@ def _find_qualifying_legs(
         if not team_abbr or not game_pk:
             continue  # team not playing today
 
-        opposing_pitcher_id = pitcher_id_map.get(team_abbr) or 0
+        opposing_pitcher_id = pitcher_id_map.get(team_abbr) or None
 
         # Coverage calculation (handedness-split via statSplits + Poisson)
         coverage = calculate_coverage(

@@ -82,4 +82,14 @@ def get_injured_players(player_list):
     result = result.strip()
     if not result or result.upper() == "NONE":
         return set()
-    return set(name.strip() for name in result.split(",") if name.strip())
+    names = set()
+    for name in result.split(","):
+        name = name.strip()
+        if not name:
+            continue
+        # Defensive: skip entries that contain digits or are too short to be a
+        # player name — guards against malformed LLM responses like "2026, 2026)"
+        if any(c.isdigit() for c in name) or len(name) < 5:
+            continue
+        names.add(name)
+    return names
