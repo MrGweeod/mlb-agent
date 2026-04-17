@@ -57,6 +57,23 @@ _SGO_STAT_ID_MAP: dict[str, str] = {
     # e.g. "batting_hits+runs+rbi"
 }
 
+# Maps internal pipeline stat name → the display label SGO appends to marketName.
+# marketName format: "{Player Name} {Stat Label} Over/Under"
+# Used to strip the stat label and recover a clean player name.
+_STAT_NAME_SUFFIX: dict[str, str] = {
+    "hits":           " Hits",
+    "totalBases":     " Total Bases",
+    "rbi":            " Runs Batted In",
+    "homeRuns":       " Home Runs",
+    "stolenBases":    " Stolen Bases",
+    "walks":          " Walks",
+    "runsScored":     " Runs",
+    "strikeouts":     " Strikeouts",
+    "hitsAllowed":    " Hits Allowed",
+    "earnedRuns":     " Earned Runs",
+    "inningsPitched": " Innings Pitched",
+}
+
 
 def _compute_ev(fair_line: float | None, standard_odds: str | None) -> float:
     """
@@ -363,10 +380,17 @@ def get_player_props(game, include_unders=True):
                 normalized_stat = _SGO_STAT_ID_MAP.get(raw_stat_id, raw_stat_id)
                 fair_line  = prop.get('fairOverUnder')
                 book_odds  = dk.get('odds')
+                # Clean player name: strip " {Stat Label} Over/Under" from marketName.
+                _raw_name = prop.get('marketName', '')
+                if _raw_name.endswith(' Over/Under'):
+                    _raw_name = _raw_name[:-len(' Over/Under')]
+                _suffix = _STAT_NAME_SUFFIX.get(normalized_stat, '')
+                if _suffix and _raw_name.endswith(_suffix):
+                    _raw_name = _raw_name[:-len(_suffix)].strip()
                 leg_dict = {
                     'stat': normalized_stat,
                     'player_id': prop.get('playerID'),
-                    'player_name': prop.get('marketName', '').replace(' Over/Under', ''),
+                    'player_name': _raw_name,
                     'standard_line': dk.get('overUnder'),
                     'standard_odds': book_odds,
                     'all_lines': all_lines,
