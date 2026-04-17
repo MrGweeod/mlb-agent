@@ -189,7 +189,7 @@ def get_trend_signal(
 
     # ── trend_pass ────────────────────────────────────────────────────────────
     if role == "anchor":
-        trend_pass = bool(pa_pass and stat_slope >= 0 and momentum)
+        trend_pass = bool(pa_pass and stat_slope >= 0 and form_label != "COLD")
     else:  # swing
         trend_pass = bool(pa_pass and (stat_slope >= 0 or momentum))
 

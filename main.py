@@ -28,7 +28,7 @@ from src.apis.mlb_stats import (
     is_il_placement,
 )
 from src.apis.sportsgameodds import get_todays_games, get_player_props
-from src.engine.claude_agent import analyze_parlays, get_injured_players
+from src.engine.claude_agent import analyze_parlays
 from src.engine.coverage import calculate_coverage, PROP_STAT_MAP
 from src.engine.parlay_builder import build_hybrid_parlays, _tier_params
 from src.pipelines.enrich_legs import enrich_legs
@@ -399,17 +399,8 @@ def run_pipeline() -> tuple[list[dict], str]:
     # ── Step 5: Injury Filter ─────────────────────────────────────────────────
     print("\n[5/8] Filtering blocked players...")
 
-    # LLM spot-check on all player names entering the parlay pool
-    leg_players = sorted({l["player_name"] for l in qualifying_legs})
-    try:
-        llm_flagged = get_injured_players(leg_players)
-        if llm_flagged:
-            blocked_names = blocked_names | {n.lower() for n in llm_flagged}
-            print(f"  LLM flagged: {', '.join(sorted(llm_flagged))}")
-        else:
-            print("  LLM: no additional players flagged")
-    except Exception as e:
-        print(f"  LLM injury check error: {e} — skipping")
+    # Injury filter is Transaction Wire only — get_injured_players() LLM check
+    # removed; the wire at Step 1 is the authoritative IL source.
 
     # Build team_to_blocked BEFORE removing blocked legs so we preserve context
     name_to_team = {l["player_name"]: l["team"] for l in qualifying_legs if l.get("team")}
