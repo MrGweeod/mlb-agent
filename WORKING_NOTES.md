@@ -106,10 +106,54 @@ This reduces 813 to a manageable subset of MLB-relevant moves.
 7. **`bookOdds` / `fairOdds`** also exist at the top-level market dict (string format
    like `"+134"`). These are consensus across all bookmakers, not DK-specific.
 
-### Remaining unknowns for next session
+### Remaining unknowns resolved in 2026-04-17 session
+
+- `home_probable_pitcher` name→ID resolution: handled in `main.py` via `statsapi.lookup_player()` ✓
+- Transaction Wire pre-filter: implemented in `main.py _get_blocked_players()` using `_RELEVANT_TXNS = {"SC", "DES", "OU", "CU"}` ✓
+
+### Still open
 
 - Are DK MLB props `available=true` when markets open (closer to game time)?
 - Do MLB props on DK include alt lines (needed for swing leg diversity)?
-- Does `home_probable_pitcher` (name string) need to be resolved to a pitcher ID
-  before passing to `matchup.py`? (Yes — need a name→ID lookup in main.py)
 - Does the Transaction Wire SC filter miss any IL-type moves that use a different typeCode?
+
+---
+
+## 2026-04-17 — Phase 3 Complete (main.py)
+
+### What was built
+
+Confirmed all Phase 2 files were already committed (trend_analysis, matchup, enrich_legs,
+leg_scorer, rotowire, lineup_poller, web/server). The only missing piece was `main.py`.
+
+Wrote `main.py` — full 8-step pipeline orchestrator:
+
+1. **Transaction Wire** — `_get_blocked_players()` pre-filters to SC/DES/OU/CU, detects IL placements
+2. **Schedule + maps** — `_build_team_maps()` builds `pitcher_id_map` and `opponent_map`
+   - `home_probable_pitcher` is a name string → resolved via `statsapi.lookup_player()`
+   - `pitcher_id_map[home_abbr] = away_pitcher_id` (home batters face away pitcher)
+3. **SGO props** — `get_todays_games()` + `get_player_props()` per game
+4. **Coverage gate** — `_find_qualifying_legs()` calls `calculate_coverage()` at standard line only
+   - Pitcher props skipped (`_PITCHER_POSITIONS = {"P", "SP", "RP", "TWP"}`)
+   - Player team resolved via `get_player_info(mlb_id).team_id` → `team_id_to_abbr`
+   - Min 55% coverage to enter pool
+5. **Injury filter** — transaction wire blocked_names + `get_injured_players()` LLM spot-check
+6. **Enrichment** — `enrich_legs(legs, pitcher_id_map, opponent_map, season)`
+7. **Trend signals** — `_attach_trend_signals()` calls `get_trend_signal()` per leg; role from coverage_pct
+8. **Parlay builder** — `build_hybrid_parlays()` → `log_recommendations()` + `log_scored_legs()` → `analyze_parlays()`
+
+### Import smoke test passed
+
+```
+python -c "import main; print('import OK')"           → import OK
+python -c "from src.bot.runner import pipeline_run"   → import OK
+```
+
+### Pre-launch checklist (still needed before first live run)
+
+- [ ] Create Discord bot application → set `DISCORD_BOT_TOKEN` in `.env`
+- [ ] Set `DISCORD_GUILD_ID` and `SCHEDULE_CHANNEL_ID` in `.env`
+- [ ] Create Railway project for MLB agent
+- [ ] Confirm `DATABASE_URL`, `SPORTSGAMEODDS_API_KEY`, `ANTHROPIC_API_KEY` in `.env`
+- [ ] Init DB tables: `python -c "from src.utils.db import init_db; init_db()"`
+- [ ] Run `/run` after ~2PM ET to confirm DK props are `available=true`
