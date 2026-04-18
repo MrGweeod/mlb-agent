@@ -138,4 +138,114 @@ tap a leg, odds update instantly. Discord can't do this cleanly.
 - Auth: WEB_APP_PASSWORD env var, bearer token, sessionStorage
 
 **Web app behavior:**
--
+- Auto-polls /api/legs every 5 minutes for lineup updates
+- Updates cards in place without resetting selections or scroll
+- Lineup confirmed: green checkmark indicator
+- Lineup pending: amber clock indicator with "lineup pending" text
+- Last updated timestamp shown as relative time on each card
+- Correlation blocking: pitcher/batter same game blocked, 
+  2-leg per game cap enforced
+- Reaches target filter: highlights legs that bring combined 
+  odds into +1000-+1500 window
+- Submit = sendPrompt() with full parlay for Claude analysis
+
+**Mobile-first responsive:**
+- Mobile (<768px): sticky header, bottom drawer for selected legs, 
+  horizontally scrollable filter pills
+- Desktop (≥768px): two-column layout, selected panel fixed right
+- One codebase handles both via CSS media query
+
+---
+
+## Training Velocity — Priority
+
+**Decision:** Optimize early architecture for training data 
+generation, not parlay accuracy.
+
+**Rationale:** Composite weights are principled priors, not 
+validated values. Need 500+ resolved legs before recalibration 
+is meaningful. Maximize resolved legs per day to reach that 
+threshold faster.
+
+**Implementation:**
+- Log all eligible legs (no coverage floor on logging)
+- Run all three daily pipeline windows even when props are thin
+- Log complete factor breakdowns per leg (not just outcome)
+- Surface top 20-30 scored legs per run in addition to parlays
+- Small real-money wagers placed manually during calibration 
+  phase to generate real outcome data
+
+---
+
+## SGO API — Confirmed Field Names
+
+**Validated live April 16, 2026:**
+
+| Field | SGO Name | Notes |
+|---|---|---|
+| Fair odds | fairOverUnder | Populated 20/20 in test |
+| Book odds | byBookmaker.draftkings.odds | Single field, not over/under split |
+| Prop category | statID | e.g. "hitting_hits", "pitching_strikeouts" |
+| Alt lines | altLines | 0 found at 11AM — recheck at game time |
+
+**StatID normalization map in sportsgameodds.py:**
+SGO statIDs like "hitting_hits" normalized to internal keys 
+like "hits" via _SGO_STAT_ID_MAP before any downstream routing.
+
+**DK props available=false until ~2 hours before first pitch.**
+9AM pipeline will return 0 props on most days. 12PM and 5:30PM 
+are the meaningful runs.
+
+---
+
+## Pre-Launch Checklist Status
+
+| Item | Status | Notes |
+|---|---|---|
+| Discord bot created | In progress | Need SCHEDULE_CHANNEL_ID |
+| Railway project created | Unknown | Needs verification |
+| Railway env vars set | Unknown | See variable list below |
+| railway.toml verified | Unknown | Check repo root |
+| Supabase init_db() run | Not done | Run before first deploy |
+| First deploy + health check | Not done | After env vars set |
+| First live pipeline test | Not done | Run after 2PM ET on game day |
+| Coverage threshold in main.py | UNVERIFIED | Check 62% not 70% |
+
+**Railway environment variables required:**
+
+| Variable | Source |
+|---|---|
+| DISCORD_BOT_TOKEN | Discord developer portal |
+| DISCORD_GUILD_ID | Right-click server → Copy Server ID |
+| SCHEDULE_CHANNEL_ID | Right-click channel → Copy Channel ID |
+| ANTHROPIC_API_KEY | Reuse from NBA agent |
+| SPORTSGAMEODDS_API_KEY | Reuse from NBA agent |
+| ODDS_API_KEY | Reuse from NBA agent |
+| DATABASE_URL | Supabase → Settings → Database → Session Pooler |
+| WEB_APP_PASSWORD | Your choice — not changeme |
+
+---
+
+## Known Bugs Fixed (This Session)
+
+| Bug | Fix | File |
+|---|---|---|
+| SGO statIDs not normalized | Added _SGO_STAT_ID_MAP | sportsgameodds.py |
+| ev_per_unit never set | Added _compute_ev() helper | sportsgameodds.py |
+| Transaction filter returned 813 entries | Added RELEVANT_TYPE_CODES whitelist | mlb_stats.py |
+| Two-pool arch produced 0 parlays | Single scored pool refactor | parlay_builder.py |
+| trend_pass failing early season | Removed hard gate | trend_analysis.py |
+
+---
+
+## Open Items / Next Session Priorities
+
+| Item | Priority | Notes |
+|---|---|---|
+| Verify coverage threshold in main.py (62% not 70%) | HIGH | Before any live run |
+| Complete pre-launch checklist | HIGH | Blocking first live run |
+| First live pipeline test at game time | HIGH | After deploy |
+| Per-leg appearance cap in top-5 output | Medium | Max 3 of 5 parlays per leg |
+| COLD leg soft penalty in leg_scorer | Low | Accept as tradeoff for now |
+| Pitcher prop coverage model | Low | Phase 4 extension |
+| Alt lines on DK MLB props | Low | Retest at game time |
