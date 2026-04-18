@@ -13,15 +13,27 @@ import re
 import time
 from datetime import datetime
 
-# TODO: replace with statsapi.boxscore() — MLB box score fetching not yet implemented
-# from src.apis.mlb_stats import get_game_log, player_cache as _proc_cache
+import statsapi
 
+from src.apis.mlb_stats import get_batter_game_log
 from src.utils.db import get_conn, now_utc
 from src.utils.odds_math import parlay_odds
 
-# TODO: replace with MLB stat field names from statsapi.boxscore()
-# e.g. {"hits": "hits", "total_bases": "totalBases", "strikeouts": "strikeOuts"}
-STAT_MAP: dict[str, str] = {}
+STAT_MAP: dict[str, str] = {
+    "hits": "hits",
+    "totalBases": "totalBases",
+    "rbi": "rbi",
+    "homeRuns": "homeRuns",
+    "baseOnBalls": "baseOnBalls",
+    "stolenBases": "stolenBases",
+    "runs": "runs",
+    "strikeOuts": "strikeOuts",
+    "doubles": "doubles",
+    "triples": "triples",
+    # SGO-normalised keys (stored in mlb_scored_legs.stat)
+    "strikeouts": "strikeOuts",
+    "walks": "baseOnBalls",
+}
 
 # TODO: populate with MLB prop display names matching SGO market name suffixes
 _STAT_LABELS: dict[str, str] = {}
@@ -45,18 +57,27 @@ def _clean_player_name(player_name: str, stat: str) -> str:
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _name_to_mlb_id(player_name: str) -> int | None:
-    # TODO: replace with statsapi.lookup_player() or src.services.name_matching utility
+    try:
+        results = statsapi.lookup_player(player_name, season=datetime.now().year)
+        if results:
+            return results[0]["id"]
+    except Exception:
+        pass
     return None
 
 
 def _calc_stat(game: dict, stat: str) -> float | None:
-    # TODO: replace with MLB-StatsAPI box score field lookup using STAT_MAP
-    return None
+    field = STAT_MAP.get(stat)
+    if not field:
+        return None
+    val = game.get("stat", {}).get(field)
+    return float(val) if val is not None else None
 
 
 def _find_game_on_date(games: list, target_date_str: str) -> dict | None:
-    # TODO: replace with MLB-StatsAPI game log date matching
-    # MLB-StatsAPI game log date format differs from NBA's "%b %d, %Y"
+    for game in games:
+        if game.get("date") == target_date_str:
+            return game
     return None
 
 
@@ -75,7 +96,7 @@ def _clear_player_cache(player_name: str, stat: str):
 
 
 def _resolve_leg(player_name: str, stat: str, line: float, game_date: str,
-                 direction: str = "over") -> tuple[str, float | None]:
+                 direction: str = "over", player_id: int | None = None) -> tuple[str, float | None]:
     """
     Returns (result, actual_value) where result is 'won', 'lost', 'void', or 'unresolvable'.
 
@@ -88,15 +109,15 @@ def _resolve_leg(player_name: str, stat: str, line: float, game_date: str,
     if re.match(r'^[A-Z]{2,3}$', player_name.strip()):
         return "void", None  # team total leg — no player stat to resolve
 
-    clean_name = _clean_player_name(player_name, stat)
-    mlb_id = _name_to_mlb_id(clean_name)
+    mlb_id = player_id
+    if not mlb_id:
+        clean_name = _clean_player_name(player_name, stat)
+        mlb_id = _name_to_mlb_id(clean_name)
     if not mlb_id:
         return "unresolvable", None
 
-    # TODO: replace with statsapi.boxscore() call — do not use nba_api rate-limit sleep
-    # time.sleep(0.6)
-    # games = get_game_log(mlb_id)
-    games = None  # stub until mlb_stats.py is implemented
+    season = int(game_date[:4])
+    games = get_batter_game_log(mlb_id, season)
     if not games:
         return "unresolvable", None
 
@@ -367,7 +388,7 @@ def resolve_scored_legs(verbose: bool = True) -> None:
     for leg in unresolved:
         result, actual = _resolve_leg(
             leg["player_name"], leg["stat"], leg["line"], leg["run_date"],
-            leg.get("direction", "over")
+            leg.get("direction", "over"), leg.get("player_id")
         )
         conn = get_conn()
         cur = conn.cursor()
