@@ -299,7 +299,6 @@ def _attach_trend_signals(legs: list[dict], season: int) -> None:
     """
     Compute trend signals for each leg and merge them into the leg dict in-place.
 
-    Role assignment: coverage_pct >= 70% → "anchor", otherwise "swing".
     Trend signals are sourced from the player's game log (cached 24h).
     """
     for leg in legs:
@@ -313,13 +312,11 @@ def _attach_trend_signals(legs: list[dict], season: int) -> None:
         if not game_log:
             continue
 
-        role = "anchor" if leg.get("coverage_pct", 0) >= 62.0 else "swing"
         signals = get_trend_signal(
             player_id=str(player_id),
             stat=stat,
             game_log=game_log,
             best_line=float(line),
-            role=role,
         )
         leg.update(signals)
 
@@ -440,13 +437,12 @@ def run_pipeline() -> tuple[list[dict], str]:
     # ── Step 7: Trend Signals ─────────────────────────────────────────────────
     print("\n[7/8] Computing trend signals...")
     _attach_trend_signals(qualifying_legs, season)
-    trend_pass_count = sum(1 for l in qualifying_legs if l.get("trend_pass"))
     form_counts = {}
     for l in qualifying_legs:
         label = l.get("form_label", "NEUTRAL")
         form_counts[label] = form_counts.get(label, 0) + 1
     print(
-        f"  {trend_pass_count}/{len(qualifying_legs)} pass trend filter | "
+        f"  {len(qualifying_legs)} legs | "
         + " | ".join(f"{k}:{v}" for k, v in sorted(form_counts.items()))
     )
 

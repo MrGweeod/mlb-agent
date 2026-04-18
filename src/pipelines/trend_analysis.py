@@ -34,7 +34,6 @@ _SAFE_DEFAULT: dict = {
     "recent_std":  0.0,
     "form_label":  "NEUTRAL",
     "trend_score": 0.0,
-    "trend_pass":  False,
 }
 
 
@@ -95,7 +94,7 @@ def get_trend_signal(
     stat: str,
     game_log: list[dict],
     best_line: float,
-    role: str,
+    role: str = "swing",
 ) -> dict:
     """
     Compute trend signals for a player/stat/line combination.
@@ -105,10 +104,10 @@ def get_trend_signal(
         stat:       Prop type key from PROP_STAT_MAP (e.g. "hits", "totalBases").
         game_log:   MLB game log in OLDEST-FIRST order (mlb_stats native).
         best_line:  The qualifying prop line from the coverage engine.
-        role:       "anchor" for stricter trend_pass, "swing" for more lenient.
+        role:       Accepted for backwards-compatibility; unused.
 
     Returns:
-        Dict with all trend signal fields. Returns _SAFE_DEFAULT (trend_pass=False)
+        Dict with all trend signal fields. Returns _SAFE_DEFAULT
         when game_log has fewer than 5 entries or stat is not recognised.
 
     Scoring rules for trend_score:
@@ -126,8 +125,6 @@ def get_trend_signal(
       NEUTRAL : everything else
 
     trend_pass rules:
-      anchor : pa_pass AND stat_slope >= 0 AND momentum
-      swing  : pa_pass AND (stat_slope >= 0 OR momentum)
     """
     key = (player_id, stat, best_line)
     if key in _process_cache:
@@ -187,12 +184,6 @@ def get_trend_signal(
     else:
         form_label = "NEUTRAL"
 
-    # ── trend_pass ────────────────────────────────────────────────────────────
-    if role == "anchor":
-        trend_pass = bool(pa_pass and stat_slope >= 0 and form_label != "COLD")
-    else:  # swing
-        trend_pass = bool(pa_pass and (stat_slope >= 0 or momentum))
-
     result = {
         "pa_avg_10":   round(pa_avg_10, 2),
         "pa_pass":     pa_pass,
@@ -203,7 +194,6 @@ def get_trend_signal(
         "recent_std":  round(float(recent_std), 4),
         "form_label":  form_label,
         "trend_score": round(float(score), 2),
-        "trend_pass":  trend_pass,
     }
     _process_cache[key] = result
     return result
