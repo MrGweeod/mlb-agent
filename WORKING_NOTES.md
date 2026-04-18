@@ -91,7 +91,7 @@ This reduces 813 to a manageable subset of MLB-relevant moves.
 3. **`statID`** = prop category field. Examples seen:
    - `"batting_hits+runs+rbi"` (combination prop)
    - Format: `"{group}_{stat1}+{stat2}+..."` or `"{group}_{stat}"`
-   
+
 4. **DK `available=false`** on all tested props — markets likely post 1–2 hours before
    first pitch. Tests were run ~11AM ET; first game is 4:35PM ET. Re-check closer to
    game time to confirm alt lines and availability.
@@ -149,11 +149,64 @@ python -c "import main; print('import OK')"           → import OK
 python -c "from src.bot.runner import pipeline_run"   → import OK
 ```
 
-### Pre-launch checklist (still needed before first live run)
+---
 
-- [ ] Create Discord bot application → set `DISCORD_BOT_TOKEN` in `.env`
-- [ ] Set `DISCORD_GUILD_ID` and `SCHEDULE_CHANNEL_ID` in `.env`
-- [ ] Create Railway project for MLB agent
-- [ ] Confirm `DATABASE_URL`, `SPORTSGAMEODDS_API_KEY`, `ANTHROPIC_API_KEY` in `.env`
-- [ ] Init DB tables: `python -c "from src.utils.db import init_db; init_db()"`
-- [ ] Run `/run` after ~2PM ET to confirm DK props are `available=true`
+## 2026-04-17 — Live Pipeline Fixes
+
+First live `main.py` run revealed several bugs, all fixed in this session:
+
+| Bug | Root cause | Fix |
+|-----|-----------|-----|
+| `statsapi.teams()` AttributeError | `statsapi` has no `teams()` method | `statsapi.get("teams", {"sportId": 1}).get("teams", [])` |
+| 0 SGO props returned | `_SGO_STAT_ID_MAP` used `hitting_` prefix; API uses `batting_` | Renamed all keys to `batting_`, re-derived filter logic |
+| `player_name` includes stat label | `marketName` = `"{Player} {Stat Label} Over/Under"` | Added `_STAT_NAME_SUFFIX` dict to strip labels |
+| `enrich_legs.py:137` TypeError | `sorted(set)` with `None` in set | Filter: `sorted(pid for pid in unique_pitcher_ids if pid is not None)` |
+| LLM injury check returning garbage | `get_injured_players()` hallucinating dates | Added digit/length guard; then removed LLM call entirely |
+| `opposing_pitcher_id or 0` → 404 spam | Sending pitcher ID 0 to MLB Stats API | Changed to `opposing_pitcher_id or None` |
+| `batting_hits+runs+rbi` combo props | Unmapped combination stat | Added `_BLOCKED_STAT_IDS` with silent skip |
+| `mlb_scored_legs` missing columns | Table created before `game_pk`/`player_id`/`opposing_pitcher_id` added | `ALTER TABLE mlb_scored_legs ADD COLUMN IF NOT EXISTS ...` |
+
+### 0 parlays root cause identified
+
+With the two-pool architecture, positive-odds legs (coverage ~57–63%, odds +130 to +215)
+were classified as swings, not anchors. The anchor pool had only 3 legs (all negative-money),
+and the swing pool couldn't bridge them into the +1000–+1500 window. Fix applied next session.
+
+---
+
+## 2026-04-18 — Single Scored Pool Refactor
+
+### What was changed
+
+Replaced two-pool anchor/swing architecture with a single composite-scored pool.
+
+**`src/engine/parlay_builder.py`** — full rewrite:
+- Removed `_anchor_floor()`, anchor/connector/swing buckets, and three-phase B&B logic
+- `_tier_params()` now returns only `{min_legs, max_legs, tier}` — no coverage floors or bucket params
+- All legs with coverage ≥55% enter one pool; scored once by `score_legs_composite()`
+- Top 20 by composite_score fed to B&B
+- Single-phase B&B finds combinations of 4–8 legs (Tier 1/2) or 3–8 (Tier 3) in +600–+1500 odds window
+- Constraints: max 1 batter leg per player (pitchers exempt), max 3 legs per game (`game_pk`)
+- Parlays ranked by `avg_composite` DESC; diversity filter (≤3 shared legs) yields top 5
+
+**`src/pipelines/trend_analysis.py`**:
+- Removed `trend_pass` boolean gate entirely (from `_SAFE_DEFAULT`, computation block, result dict)
+- `role` parameter retained in signature for backwards-compat but defaults to `"swing"` and is unused
+
+**`main.py`**:
+- `_attach_trend_signals()`: removed `role` assignment; no longer passes `role=` to `get_trend_signal()`
+- Step 7 print: removed `trend_pass_count`; shows form label breakdown only
+
+### Results on live slates
+
+- 2026-04-17: 156 eligible legs → top 20 → **5 parlays** in +1447–+1491 range, B&B 49 iters
+- 2026-04-18: 157 eligible legs → top 20 → **5 parlays** in +1441–+1482 range, B&B 78 iters
+
+### Still open
+
+- Pool diversity: all 5 parlays share same 2 anchor legs (Dingler RBI + Kim Walk on 04-18).
+  Consider a per-leg appearance cap (e.g., max 3 of 5 parlays) to force variety.
+- COLD legs now eligible (trend_pass removed). Consider soft COLD penalty in leg_scorer
+  instead of a hard gate — a small composite_score deduction rather than disqualification.
+- `get_batter_game_log(701678)` logs `list index out of range` — likely a non-MLB player
+  ID leaking in from the SGO feed. Investigate and add a guard if recurrent.
