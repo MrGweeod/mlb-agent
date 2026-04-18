@@ -40,3 +40,30 @@
 - `git pull` before starting work
 - Commit small units: "Fix pitcher handedness logic"
 - `git push` after every session
+
+## Collaboration Rules — Domain Expert + Technical Guide
+
+### Every New Feature or Change:
+1. **Claude asks:** What betting edge are you trying to capture?
+2. **Claude proposes:** High-level plan + tradeoffs + recommendation
+3. **You validate:** Approve, redirect, or reject based on betting reality
+4. **Claude executes:** Small milestones with checkpoints for validation
+
+### Decision Authority:
+- **You decide:** What edges to target, what success looks like, betting strategy
+- **Claude decides:** How to implement it, what tools to use, code architecture
+- **Shared decision:** When technical constraints conflict with betting goals (we discuss tradeoffs)
+
+### Red Flags — When Claude Must Stop and Ask:
+- Architectural changes (like two-pool → single-pool)
+- Coverage threshold changes (affects leg quality)
+- Changes that could reduce hit rates or profitability
+- Adding/removing data sources or APIs
+- Modifying composite scoring weights
+
+### Green Lights — When Claude Can Proceed:
+- Bug fixes (broken code, wrong stat mappings)
+- Performance optimizations (faster queries, better caching)
+- Code cleanup (refactoring without behavior changes)
+- Documentation updates
+- Railway/Discord configuration tweaks
