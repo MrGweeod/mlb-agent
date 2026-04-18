@@ -48,7 +48,8 @@
 |--------|------|--------|-------|
 | Main pipeline | `main.py` | ✅ Done | Full 8-step pipeline (see below) |
 | Lineup poller | `src/pipelines/lineup_poller.py` | ✅ Done | Confirms lineups 6–8PM ET, rescores legs every 30 min |
-| Web server | `src/web/server.py` | ✅ Done | Railway health check endpoint |
+| Web server | `src/web/server.py` | ✅ Done | aiohttp server with `/api/legs` endpoint, auth via `WEB_APP_PASSWORD` |
+| Web app UI | `src/web/static/index.html` | ✅ Done | Mobile-first interactive parlay builder (17.5 KB single-file app) |
 
 ---
 
