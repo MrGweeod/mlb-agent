@@ -582,6 +582,12 @@
     </div>
   </header>
 
+  <div class="filters" id="position-filters">
+    <div class="filter-chip active" data-pos="all">All (<span id="pos-count-all">0</span>)</div>
+    <div class="filter-chip" data-pos="hitters">Hitters (<span id="pos-count-hitters">0</span>)</div>
+    <div class="filter-chip" data-pos="pitchers">Pitchers (<span id="pos-count-pitchers">0</span>)</div>
+  </div>
+
   <div class="filters" id="stat-filters">
     <div class="filter-chip active" data-stat="all">All</div>
     <div class="filter-chip" data-stat="hits">Hits</div>
@@ -663,9 +669,12 @@
 let password = '';
 let allLegs = [];
 let activeStat = 'all';
+let activePosition = 'all';
 let sortKey = 'coverage';
 let showUnders = true;
 let selectedIds = new Set();
+
+const PITCHER_POSITIONS = new Set(['SP', 'RP', 'P', 'TWP']);
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 function tryAuth() {
@@ -710,10 +719,19 @@ document.getElementById('refresh-btn').addEventListener('click', () => {
 });
 
 // ── Filters ───────────────────────────────────────────────────────────────────
+document.getElementById('position-filters').addEventListener('click', e => {
+  const chip = e.target.closest('.filter-chip');
+  if (!chip) return;
+  document.querySelectorAll('#position-filters .filter-chip').forEach(c => c.classList.remove('active'));
+  chip.classList.add('active');
+  activePosition = chip.dataset.pos;
+  render();
+});
+
 document.getElementById('stat-filters').addEventListener('click', e => {
   const chip = e.target.closest('.filter-chip');
   if (!chip) return;
-  document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+  document.querySelectorAll('#stat-filters .filter-chip').forEach(c => c.classList.remove('active'));
   chip.classList.add('active');
   activeStat = chip.dataset.stat;
   render();
@@ -1059,7 +1077,17 @@ function render() {
   const today = new Date().toLocaleDateString('en-US', {weekday:'short', month:'short', day:'numeric'});
   document.getElementById('header-date').textContent = today;
 
+  // Update position filter counts
+  const nAll = allLegs.length;
+  const nPitchers = allLegs.filter(l => PITCHER_POSITIONS.has((l.position || '').toUpperCase())).length;
+  const nHitters = nAll - nPitchers;
+  document.getElementById('pos-count-all').textContent = nAll;
+  document.getElementById('pos-count-hitters').textContent = nHitters;
+  document.getElementById('pos-count-pitchers').textContent = nPitchers;
+
   let legs = allLegs.filter(l => {
+    if (activePosition === 'pitchers' && !PITCHER_POSITIONS.has((l.position || '').toUpperCase())) return false;
+    if (activePosition === 'hitters' && PITCHER_POSITIONS.has((l.position || '').toUpperCase())) return false;
     if (activeStat !== 'all' && l.stat !== activeStat) return false;
     if (!showUnders && l.direction === 'under') return false;
     return true;
