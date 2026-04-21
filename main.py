@@ -29,7 +29,7 @@ from src.apis.mlb_stats import (
 )
 from src.apis.sportsgameodds import get_todays_games, get_player_props
 from src.engine.claude_agent import analyze_parlays
-from src.engine.coverage import calculate_coverage, PROP_STAT_MAP
+from src.engine.coverage import calculate_coverage, calculate_pitcher_k_coverage, PROP_STAT_MAP
 from src.engine.parlay_builder import build_hybrid_parlays, _tier_params
 from src.pipelines.enrich_legs import enrich_legs
 from src.pipelines.trend_analysis import get_trend_signal
@@ -193,11 +193,14 @@ def _find_qualifying_legs(
     Apply the coverage gate to all SGO props and return qualifying legs.
 
     For each prop:
-      1. Skip non-batter stats (inningsPitched, hitsAllowed, earnedRuns).
+      1. Skip unsupported stats (inningsPitched, hitsAllowed, earnedRuns).
       2. Resolve player name → MLB person ID via statsapi.lookup_player().
-      3. Get player's current team from get_player_info(); skip pitchers.
+      3. Get player's current team from get_player_info().
+         - Skip pitchers unless stat == 'strikeouts' (pitcher K props enabled
+           via Poisson coverage model — calculate_pitcher_k_coverage()).
       4. Confirm the player's team is on today's schedule.
-      5. Call calculate_coverage() with the standard line and opposing pitcher.
+      5. Call calculate_coverage() for batter props or
+         calculate_pitcher_k_coverage() for pitcher K props.
       6. Include the leg if coverage_rate × 100 >= MIN_COVERAGE_PCT.
 
     Only the standard (non-alt) DK line is used. Alt-line coverage is deferred
@@ -238,9 +241,11 @@ def _find_qualifying_legs(
         if not info:
             continue
 
-        # Skip pitchers — pitcher prop coverage not yet implemented
         position = info.get("position", "")
-        if position in _PITCHER_POSITIONS:
+        # Pitcher K props enabled via Poisson coverage model; all other pitcher
+        # prop types (IP, HA, ER) are still unsupported and skipped.
+        is_pitcher_k = stat == "strikeouts" and position in _PITCHER_POSITIONS
+        if position in _PITCHER_POSITIONS and not is_pitcher_k:
             continue
 
         # Confirm player's team plays today
@@ -252,14 +257,22 @@ def _find_qualifying_legs(
 
         opposing_pitcher_id = pitcher_id_map.get(team_abbr) or None
 
-        # Coverage calculation (handedness-split via statSplits + Poisson)
-        coverage = calculate_coverage(
-            player_id=mlb_player_id,
-            prop_type=stat,
-            line=line,
-            opposing_pitcher_id=opposing_pitcher_id,
-            season=season,
-        )
+        # Coverage calculation: pitcher K props use season K/game Poisson model;
+        # batter props use handedness-split statSplits + game-log fallback.
+        if is_pitcher_k:
+            coverage = calculate_pitcher_k_coverage(
+                pitcher_id=mlb_player_id,
+                line=line,
+                season=season,
+            )
+        else:
+            coverage = calculate_coverage(
+                player_id=mlb_player_id,
+                prop_type=stat,
+                line=line,
+                opposing_pitcher_id=opposing_pitcher_id,
+                season=season,
+            )
         if coverage is None:
             continue  # below seasonal minimum games threshold
 

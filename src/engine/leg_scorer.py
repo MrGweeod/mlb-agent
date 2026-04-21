@@ -84,8 +84,12 @@ def _recency_weighted_coverage(leg: dict) -> float:
     if not pid or not stat or line is None:
         return fallback
 
-    # Pitcher props — coverage from pitcher game log is not yet implemented
-    if stat in _PITCHER_STATS:
+    # Pitcher props — batter game log doesn't apply; use coverage_pct fallback.
+    # Check both the pitcher-stat set and position field so that pitcher K props
+    # (stat='strikeouts', position='SP'/'RP') are correctly routed here rather
+    # than falling through to the batter game-log path.
+    position = leg.get("position", "")
+    if stat in _PITCHER_STATS or position in {"SP", "RP", "P", "TWP"}:
         return fallback
 
     stat_field = PROP_STAT_MAP.get(stat)

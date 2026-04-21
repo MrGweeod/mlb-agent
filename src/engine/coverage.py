@@ -37,6 +37,9 @@ import requests
 from src.apis.mlb_stats import get_batter_game_log, get_pitcher_hand
 from src.utils.db import get_player_handedness
 
+# Position codes that identify a pitcher (used by leg_scorer to route coverage)
+PITCHER_POSITIONS = frozenset({"P", "SP", "RP", "TWP"})
+
 BASE_URL = "https://statsapi.mlb.com/api/v1"
 
 def get_season_minimum(games_played: int) -> int:
@@ -281,4 +284,65 @@ def calculate_coverage(
         "confidence_multiplier":  multiplier,
         "pitcher_hand":           pitcher_hand,
         "batter_hand":            batter_hand,
+    }
+
+
+def calculate_pitcher_k_coverage(
+    pitcher_id: int,
+    line: float,
+    season: int = None,
+) -> dict | None:
+    """
+    Calculate Poisson coverage rate for a pitcher strikeout prop.
+
+    Fetches the pitcher's season strikeout total and games started (falling
+    back to games pitched when starts < 3), computes K/start average, then
+    applies the same Poisson approximation used for batter props.
+
+    Args:
+        pitcher_id: MLB person ID for the starting pitcher.
+        line:       The prop line (e.g. 4.5 for over 4.5 Ks).
+        season:     Season year; defaults to current calendar year.
+
+    Returns:
+        Dict matching calculate_coverage() output shape, or None if season
+        stats are unavailable or the pitcher has fewer than 3 appearances.
+    """
+    if season is None:
+        season = datetime.datetime.now().year
+
+    try:
+        import statsapi as _statsapi
+        data = _statsapi.player_stat_data(
+            pitcher_id, group="pitching", type="season", sportId=1
+        )
+        stat_entries = data.get("stats", [])
+        if not stat_entries:
+            return None
+        # player_stat_data returns a list of {type, group, season, stats: {...}}
+        st = stat_entries[0].get("stats", {})
+        total_k       = float(st.get("strikeOuts", 0) or 0)
+        games_started = int(st.get("gamesStarted", 0) or 0)
+        games_pitched = int(st.get("gamesPitched", 0) or 0)
+    except Exception as e:
+        print(f"  [coverage] calculate_pitcher_k_coverage({pitcher_id}) error: {e}")
+        return None
+
+    # Prefer starts as denominator (K/start is the meaningful rate for props);
+    # fall back to appearances for relievers with enough outings.
+    denom = games_started if games_started >= 3 else games_pitched
+    if denom < 3:
+        return None  # too small a sample to estimate reliably
+
+    k_per_game   = total_k / denom
+    coverage_rate = _poisson_coverage(k_per_game, line)
+    multiplier   = _confidence_multiplier(denom) if denom >= 10 else 0.60
+
+    return {
+        "coverage_rate":         coverage_rate,
+        "games_used":            denom,
+        "split_used":            "pitcher_season_k_rate",
+        "confidence_multiplier": multiplier,
+        "pitcher_hand":          None,
+        "batter_hand":           None,
     }
