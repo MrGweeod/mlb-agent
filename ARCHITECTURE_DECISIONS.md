@@ -249,3 +249,55 @@ are the meaningful runs.
 | COLD leg soft penalty in leg_scorer | Low | Accept as tradeoff for now |
 | Pitcher prop coverage model | Low | Phase 4 extension |
 | Alt lines on DK MLB props | Low | Retest at game time |
+
+---
+
+## Pitcher Strikeout Props — Poisson Coverage Model
+**Date:** April 21, 2026
+
+**Decision:** Enable pitcher K props using a simple Poisson coverage model instead of waiting for full pitcher game log implementation.
+
+**Implementation:**
+- New function: `calculate_pitcher_k_coverage()` in `src/engine/coverage.py`
+- Fetches pitcher season stats via `statsapi.player_stat_data()`
+- Calculates K/game rate (prefers games started, falls back to games pitched)
+- Uses Poisson distribution: P(K > line) = 1 - poisson.cdf(line, lambda=k_per_game)
+- Minimum 3 appearances required for reliability
+- Confidence multiplier applied same as batter props
+
+**Pipeline changes:**
+- `main.py`: Removed pitcher K props from blocking gates
+- `leg_scorer.py`: Route pitcher K props to fallback coverage (don't fetch batter game log)
+- Result: 278 pitcher K props now eligible
+
+**Rationale:**
+- Quick win: implemented in 1 hour vs 3 hours for full pitcher coverage
+- Pitcher K is highest-quality pitcher prop market (most liquid)
+- Validates strategy before investing in full IP/HA/ER implementation
+- Can upgrade to game log model later if needed
+
+---
+
+## Web App as Primary Interface
+**Date:** April 21, 2026
+
+**Decision:** Make web app the primary interface, remove automated parlay generation from pipeline.
+
+**Current architecture (NBA agent legacy):**
+- Discord bot posts automated parlays 3x/day
+- Pipeline: resolve + props + build parlays + Claude analysis → Discord
+- Web app is secondary manual builder
+
+**New architecture (to be implemented):**
+- Web app is primary: browse legs → build → analyze → place bet → auto-resolve
+- Pipeline simplified: resolve + props + score legs only (no parlay building)
+- Claude analysis: only triggered manually from web app (saves tokens)
+- Bet tracking: user places bets via web app, resolver checks them next day
+
+**Rationale:**
+- Don't waste tokens on automated analysis (3x/day) for parlays not being bet
+- User wants to build parlays manually, not receive recommendations
+- Training data velocity: resolve ALL legs (not just parlays) for model improvement
+- Cleaner UX: one interface for everything
+
+**Implementation status:** Planned for next session (Option C)
