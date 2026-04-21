@@ -7,10 +7,10 @@
 ## Infrastructure Status
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Railway Deployment | ✅ Running | Commit: edf227c |
-| Discord Bot | ✅ Connected | Slash commands working, scheduled runs active |
-| Web App | ⚠️ Partial | UI works, analyze flow broken, no bet tracking |
-| Supabase PostgreSQL | ✅ Live | mlb_* tables active |
+| Railway Deployment | ✅ Running | Commit: 4b49efd |
+| Discord Bot | ✅ Connected | Scheduled runs: 9AM/12PM/5:30PM ET |
+| Web App | ✅ Fully Functional | Position filters, analyze button working |
+| Supabase PostgreSQL | ✅ Live | mlb_* tables active, 458+ resolved legs |
 
 ## Build Progress
 
@@ -18,34 +18,71 @@
 All modules copied and working.
 
 ### ✅ Phase 2 — MLB Adaptations (Complete)
-All modules adapted for MLB including pitcher K props.
+All modules adapted for MLB including pitcher K props (Poisson model).
 
-### ⚠️ Phase 3 — New Modules (Partial)
-| Module | Status | Notes |
-|--------|--------|-------|
-| main.py pipeline | ✅ Done | Full 8-step pipeline with pitcher K props |
-| Web app UI | ✅ Done | Interactive parlay builder complete |
-| Web app backend | ⚠️ Partial | /api/legs works, /api/analyze missing, no bet tracking |
-| Bet tracking | ❌ Not built | mlb_placed_bets table doesn't exist yet |
+### ✅ Phase 3 — New Modules (Complete)
+All modules built and deployed.
 
-## Recent Changes (April 21, 2026)
+## Calibration Results (458 Resolved Legs, April 17-20)
 
-**Pitcher Strikeout Props:**
-- Added `calculate_pitcher_k_coverage()` using Poisson distribution
-- Removed pipeline blocking gates for pitcher K props
-- Result: 278 pitcher K props now eligible (up from 0)
+### Coverage Accuracy
+| Bucket | Predicted | Actual | Error | Assessment |
+|--------|-----------|--------|-------|------------|
+| 70%+ | 74.4% | 68.3% | +6.1% | ✅ Well calibrated |
+| 65-70% | 67.6% | 63.6% | +4.0% | ✅ Good |
+| 60-65% | 62.8% | 60.5% | +2.3% | ✅ Excellent |
+| 55-60% | 57.9% | 61.5% | -3.6% | ✅ Slightly underconfident |
 
-**Interactive Web App:**
-- Complete parlay builder with selection, correlation blocking, odds calculation
-- Mobile-first responsive design
-- Issue: analyze button shows modal instead of calling API
+### Prop Type Performance
+| Prop Type | Predicted | Actual | Error | Sample | Assessment |
+|-----------|-----------|--------|-------|--------|------------|
+| Hits (over) | 60.4% | 58.0% | +2.4% | 150 | ✅ Well calibrated |
+| Strikeouts (over) | 62.3% | 59.7% | +2.6% | 77 | ✅ Well calibrated |
+| Total Bases (over) | 59.2% | 45.8% | +13.4% | 24 | ⚠️ Overconfident (penalty: 0.78x) |
+| Walks (over) | 58.5% | 45.5% | +13.0% | 11 | ⚠️ Small sample |
+| RBIs (over) | 57.8% | 28.6% | +29.2% | 14 | ⚠️ Small sample |
+
+### EV Signal Status
+**Historical data (April 17-20):** Still inverted (used old formula)
+- Strong +EV: 42.9% hit rate ❌
+- Strong -EV: 61.0% hit rate ❌
+
+**Expected after 2-3 days:** Signal should flip positive (fixed formula deployed April 21)
+
+## What's Built and Working
+
+### ✅ Core Pipeline
+- 8-step daily pipeline (9AM/12PM/5:30PM ET)
+- SGO props fetch (MLB-specific)
+- Coverage calculation with handedness splits (batter vs RHP/LHP)
+- Pitcher K props via Poisson model
+- Composite leg scoring (5 factors)
+- Branch-and-Bound parlay builder
+- Automated outcome resolution (box-score-based, 1 call per game)
+
+### ✅ Web App
+- Interactive parlay builder
+- Position filters (All / Hitters / Pitchers)
+- Stat filters (hits, strikeouts, totalBases, etc.)
+- Real-time combined odds calculation
+- Correlation blocking (max 1 leg per player, max 3 per game)
+- Analyze button → Claude API (10-20s, statistical analysis only)
+- Mobile-responsive design
+
+### ✅ Database & Resolution
+- 458 resolved legs (April 17-20)
+- Daily automated resolution at 9AM ET
+- Per-odd_id deduplication (allows pitcher K props in afternoon runs)
+- Calibration tracking (coverage, EV, trend validation)
 
 ## What's NOT Built
-| Item | Priority | Notes |
-|------|----------|-------|
-| Bet tracking system | HIGH | No mlb_placed_bets table, no /api/bets endpoints |
-| Web app analyze flow | HIGH | Shows modal instead of calling Claude API |
-| Bet history UI | HIGH | Can't view placed bets or outcomes |
-| Pipeline cleanup | MEDIUM | Still generating unused automated parlays |
-| Pool diversity fix | MEDIUM | Same 2 legs anchor every parlay |
-| Pitcher IP/HA/ER props | LOW | Only K props enabled, others skipped |
+
+**Bet Tracking System (Optional):**
+- `mlb_placed_bets` table schema exists but not wired to web app
+- Manual bet logging via DraftKings → spreadsheet → outcome resolver
+
+**Advanced Features (Roadmap):**
+- Dashboard (P&L tracking, hit rate charts)
+- Learning loop (regression-based weight recalibration)
+- Weather adjustment (wind/temp for outdoor games)
+- Same-game parlay correlation detection

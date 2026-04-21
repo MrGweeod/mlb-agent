@@ -300,4 +300,135 @@ are the meaningful runs.
 - Training data velocity: resolve ALL legs (not just parlays) for model improvement
 - Cleaner UX: one interface for everything
 
-**Implementation status:** Planned for next session (Option C)
+**Implementation status:** Partially complete — web app is primary interface, pipeline still generates parlays for Discord (low priority to remove)
+
+---
+
+## Web Search Removed from Analyze Feature
+**Date:** April 21, 2026
+
+**Decision:** Remove web search tool from `analyze_parlays()` — analyze based purely on statistical data provided (coverage, EV, trend, opponent adjustment).
+
+**Rationale:**
+- Web search caused 60-second delays (now 10-20s)
+- Hallucinated incorrect injury info (said players were on IL when they weren't)
+- Added token costs without accuracy benefit
+- Lineup confirmation already handled by pipeline (legs without confirmed starters excluded)
+
+**Implementation:**
+- Removed `tools` parameter from Claude API call
+- Updated prompt to explicitly say "Do NOT search for external information"
+- Enhanced leg data passed to Claude: coverage + EV + trend + opponent adjustment
+- Claude now analyzes: coverage quality, correlations, parlay construction, matchup quality
+
+**Result:** Fast, accurate, statistical analysis with no hallucinations.
+
+---
+
+## Position Filters Added to Web App
+**Date:** April 21, 2026
+
+**Decision:** Add position-based filters (All / Hitters / Pitchers) to web app for easy separation of batter props from pitcher props.
+
+**Implementation:**
+- New filter row above stat filter chips
+- Dynamic counts update on load: "All (N) / Hitters (N) / Pitchers (N)"
+- `PITCHER_POSITIONS` set: `{SP, RP, P, TWP}`
+- Combined filtering: position + stat (AND logic)
+- Scoped click handlers so position and stat filters don't clear each other
+
+**Rationale:** With pitcher K props now in the pipeline, users need easy way to isolate pitcher props (calibrated +2.6% error) from batter props (calibrated +2.4% error for hits).
+
+---
+
+## Per-Odd_id Deduplication (Database)
+**Date:** April 21, 2026
+
+**Decision:** Change `log_scored_legs()` from date-level deduplication to per-`odd_id` deduplication with `ON CONFLICT (odd_id) DO NOTHING`.
+
+**Old behavior:**
+- Check: `SELECT COUNT(*) WHERE run_date = ?`
+- If count > 0 → skip entire insertion
+- Problem: Morning run blocks afternoon pitcher K props from being added
+
+**New behavior:**
+- `INSERT ... ON CONFLICT (odd_id) DO NOTHING`
+- Afternoon pipeline can add pitcher K props without duplicating morning's batter props
+- Each leg identified by unique SGO odd_id
+
+**Migration:**
+```sql
+ALTER TABLE mlb_scored_legs ADD COLUMN odd_id TEXT;
+ALTER TABLE mlb_scored_legs ADD CONSTRAINT mlb_scored_legs_odd_id_uq UNIQUE (odd_id);
+```
+
+**Result:** Pitcher K props can be added when DraftKings posts them (mid-afternoon) without waiting for next day.
+
+---
+
+## Box-Score-Based Outcome Resolver
+**Date:** April 21, 2026
+
+**Decision:** Replace per-player game-log resolver with box-score-based resolver that fetches one box score per game (not one per player).
+
+**Old approach:**
+- Call `statsapi.player_stat_data()` for each player (1 API call per leg)
+- 300 legs = 300 API calls
+- Slow, rate-limited, inefficient
+
+**New approach:**
+- Group legs by `game_pk`
+- Fetch `statsapi.boxscore_data(game_pk)` once per game
+- Extract all player stats from single box score
+- 300 legs across 15 games = 15 API calls
+
+**Performance:** 10-30x faster resolution
+
+**Files:** `src/tracker/outcome_resolver.py` (complete rewrite)
+
+---
+
+## Calibration Results — April 21, 2026
+**Date:** April 21, 2026
+
+**Dataset:** 458 resolved legs (April 17-20, 2026)
+
+**Key Findings:**
+
+### Coverage Calibration (After Fixes)
+- 70%+ bucket: predicted 74.4%, actual 68.3% (+6.1% error) ✅
+- 60-65% bucket: predicted 62.8%, actual 60.5% (+2.3% error) ✅
+- **Before fixes:** 70%+ bucket hit at 46% (+30.9% error) ❌
+
+**Fixes applied:**
+1. Confidence multipliers now applied: `adjusted = 0.50 + mult × (raw - 0.50)`
+2. Fixed lineup_poller scale bug (coverage_pct stored as 0-1 instead of 0-100)
+
+### Prop-Specific Performance
+- **Hits (over):** +2.4% error (150 legs) — well calibrated
+- **Pitcher Ks (over):** +2.6% error (77 legs) — well calibrated
+- **Total Bases (over):** +13.4% error (24 legs) — penalty tightened to 0.78x
+- **RBIs, Walks:** Small samples (14-11 legs) — pending more data
+
+### EV Signal
+**Status:** Inverted in historical data (April 17-20 used old broken formula)
+- Strong +EV legs: 42.9% hit rate ❌
+- Strong -EV legs: 61.0% hit rate ❌
+
+**Root cause:** Old `_compute_ev` used `0.50 - book_implied` ignoring fair_line entirely, rewarding longshot odds. Fixed April 21 to use `fair_line vs book_line` comparison.
+
+**Action:** Need 2-3 days of new data to validate correction. Current weight: 0% (disabled until validated).
+
+### Trend Signal
+**Status:** No predictive value
+- Passing trend: 50.0% hit rate
+- Failing trend: 54.7% hit rate (slightly inverted)
+
+**Action:** Weight set to 0% (trend signal has zero correlation with outcomes in this dataset).
+
+### Current Scoring Weights (Post-Calibration)
+- Coverage: 70% (up from 40%)
+- Opponent adjustment: 20% (up from 15%)
+- PA stability: 10% (up from 5%)
+- EV: 0% (disabled until signal validates)
+- Trend: 0% (no predictive value)

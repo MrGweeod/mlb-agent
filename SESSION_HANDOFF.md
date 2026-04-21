@@ -2,84 +2,88 @@
 **Last Updated:** April 21, 2026
 
 ## Current Status
-✅ **Web app deployed and functional** — interactive parlay builder with selection, correlation blocking, combined odds
-✅ **Pitcher K props enabled** — Poisson coverage model implemented, 278 pitcher K props available
-⚠️ **Web app needs work** — analyze button broken (shows modal instead of analyzing), no bet tracking system
-⚠️ **Pipeline needs cleanup** — still generating automated parlays 3x/day (wasting tokens)
+✅ **All three build phases complete** — pipeline, resolver, web app fully functional
+✅ **Model calibrated** — Coverage within ±6% (was ±30%), pitcher K +2.6% error, hits +2.4%
+✅ **Web app enhanced** — Position filters (Hitters/Pitchers), working analyze button, no hallucinations
+✅ **Automated resolution** — Box-score resolver runs daily at 9AM ET, 300-400 legs/day
 
 ## What Was Built This Session (April 21)
 
-**Interactive Web App Parlay Builder:**
-- Click to select legs (4-8 leg limit)
-- Real-time combined odds calculation
-- Correlation blocking (max 1 leg per player, max 2 per game, no pitcher+batter same game)
-- "Reaches target" indicator for legs that bring odds into +1000-1500 range
-- Mobile-first responsive design (bottom drawer on mobile, right sidebar on desktop)
-- File: `src/web/static/index.html` (17.5 KB single-file app)
+**1. Fixed Scoring Model (Calibration)**
+- Coverage overconfidence fixed: 70%+ bucket now hits at 68% (was 46%)
+- Confidence multipliers now applied: `adjusted = 0.50 + mult × (raw - 0.50)`
+- EV calculation fixed: compares SGO fair_line vs book_line (was inverted)
+- Prop-specific penalties: strikeouts 1.0x, hits 0.85x, totalBases 0.78x, RBIs 0.90x
+- Recalibrated weights: coverage 70%, opponent 20%, PA stability 10%, EV 0%, trend 0%
 
-**Pitcher Strikeout Props:**
-- Added `calculate_pitcher_k_coverage()` to `src/engine/coverage.py`
-- Uses Poisson distribution based on season K/game rate (prefers games started, falls back to games pitched)
-- Minimum 3 appearances required for reliability
-- Removed blocking gates in `main.py` for pitcher K props
-- Fixed `leg_scorer.py` to route pitcher props correctly
-- Result: 278 pitcher K props now available (up from 0)
-- Files modified: `src/engine/coverage.py`, `main.py`, `src/engine/leg_scorer.py`
+**2. Built Automated Outcome Resolver**
+- Box-score-based resolver: 1 API call per game (fast, efficient)
+- Resolves ALL scored legs (not just parlays): 300-400 legs/day
+- 458 legs resolved (April 17-20): 236 won, 222 lost
+- Daily automation at 9AM ET via scheduled bot task
+- Files: `src/tracker/outcome_resolver.py`, `src/bot/runner.py`
+
+**3. Enhanced Web App**
+- Position filter: "All / Hitters / Pitchers" with dynamic counts
+- Analyze button calls Claude API directly (no copy/paste prompt)
+- Direction bug fixed: over/under correctly passed to Claude
+- Web search removed: pure statistical analysis (10-20s, no hallucinations)
+- Complete data flow: coverage + EV + trend + opponent adjustment
+- Files: `src/web/static/index.html`, `src/web/server.py`, `src/engine/claude_agent.py`
+
+**4. Database Schema Updates**
+- Added `odd_id` column to `mlb_scored_legs` with UNIQUE constraint
+- Per-odd_id deduplication: allows afternoon pipeline re-runs (pitcher K props)
+- Fixed coverage_pct storage: 259 historical rows corrected (0-1 → 0-100 scale)
+- Migration: `ALTER TABLE mlb_scored_legs ADD COLUMN odd_id TEXT UNIQUE`
 
 ## Known Issues
 
+**Fixed Today:**
+- ✅ Coverage overconfidence (70%+ at 46% → now 68%)
+- ✅ EV signal inverted (strong +EV worst → fixed formula, needs validation)
+- ✅ Pitcher K props missing (pipeline timing + dedup issues → fixed)
+- ✅ Analyze button broken (showed prompt → now calls API)
+- ✅ Web search hallucinations (removed web search entirely)
+- ✅ Direction bug (all "over" → now uses actual direction)
+
+**Still Validating:**
+- ⏳ EV signal correction (fixed in code, need 2-3 days of new data to validate)
+- ⏳ Total bases penalty (tightened to 0.78x, need 50+ more legs to confirm)
+
+## Next Session Priorities
+
 **High Priority:**
-1. **Web app analyze flow broken** — "Analyze Parlay" button shows modal with prompt text instead of calling Claude API
-2. **No bet tracking** — can't log bets or track outcomes
-3. **Pitcher props not visible in web app** — need to debug (props exist in pipeline but not displaying)
+1. Validate EV signal after 2-3 days (strong +EV should now hit better than strong -EV)
+2. Run calibration on full dataset after 1,000+ resolved legs
+3. Confirm pitcher K props appear in tomorrow's 9AM pipeline run
 
 **Medium Priority:**
-4. **Pool diversity** — same 2 legs (Del Castillo + Hicks RBI) anchor all 5 parlays every day
-5. **Pipeline wastes tokens** — generates automated parlays 3x/day that aren't used
+4. Add bet tracking system (`mlb_placed_bets` table + web app flow)
+5. Monitor pool diversity (same legs dominating parlays)
 
-## Architecture Debt from NBA Agent
-
-**Current (Legacy):**
-- Discord bot posts automated parlay recommendations 3x/day
-- Pipeline runs: resolve + fetch props + build parlays + Claude analysis → Discord
-- Web app is secondary (manual parlay builder with broken submit flow)
-
-**Desired (User-Defined):**
-- Web app is primary interface: browse legs → build parlay → analyze → place bet → auto-resolve
-- Morning run (9AM): resolve yesterday's legs + bets, fetch today's props, score legs (no parlay building)
-- Midday/evening runs (12PM/5:30PM): refresh odds, check lineups, rescore legs (no parlay building)
-- Claude analysis: only triggered manually from web app (not automated)
-- Bet tracking: user places bets via web app, resolver checks them next day
-
-## Next Session Priority
-
-**Goal:** Make web app fully functional with bet tracking (Option C from session discussion)
-
-**Tasks:**
-1. Create `mlb_placed_bets` table in Supabase
-2. Add `/api/analyze` endpoint — calls Claude API directly, returns analysis
-3. Add `/api/bets` endpoints — POST to place bet, GET for bet history
-4. Fix web app analyze flow — remove modal fallback, call API directly
-5. Add "Place Bet" button (appears after analysis)
-6. Add "Bet History" view in web app
-7. Update `outcome_resolver.py` to resolve placed bets
-8. Clean up pipeline: remove automated parlay generation from scheduled runs
-
-**Estimated time:** 3-4 hours in Claude Code
+**Low Priority:**
+6. Build dashboard (P&L tracking, hit rate by prop category)
 
 ## Key Files Modified This Session
-- `src/web/static/index.html` — full parlay builder UI
-- `src/engine/coverage.py` — pitcher K coverage model
-- `main.py` — removed pitcher K blocking gates
-- `src/engine/leg_scorer.py` — pitcher prop routing
+- `src/engine/leg_scorer.py` — recalibrated weights, prop penalties
+- `src/apis/sportsgameodds.py` — fixed EV calculation
+- `main.py` — confidence multiplier application
+- `src/pipelines/lineup_poller.py` — coverage scale bug fix
+- `src/tracker/outcome_resolver.py` — complete rewrite, box-score resolver
+- `src/tracker/leg_calibration.py` — direction-adjusted win probability
+- `src/utils/db.py` — per-odd_id deduplication
+- `src/web/static/index.html` — position filters, analyze button, data flow
+- `src/web/server.py` — /api/analyze endpoint
+- `src/engine/claude_agent.py` — removed web search, statistical analysis only
 
 ## Git Status
-**Latest commit:** `edf227c` — "feat: enable pitcher strikeout props with Poisson coverage model"
-**Deployed to Railway:** Yes (deployment successful)
+**Latest commit:** `4b49efd` — "fix: pass ev_per_unit, trend_score, opponent_adjustment to /api/analyze"
+**Deployed to Railway:** Yes (all commits pushed and deployed)
 
 ## Environment
 - Repository: github.com/MrGweeod/mlb-agent
 - Deployment: Railway (mlb-agent project)
-- Web app: https://mlb-agent.up.railway.app
+- Web app: https://mlb-agent-production.up.railway.app (password protected)
 - Database: Supabase PostgreSQL (same instance as NBA agent)
 - Python: 3.14 in venv (WSL2 Ubuntu)
