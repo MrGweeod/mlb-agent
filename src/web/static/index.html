@@ -16,6 +16,7 @@
     --yellow: #eab308;
     --red: #ef4444;
     --purple: #a855f7;
+    --selected-bg: #1e3a5f;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -73,7 +74,7 @@
     background: var(--bg);
     border-bottom: 1px solid var(--border);
     padding: 12px 16px;
-    z-index: 10;
+    z-index: 20;
   }
   .header-row {
     display: flex;
@@ -83,6 +84,7 @@
   }
   .header-title { font-size: 17px; font-weight: 700; }
   .header-date { font-size: 12px; color: var(--muted); }
+  .header-actions { display: flex; align-items: center; gap: 8px; }
   #refresh-btn {
     padding: 6px 12px;
     background: var(--surface);
@@ -93,6 +95,16 @@
     cursor: pointer;
   }
   #refresh-btn:active { opacity: 0.7; }
+  #selected-badge {
+    display: none;
+    padding: 5px 10px;
+    background: var(--accent);
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  #selected-badge.visible { display: block; }
 
   /* ── Filters ── */
   .filters {
@@ -164,10 +176,25 @@
   }
   .summary span { color: var(--text); font-weight: 600; }
 
+  /* ── Main layout ── */
+  .main-layout { display: block; }
+
+  @media (min-width: 768px) {
+    .main-layout {
+      display: grid;
+      grid-template-columns: 1fr 340px;
+      align-items: start;
+    }
+  }
+
   /* ── Leg cards ── */
-  #legs-list { padding: 8px 0 80px; }
+  #legs-list { padding: 8px 0 180px; }
+  @media (min-width: 768px) {
+    #legs-list { padding-bottom: 40px; }
+  }
 
   .leg-card {
+    position: relative;
     margin: 6px 12px;
     background: var(--surface);
     border: 1px solid var(--border);
@@ -177,16 +204,30 @@
     grid-template-columns: 1fr auto;
     gap: 6px 12px;
     cursor: pointer;
-    transition: border-color 0.15s;
+    transition: border-color 0.15s, background 0.15s, opacity 0.15s;
+    user-select: none;
   }
-  .leg-card:active { border-color: var(--accent); }
-  .leg-card.in-parlay { border-left: 3px solid var(--green); }
+  .leg-card:active { opacity: 0.8; }
+  .leg-card.selected {
+    background: var(--selected-bg);
+    border-color: var(--accent);
+    border-left: 3px solid var(--accent);
+  }
+  .leg-card.reaches-target:not(.selected) {
+    border-color: var(--green);
+  }
+  .leg-card.in-parlay:not(.selected) { border-left: 3px solid var(--green); }
   .leg-card.lineup-pending { opacity: 0.65; }
+  .leg-card.lineup-pending.selected { opacity: 0.85; }
+  .leg-card.blocked { opacity: 0.35; cursor: not-allowed; }
 
   .leg-player {
     font-weight: 600;
     font-size: 14px;
     grid-column: 1;
+    display: flex;
+    align-items: center;
+    gap: 6px;
   }
   .leg-matchup {
     font-size: 11px;
@@ -224,8 +265,28 @@
   .ev-badge  { font-size: 11px; color: var(--muted); }
   .ev-pos    { color: var(--green); }
   .ev-neg    { color: var(--red); }
-  .odds-text { font-size: 11px; color: var(--muted); }
   .lineup-tag { font-size: 10px; color: var(--yellow); }
+  .selected-check { font-size: 16px; color: var(--accent); font-weight: 700; }
+  .target-tag { font-size: 10px; color: var(--green); font-weight: 600; }
+  .blocked-tag { font-size: 10px; color: var(--red); }
+
+  /* Info button */
+  .leg-info-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 10px;
+    cursor: pointer;
+    flex-shrink: 0;
+    line-height: 1;
+  }
+  .leg-info-btn:hover { border-color: var(--accent); color: var(--accent); }
 
   /* ── Expanded detail ── */
   .leg-detail {
@@ -236,7 +297,6 @@
     margin-top: 8px;
     font-size: 12px;
     color: var(--muted);
-    display: none;
   }
   .leg-card.expanded .leg-detail { display: grid; }
   .detail-grid {
@@ -267,6 +327,233 @@
     animation: spin 0.7s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Selected Legs Panel ── */
+  #selected-panel {
+    background: var(--surface);
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* Mobile: fixed bottom drawer */
+  @media (max-width: 767px) {
+    #selected-panel {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      max-height: 65vh;
+      border-top: 2px solid var(--border);
+      border-radius: 16px 16px 0 0;
+      transform: translateY(100%);
+      transition: transform 0.3s ease;
+      z-index: 30;
+      overflow: hidden;
+    }
+    #selected-panel.visible { transform: translateY(0); }
+    #panel-drag-handle {
+      display: flex;
+      justify-content: center;
+      padding: 10px 10px 4px;
+      cursor: grab;
+      flex-shrink: 0;
+    }
+    #panel-drag-handle::after {
+      content: '';
+      width: 40px;
+      height: 4px;
+      background: var(--border);
+      border-radius: 2px;
+    }
+  }
+
+  /* Desktop: right sidebar */
+  @media (min-width: 768px) {
+    #selected-panel {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      border-left: 1px solid var(--border);
+      overflow-y: auto;
+    }
+    #panel-drag-handle { display: none; }
+  }
+
+  .panel-header {
+    padding: 14px 16px 10px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+  }
+  .panel-title { font-size: 15px; font-weight: 700; }
+  .panel-close {
+    background: none;
+    border: none;
+    color: var(--muted);
+    font-size: 18px;
+    cursor: pointer;
+    padding: 4px;
+    line-height: 1;
+  }
+  @media (min-width: 768px) { .panel-close { display: none; } }
+
+  .panel-body {
+    overflow-y: auto;
+    flex: 1;
+    padding: 4px 0;
+  }
+  .panel-empty {
+    padding: 28px 16px;
+    text-align: center;
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.7;
+  }
+
+  .selected-leg-item {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+  }
+  .selected-leg-info { flex: 1; min-width: 0; }
+  .selected-leg-player { font-weight: 600; font-size: 13px; }
+  .selected-leg-prop { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .selected-leg-meta { font-size: 12px; color: var(--text); margin-top: 2px; }
+  .remove-leg-btn {
+    background: none;
+    border: none;
+    color: var(--muted);
+    font-size: 16px;
+    cursor: pointer;
+    padding: 2px 4px;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+  .remove-leg-btn:hover { color: var(--red); }
+
+  /* ── Panel footer ── */
+  .panel-footer {
+    border-top: 1px solid var(--border);
+    padding: 14px 16px;
+    flex-shrink: 0;
+    background: var(--surface);
+  }
+  .odds-display {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 6px;
+  }
+  .odds-label { font-size: 12px; color: var(--muted); }
+  .odds-value { font-size: 24px; font-weight: 800; color: var(--text); }
+  .odds-value.in-target { color: var(--green); }
+  .odds-value.above-target { color: var(--yellow); }
+  .leg-count-hint {
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 10px;
+    text-align: center;
+  }
+  .leg-count-hint.ready { color: var(--green); }
+
+  #submit-btn {
+    width: 100%;
+    padding: 13px;
+    background: var(--accent);
+    border: none;
+    border-radius: 8px;
+    color: #fff;
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  #submit-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+  #submit-btn:not(:disabled):active { opacity: 0.8; }
+
+  #clear-btn {
+    width: 100%;
+    margin-top: 8px;
+    padding: 8px;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--muted);
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  /* ── Toast ── */
+  #toast {
+    position: fixed;
+    bottom: 90px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #1e293b;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 16px;
+    font-size: 13px;
+    color: var(--text);
+    z-index: 100;
+    white-space: nowrap;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.2s;
+  }
+
+  /* ── Prompt modal ── */
+  #overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.7);
+    z-index: 50;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  #overlay.visible { display: flex; }
+  .modal {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    max-width: 520px;
+    width: 100%;
+    max-height: 80vh;
+    overflow-y: auto;
+  }
+  .modal h3 { font-size: 16px; font-weight: 700; margin-bottom: 12px; }
+  .modal pre {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    font-size: 12px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--muted);
+    margin-bottom: 14px;
+    max-height: 320px;
+    overflow-y: auto;
+  }
+  .modal-actions { display: flex; gap: 8px; }
+  .modal-btn {
+    flex: 1;
+    padding: 10px;
+    border-radius: 8px;
+    border: none;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .modal-btn.primary { background: var(--accent); color: #fff; }
+  .modal-btn.secondary { background: var(--bg); border: 1px solid var(--border); color: var(--text); }
 </style>
 </head>
 <body>
@@ -288,7 +575,10 @@
         <div class="header-title">⚾ Parlay Legs</div>
         <div class="header-date" id="header-date"></div>
       </div>
-      <button id="refresh-btn">Refresh</button>
+      <div class="header-actions">
+        <div id="selected-badge">0 selected</div>
+        <button id="refresh-btn">Refresh</button>
+      </div>
     </div>
   </header>
 
@@ -315,27 +605,69 @@
 
   <div class="summary" id="summary-bar">
     <div>Legs: <span id="leg-count">—</span></div>
-    <div>Parlay: <span id="parlay-count">—</span></div>
+    <div>Selected: <span id="parlay-count">—</span></div>
     <div>Avg cov: <span id="avg-cov">—</span></div>
   </div>
 
-  <div id="legs-list">
-    <div class="center-msg">
-      <div class="spinner"></div>
-      <div>Loading legs…</div>
+  <div class="main-layout">
+    <div id="legs-list">
+      <div class="center-msg">
+        <div class="spinner"></div>
+        <div>Loading legs…</div>
+      </div>
+    </div>
+
+    <!-- ── Selected Legs Panel ── -->
+    <div id="selected-panel">
+      <div id="panel-drag-handle"></div>
+      <div class="panel-header">
+        <div class="panel-title">Selected Legs</div>
+        <button class="panel-close" id="panel-close-btn">✕</button>
+      </div>
+      <div class="panel-body" id="panel-body">
+        <div class="panel-empty">
+          Tap a leg card to add it to your parlay.<br><br>
+          Select 4–8 legs to submit for analysis.
+        </div>
+      </div>
+      <div class="panel-footer">
+        <div class="odds-display">
+          <div class="odds-label">Combined odds</div>
+          <div class="odds-value" id="combined-odds">—</div>
+        </div>
+        <div class="leg-count-hint" id="leg-count-hint">Select 4–8 legs</div>
+        <button id="submit-btn" disabled>Analyze Parlay</button>
+        <button id="clear-btn">Clear all</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Toast ── -->
+<div id="toast"></div>
+
+<!-- ── Prompt modal ── -->
+<div id="overlay">
+  <div class="modal">
+    <h3>Parlay Analysis Prompt</h3>
+    <pre id="prompt-preview"></pre>
+    <div class="modal-actions">
+      <button class="modal-btn secondary" id="modal-cancel-btn">Cancel</button>
+      <button class="modal-btn primary" id="modal-copy-btn">Copy to Clipboard</button>
     </div>
   </div>
 </div>
 
 <script>
-// ── State ────────────────────────────────────────────────────────────────────
+// ── State ─────────────────────────────────────────────────────────────────────
 let password = '';
 let allLegs = [];
 let activeStat = 'all';
 let sortKey = 'coverage';
 let showUnders = true;
+let selectedIds = new Set();
 
-// ── Auth ─────────────────────────────────────────────────────────────────────
+// ── Auth ──────────────────────────────────────────────────────────────────────
 function tryAuth() {
   const pw = document.getElementById('pw-input').value.trim();
   if (!pw) return;
@@ -367,7 +699,7 @@ async function fetchLegs() {
     return true;
   } catch (err) {
     showError(err.message);
-    return true; // auth was ok, just a fetch error
+    return true;
   }
 }
 
@@ -404,7 +736,293 @@ toggleBtn.addEventListener('click', () => {
   render();
 });
 
+// ── Correlation blocking ──────────────────────────────────────────────────────
+function gameKey(leg) {
+  if (leg.game_id) return String(leg.game_id);
+  return [leg.team || '', leg.opponent || ''].sort().join('_');
+}
+
+function isPitcher(leg) {
+  const pos = (leg.position || '').toUpperCase();
+  if (pos === 'SP' || pos === 'RP' || pos === 'P') return true;
+  const pitcherStats = ['inningsPitched', 'hitsAllowed', 'earnedRuns', 'strikeoutsAllowed'];
+  return pitcherStats.includes(leg.stat);
+}
+
+// Returns a blocking reason string if the leg cannot be added, or null if OK.
+function checkCorrelation(leg, selectedLegs) {
+  // Max 1 batter leg per player
+  if (!isPitcher(leg)) {
+    const samePlayer = selectedLegs.find(s => s.player_name === leg.player_name);
+    if (samePlayer) return `Already have a leg for ${leg.player_name}`;
+  }
+
+  const legGame = gameKey(leg);
+  const gameLegs = selectedLegs.filter(s => gameKey(s) === legGame);
+
+  // Max 2 legs per game
+  if (gameLegs.length >= 2) {
+    return `Max 2 legs per game (${leg.team} vs ${leg.opponent})`;
+  }
+
+  // No pitcher + batter from same game
+  if (isPitcher(leg) && gameLegs.some(s => !isPitcher(s))) {
+    return `Can't combine pitcher and batter from same game`;
+  }
+  if (!isPitcher(leg) && gameLegs.some(s => isPitcher(s))) {
+    return `Can't combine pitcher and batter from same game`;
+  }
+
+  return null;
+}
+
+// ── Odds math ─────────────────────────────────────────────────────────────────
+function parseAmericanOdds(oddsStr) {
+  if (!oddsStr) return null;
+  const n = parseFloat(String(oddsStr).replace(/[^-\d.]/g, ''));
+  return isNaN(n) ? null : n;
+}
+
+function toDecimal(american) {
+  return american >= 100 ? 1 + american / 100 : 1 + 100 / Math.abs(american);
+}
+
+function toAmerican(decimal) {
+  if (decimal >= 2.0) return Math.round((decimal - 1) * 100);
+  return Math.round(-100 / (decimal - 1));
+}
+
+function calcCombinedOdds(legs) {
+  if (!legs.length) return null;
+  let combined = 1;
+  let hasOdds = false;
+  for (const leg of legs) {
+    const a = parseAmericanOdds(leg.odds);
+    if (a === null) continue;
+    combined *= toDecimal(a);
+    hasOdds = true;
+  }
+  return hasOdds ? toAmerican(combined) : null;
+}
+
+function fmtAmerican(american) {
+  if (american === null) return '—';
+  return american >= 0 ? `+${american}` : `${american}`;
+}
+
+function reachesTarget(leg, selectedLegs) {
+  if (selectedLegs.length < 1) return false;
+  const odds = calcCombinedOdds([...selectedLegs, leg]);
+  return odds !== null && odds >= 1000 && odds <= 1500;
+}
+
+// ── Selection ─────────────────────────────────────────────────────────────────
+function getSelectedLegs() {
+  return allLegs.filter(l => selectedIds.has(l.id));
+}
+
+// Called from onclick on leg cards (handler ignores clicks on info button)
+function handleCardClick(e) {
+  if (e.target.closest('.leg-info-btn')) return;
+  const card = e.currentTarget;
+  const legId = card.dataset.id;
+  const leg = allLegs.find(l => String(l.id) === legId);
+  if (!leg) return;
+
+  if (selectedIds.has(leg.id)) {
+    selectedIds.delete(leg.id);
+  } else {
+    if (selectedIds.size >= 8) {
+      showToast('Max 8 legs per parlay');
+      return;
+    }
+    const reason = checkCorrelation(leg, getSelectedLegs());
+    if (reason) {
+      card.style.outline = '2px solid var(--red)';
+      setTimeout(() => { card.style.outline = ''; }, 700);
+      showToast(reason);
+      return;
+    }
+    selectedIds.add(leg.id);
+  }
+
+  updatePanel();
+  render();
+}
+
+// ── Panel ─────────────────────────────────────────────────────────────────────
+function updatePanel() {
+  const selected = getSelectedLegs();
+  const count = selected.length;
+
+  // Header badge
+  const badge = document.getElementById('selected-badge');
+  badge.textContent = `${count} selected`;
+  badge.classList.toggle('visible', count > 0);
+
+  // Summary bar
+  document.getElementById('parlay-count').textContent = count;
+
+  // Mobile: show drawer when legs selected
+  if (window.innerWidth < 768) {
+    document.getElementById('selected-panel').classList.toggle('visible', count > 0);
+  }
+
+  // Panel body
+  const body = document.getElementById('panel-body');
+  if (count === 0) {
+    body.innerHTML = `<div class="panel-empty">
+      Tap a leg card to add it to your parlay.<br><br>
+      Select 4–8 legs to submit for analysis.
+    </div>`;
+  } else {
+    body.innerHTML = selected.map(leg => `
+      <div class="selected-leg-item">
+        <div class="selected-leg-info">
+          <div class="selected-leg-player">${esc(leg.player_name || '—')}</div>
+          <div class="selected-leg-prop">${esc(statLabel(leg.stat))} ${esc(fmtLine(leg.line, leg.direction))} · ${esc(leg.team || '')} vs ${esc(leg.opponent || '')}</div>
+          <div class="selected-leg-meta">${esc(leg.odds || '—')} &nbsp;|&nbsp; cov ${fmtPct(leg.coverage_pct)} &nbsp;|&nbsp; EV ${fmtEv(leg.ev_per_unit)}</div>
+        </div>
+        <button class="remove-leg-btn" data-legid="${esc(String(leg.id))}">✕</button>
+      </div>
+    `).join('');
+
+    // Attach remove handlers
+    body.querySelectorAll('.remove-leg-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const id = btn.dataset.legid;
+        const leg = allLegs.find(l => String(l.id) === id);
+        if (leg) { selectedIds.delete(leg.id); updatePanel(); render(); }
+      });
+    });
+  }
+
+  // Combined odds
+  const combinedOdds = calcCombinedOdds(selected);
+  const oddsEl = document.getElementById('combined-odds');
+  oddsEl.textContent = fmtAmerican(combinedOdds);
+  if (combinedOdds !== null && combinedOdds >= 1000 && combinedOdds <= 1500) {
+    oddsEl.className = 'odds-value in-target';
+  } else if (combinedOdds !== null && combinedOdds > 1500) {
+    oddsEl.className = 'odds-value above-target';
+  } else {
+    oddsEl.className = 'odds-value';
+  }
+
+  // Count hint
+  const hint = document.getElementById('leg-count-hint');
+  if (count === 0) {
+    hint.textContent = 'Select 4–8 legs';
+    hint.className = 'leg-count-hint';
+  } else if (count < 4) {
+    hint.textContent = `${count}/8 legs — need ${4 - count} more`;
+    hint.className = 'leg-count-hint';
+  } else {
+    hint.textContent = `${count}/8 legs — ready to analyze`;
+    hint.className = 'leg-count-hint ready';
+  }
+
+  // Submit button
+  document.getElementById('submit-btn').disabled = count < 4 || count > 8;
+}
+
+document.getElementById('panel-close-btn').addEventListener('click', () => {
+  document.getElementById('selected-panel').classList.remove('visible');
+});
+
+document.getElementById('selected-badge').addEventListener('click', () => {
+  if (window.innerWidth < 768) {
+    document.getElementById('selected-panel').classList.add('visible');
+  }
+});
+
+document.getElementById('clear-btn').addEventListener('click', () => {
+  selectedIds.clear();
+  updatePanel();
+  render();
+});
+
+// ── Submit / Prompt ───────────────────────────────────────────────────────────
+document.getElementById('submit-btn').addEventListener('click', submitParlay);
+
+function buildPromptText(legs) {
+  const combinedOdds = calcCombinedOdds(legs);
+  const today = new Date().toLocaleDateString('en-US', {
+    weekday: 'long', month: 'long', day: 'numeric', year: 'numeric'
+  });
+  const legsList = legs.map((leg, i) => [
+    `${i + 1}. ${leg.player_name} — ${statLabel(leg.stat)} ${fmtLine(leg.line, leg.direction)} (${leg.odds || 'odds unknown'})`,
+    `   Coverage: ${fmtPct(leg.coverage_pct)} | EV: ${fmtEv(leg.ev_per_unit)} | Trend: ${leg.trend_score != null ? leg.trend_score.toFixed(1) : '—'}`,
+    `   Matchup: ${leg.team} vs ${leg.opponent}${leg.lineup_confirmed ? '' : ' [lineup pending]'}`,
+  ].join('\n')).join('\n\n');
+
+  return `Please analyze this ${legs.length}-leg MLB parlay for ${today}:
+
+Combined odds: ${fmtAmerican(combinedOdds)}
+
+LEGS:
+${legsList}
+
+Please evaluate:
+1. Overall parlay quality and risk profile
+2. Any correlation or lineup concerns
+3. The strongest and weakest legs
+4. Whether you'd recommend this parlay at these odds
+5. Any suggested substitutions or adjustments`;
+}
+
+function submitParlay() {
+  const selected = getSelectedLegs();
+  if (selected.length < 4 || selected.length > 8) return;
+  const prompt = buildPromptText(selected);
+
+  if (typeof window.sendPrompt === 'function') {
+    window.sendPrompt(prompt);
+    return;
+  }
+
+  // Fallback: show modal
+  document.getElementById('prompt-preview').textContent = prompt;
+  document.getElementById('overlay').classList.add('visible');
+}
+
+document.getElementById('modal-cancel-btn').addEventListener('click', () => {
+  document.getElementById('overlay').classList.remove('visible');
+});
+
+document.getElementById('modal-copy-btn').addEventListener('click', () => {
+  const text = document.getElementById('prompt-preview').textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    showToast('Copied to clipboard!');
+    document.getElementById('overlay').classList.remove('visible');
+  }).catch(() => showToast('Copy failed — select text manually'));
+});
+
+document.getElementById('overlay').addEventListener('click', e => {
+  if (e.target === document.getElementById('overlay')) {
+    document.getElementById('overlay').classList.remove('visible');
+  }
+});
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+let toastTimeout;
+function showToast(msg) {
+  const toast = document.getElementById('toast');
+  toast.textContent = msg;
+  toast.style.opacity = '1';
+  clearTimeout(toastTimeout);
+  toastTimeout = setTimeout(() => { toast.style.opacity = '0'; }, 2800);
+}
+
 // ── Rendering ─────────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 function covClass(pct) {
   if (pct === null || pct === undefined) return 'cov-low';
   if (pct >= 0.65) return 'cov-high';
@@ -419,14 +1037,12 @@ function fmtPct(val) {
 
 function fmtEv(val) {
   if (val === null || val === undefined) return '—';
-  const s = (val >= 0 ? '+' : '') + (val * 100).toFixed(1) + '%';
-  return s;
+  return (val >= 0 ? '+' : '') + (val * 100).toFixed(1) + '%';
 }
 
 function fmtLine(line, direction) {
   if (line === null || line === undefined) return '—';
-  const dir = direction === 'under' ? 'U' : 'O';
-  return `${dir} ${line}`;
+  return `${direction === 'under' ? 'U' : 'O'} ${line}`;
 }
 
 function statLabel(stat) {
@@ -456,13 +1072,12 @@ function render() {
     return 0;
   });
 
-  const parlayLegs = legs.filter(l => l.in_parlay);
+  const selectedLegs = getSelectedLegs();
   const avgCov = legs.length
     ? legs.reduce((s, l) => s + (l.coverage_pct || 0), 0) / legs.length
     : 0;
 
   document.getElementById('leg-count').textContent = legs.length;
-  document.getElementById('parlay-count').textContent = parlayLegs.length;
   document.getElementById('avg-cov').textContent = fmtPct(avgCov);
 
   if (!legs.length) {
@@ -471,29 +1086,44 @@ function render() {
     return;
   }
 
-  const html = legs.map(leg => {
-    const covCls = covClass(leg.coverage_pct);
-    const evCls  = (leg.ev_per_unit || 0) >= 0 ? 'ev-pos' : 'ev-neg';
-    const inParlay = leg.in_parlay ? 'in-parlay' : '';
-    const lineupPending = !leg.lineup_confirmed ? 'lineup-pending' : '';
+  const listEl = document.getElementById('legs-list');
+  listEl.innerHTML = legs.map(leg => {
+    const isSelected = selectedIds.has(leg.id);
+    const blockReason = !isSelected ? checkCorrelation(leg, selectedLegs) : null;
+    const isBlocked = !isSelected && !!blockReason && selectedIds.size > 0;
+    const hitsTarget = !isSelected && !blockReason && reachesTarget(leg, selectedLegs);
     const dirCls = leg.direction === 'under' ? 'direction-under' : 'direction-over';
 
-    return `
-    <div class="leg-card ${inParlay} ${lineupPending}" data-id="${leg.id}" onclick="toggleCard(this)">
-      <div class="leg-player">${leg.player_name || '—'}</div>
-      <div class="leg-matchup">${leg.team || '—'} vs ${leg.opponent || '—'}</div>
+    const classes = [
+      'leg-card',
+      isSelected ? 'selected' : '',
+      !leg.lineup_confirmed ? 'lineup-pending' : '',
+      hitsTarget ? 'reaches-target' : '',
+      isBlocked ? 'blocked' : '',
+      leg.in_parlay && !isSelected ? 'in-parlay' : '',
+    ].filter(Boolean).join(' ');
+
+    return `<div class="${classes}" data-id="${esc(String(leg.id))}">
+      <div class="leg-player">
+        ${esc(leg.player_name || '—')}
+        <button class="leg-info-btn" title="Show details">ⓘ</button>
+      </div>
+      <div class="leg-matchup">${esc(leg.team || '—')} vs ${esc(leg.opponent || '—')}</div>
       <div class="leg-prop">
-        <span class="stat-name">${statLabel(leg.stat)}</span>
+        <span class="stat-name">${esc(statLabel(leg.stat))}</span>
         &nbsp;
-        <span class="${dirCls}">${fmtLine(leg.line, leg.direction)}</span>
-        ${leg.odds ? `<span style="color:var(--muted)"> (${leg.odds})</span>` : ''}
+        <span class="${dirCls}">${esc(fmtLine(leg.line, leg.direction))}</span>
+        ${leg.odds ? `<span style="color:var(--muted)"> (${esc(String(leg.odds))})</span>` : ''}
       </div>
 
       <div class="leg-scores">
-        <div class="coverage-badge ${covCls}">${fmtPct(leg.coverage_pct)}</div>
-        <div class="ev-badge ${evCls}">EV ${fmtEv(leg.ev_per_unit)}</div>
+        ${isSelected ? '<div class="selected-check">✓</div>' : ''}
+        ${hitsTarget ? '<div class="target-tag">🎯 target</div>' : ''}
+        ${isBlocked ? '<div class="blocked-tag">blocked</div>' : ''}
+        <div class="coverage-badge ${covClass(leg.coverage_pct)}">${fmtPct(leg.coverage_pct)}</div>
+        <div class="ev-badge ${(leg.ev_per_unit || 0) >= 0 ? 'ev-pos' : 'ev-neg'}">EV ${fmtEv(leg.ev_per_unit)}</div>
         ${!leg.lineup_confirmed ? '<div class="lineup-tag">lineup pending</div>' : ''}
-        ${leg.in_parlay ? '<div style="font-size:10px;color:var(--green)">IN PARLAY</div>' : ''}
+        ${leg.in_parlay && !isSelected ? '<div style="font-size:10px;color:var(--green)">engine pick</div>' : ''}
       </div>
 
       <div class="leg-detail">
@@ -504,45 +1134,55 @@ function render() {
           </div>
           <div class="detail-row">
             <div class="detail-label">Trend Score</div>
-            <div class="detail-value">${leg.trend_score !== null && leg.trend_score !== undefined ? leg.trend_score.toFixed(1) : '—'}</div>
+            <div class="detail-value">${leg.trend_score != null ? leg.trend_score.toFixed(1) : '—'}</div>
           </div>
           <div class="detail-row">
             <div class="detail-label">Opp Adj</div>
-            <div class="detail-value">${leg.opponent_adjustment !== null ? (leg.opponent_adjustment > 0 ? '+' : '') + (leg.opponent_adjustment * 100).toFixed(0) + '%' : '—'}</div>
+            <div class="detail-value">${leg.opponent_adjustment != null ? (leg.opponent_adjustment > 0 ? '+' : '') + (leg.opponent_adjustment * 100).toFixed(0) + '%' : '—'}</div>
           </div>
           <div class="detail-row">
             <div class="detail-label">Position</div>
-            <div class="detail-value">${leg.position || '—'}</div>
+            <div class="detail-value">${esc(leg.position || '—')}</div>
           </div>
           <div class="detail-row">
             <div class="detail-label">Result</div>
-            <div class="detail-value">${leg.result || 'pending'}</div>
+            <div class="detail-value">${esc(leg.result || 'pending')}</div>
           </div>
           <div class="detail-row">
             <div class="detail-label">Actual</div>
-            <div class="detail-value">${leg.actual_value !== null && leg.actual_value !== undefined ? leg.actual_value : '—'}</div>
+            <div class="detail-value">${leg.actual_value != null ? leg.actual_value : '—'}</div>
           </div>
         </div>
       </div>
     </div>`;
   }).join('');
 
-  document.getElementById('legs-list').innerHTML = html;
-}
-
-function toggleCard(card) {
-  card.classList.toggle('expanded');
-  const detail = card.querySelector('.leg-detail');
-  if (detail) detail.style.display = card.classList.contains('expanded') ? 'grid' : 'none';
+  // Attach event handlers (avoids inline onclick with user data)
+  listEl.querySelectorAll('.leg-card').forEach(card => {
+    card.addEventListener('click', handleCardClick);
+  });
+  listEl.querySelectorAll('.leg-info-btn').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const card = btn.closest('.leg-card');
+      card.classList.toggle('expanded');
+      const detail = card.querySelector('.leg-detail');
+      if (detail) detail.style.display = card.classList.contains('expanded') ? 'grid' : 'none';
+      btn.textContent = card.classList.contains('expanded') ? '▲' : 'ⓘ';
+    });
+  });
 }
 
 function showError(msg) {
   document.getElementById('legs-list').innerHTML =
-    `<div class="center-msg"><div style="color:var(--red)">${msg}</div></div>`;
+    `<div class="center-msg"><div style="color:var(--red)">${esc(msg)}</div></div>`;
 }
 
-// Auto-refresh every 5 minutes while page is open
+// Auto-refresh every 5 minutes
 setInterval(() => { if (password) fetchLegs(); }, 5 * 60 * 1000);
+
+// Init
+updatePanel();
 </script>
 </body>
 </html>
