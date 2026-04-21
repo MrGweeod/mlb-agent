@@ -82,25 +82,47 @@ _BLOCKED_STAT_IDS: frozenset[str] = frozenset({
 })
 
 
-def _compute_ev(fair_line: float | None, standard_odds: str | None) -> float:
+def _compute_ev(
+    fair_line: float | None,
+    standard_odds: str | None,
+    book_line: float | None = None,
+    direction: str = "over",
+) -> float:
     """
     Compute EV per unit from SGO fair line and DraftKings book odds.
 
-    fair_line is the SGO fairOverUnder — the line at which both sides
-    have equal expected value. When book odds are worse than fair odds,
-    EV is negative. When better, EV is positive.
+    fair_line is the SGO fairOverUnder — the sharp consensus line where
+    P(over) = P(under) = 0.50 with no vig. A book_line below fair_line
+    for an "over" bet means the bar is easier to clear → positive edge.
 
-    Returns 0.0 when either input is missing or unparseable.
+    Formula:
+      line_diff  = fair_line − book_line  (flipped for "under")
+      fair_prob  = 0.50 + line_diff × 0.25   (clamped to [0.05, 0.95])
+      EV         = fair_prob − book_implied_prob
+
+    Returns 0.0 when fair_line, book_line, or standard_odds is missing.
     """
     try:
-        if fair_line is None or standard_odds is None:
+        if fair_line is None or book_line is None or standard_odds is None:
             return 0.0
         odds = int(str(standard_odds).replace("+", ""))
         if odds < 0:
-            implied = abs(odds) / (abs(odds) + 100)
+            book_implied = abs(odds) / (abs(odds) + 100)
         else:
-            implied = 100 / (odds + 100)
-        return round(0.50 - implied, 4)
+            book_implied = 100 / (odds + 100)
+
+        # Positive line_diff means the book line is easier to beat than fair.
+        # For "over": easier when book_line < fair_line → fair_line - book_line > 0.
+        # For "under": easier when book_line > fair_line → book_line - fair_line > 0.
+        line_diff = float(fair_line) - float(book_line)
+        if direction == "under":
+            line_diff = -line_diff
+
+        # Approximate probability: 0.50 baseline + 0.25 per line unit.
+        # (Calibration heuristic — each 0.5-unit shift ≈ 10-15% for MLB props.)
+        fair_prob = max(0.05, min(0.95, 0.50 + line_diff * 0.25))
+
+        return round(fair_prob - book_implied, 4)
     except Exception:
         return 0.0
 
@@ -406,7 +428,9 @@ def get_player_props(game, include_unders=True):
                     'standard_odds': book_odds,
                     'all_lines': all_lines,
                     'fair_line': fair_line,
-                    'ev_per_unit': _compute_ev(fair_line, book_odds),
+                    'ev_per_unit': _compute_ev(
+                        fair_line, book_odds, dk.get('overUnder'), direction
+                    ),
                     'odd_id': prop.get('oddID'),
                     'direction': direction,
                 }

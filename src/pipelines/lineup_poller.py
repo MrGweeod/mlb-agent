@@ -91,15 +91,22 @@ def _rescore_leg(leg: dict, season: int) -> bool:
             mark_lineup_confirmed(leg_id)
             return True
 
+        # Apply confidence multiplier (blueprint §4.2): shrink toward 50% for
+        # small samples. Store as 0-100 percentage to match the DB column scale.
+        raw_rate     = coverage["coverage_rate"]
+        multiplier   = coverage["confidence_multiplier"]
+        adjusted     = 0.50 + multiplier * (raw_rate - 0.50)
+        coverage_pct_val = round(adjusted * 100, 1)
+
         # Re-build a minimal leg dict so score_leg() can compute the composite
         scored = dict(leg)
-        scored["coverage_pct"] = coverage["coverage_rate"]
+        scored["coverage_pct"] = coverage_pct_val
 
         new_composite = score_leg(scored)
 
         update_leg_after_rescore(
             leg_id=leg_id,
-            coverage_pct=coverage["coverage_rate"],
+            coverage_pct=coverage_pct_val,
             p_over=leg.get("p_over"),          # p_over not recomputed here
             ev_per_unit=leg.get("ev_per_unit"),
             trend_score=new_composite,

@@ -54,12 +54,19 @@ async def pipeline_resolve() -> str:
 
     def _resolve():
         import io, sys
-        from src.tracker.outcome_resolver import resolve_recommendations
+        from datetime import date, timedelta
+        from src.tracker.outcome_resolver import resolve_recommendations, resolve_all_legs
         buf = io.StringIO()
         old_stdout = sys.stdout
         sys.stdout = buf
         try:
             resolve_recommendations(verbose=True)
+            # Also resolve the full scored-leg pool for yesterday and today
+            # (box-score approach: 1 API call per game, covers all players)
+            yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+            today     = date.today().strftime("%Y-%m-%d")
+            resolve_all_legs(yesterday, verbose=True)
+            resolve_all_legs(today, verbose=True)
         finally:
             sys.stdout = old_stdout
         return buf.getvalue().strip() or "Nothing to resolve."

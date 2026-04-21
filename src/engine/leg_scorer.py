@@ -13,38 +13,53 @@ MLB adaptation of the NBA leg_scorer. Key differences:
     recency-weighted coverage factor since pitcher prop coverage is not yet
     implemented in a separate pipeline stage.
 
-Factors and weights:
+Factors and weights (emergency recalibration 2026-04-21):
 
-  Anchor (heavy-favourite legs — EV structurally negative at juice):
-    1. Recency-weighted coverage  (60%)
-    2. Trend score                (15%)
-    3. Opponent adjustment        (15%)
-    4. PA stability               (10%)
-    EV                             (0%)
+  Calibration findings (176 resolved legs, April 17–18):
+    - Coverage rate: 10–30% overconfident → apply confidence multiplier upstream
+      + prop-specific penalty multipliers below
+    - EV signal: INVERTED in old formula (zeroed until new formula validated)
+    - Trend signal: zero predictive value (dropped)
+    - Opponent adjustment: logical signal, kept
+    - Pitcher K props (Poisson model): well calibrated, no penalty needed
 
-  Swing (payout-boosting legs — EV matters):
-    1. Recency-weighted coverage  (40%)
-    2. EV / odds value            (25%)
-    3. Trend score                (15%)
-    4. Opponent adjustment        (15%)
-    5. PA stability                (5%)
+  Both anchor and swing now share the same emergency weight profile:
+    1. Coverage (with prop penalty)  70%
+    2. Opponent adjustment           20%
+    3. PA stability                  10%
+    EV / trend                        0%  (re-enable after calibration confirms)
 
 All factors normalised to [0, 1] before weighting.
 Final composite_score ∈ [0, 100], attached to each leg dict in-place.
 """
 from __future__ import annotations
 
-_WEIGHT_COVERAGE_ANCHOR  = 0.60
+_WEIGHT_COVERAGE_ANCHOR  = 0.70
 _WEIGHT_EV_ANCHOR        = 0.00
-_WEIGHT_TREND_ANCHOR     = 0.15
-_WEIGHT_OPPONENT_ANCHOR  = 0.15
+_WEIGHT_TREND_ANCHOR     = 0.00
+_WEIGHT_OPPONENT_ANCHOR  = 0.20
 _WEIGHT_PA_ANCHOR        = 0.10
 
-_WEIGHT_COVERAGE_SWING   = 0.40
-_WEIGHT_EV_SWING         = 0.25
-_WEIGHT_TREND_SWING      = 0.15
-_WEIGHT_OPPONENT_SWING   = 0.15
-_WEIGHT_PA_SWING         = 0.05
+_WEIGHT_COVERAGE_SWING   = 0.70
+_WEIGHT_EV_SWING         = 0.00
+_WEIGHT_TREND_SWING      = 0.00
+_WEIGHT_OPPONENT_SWING   = 0.20
+_WEIGHT_PA_SWING         = 0.10
+
+# Per-prop overconfidence correction factors (2026-04-21 calibration).
+# strikeouts (Poisson pitcher model) is well-calibrated → 1.0.
+# All batter props cluster at ~50% actual despite 57-62% predictions → penalty.
+# These multiply the recency-weighted coverage factor before composite scoring.
+_PROP_COVERAGE_PENALTY: dict[str, float] = {
+    "strikeouts":  1.00,  # pitcher K props — well calibrated
+    "hits":        0.85,  # 11.5% overconfident
+    "totalBases":  0.85,  # 10.3% overconfident
+    "rbi":         0.90,  # 7.9% overconfident
+    "walks":       0.85,  # 9.8% overconfident
+    "homeRuns":    0.85,
+    "runsScored":  0.90,
+    "stolenBases": 0.90,
+}
 
 _EV_CLIP_LOW  = -0.5
 _EV_CLIP_HIGH =  0.5
@@ -207,8 +222,12 @@ def score_leg(
     Returns:
         Float ∈ [0, 100].
     """
-    # Factor 1 — recency-weighted coverage [0, 1]
-    f_coverage = _recency_weighted_coverage(leg)
+    # Factor 1 — recency-weighted coverage [0, 1] with prop-specific penalty.
+    # Penalty corrects for systematic overconfidence identified in calibration
+    # (April 17-18 data: batter props 10-30% overconfident vs actual hit rate).
+    stat       = leg.get("stat", "")
+    prop_mult  = _PROP_COVERAGE_PENALTY.get(stat, 0.85)
+    f_coverage = _recency_weighted_coverage(leg) * prop_mult
 
     # Factor 2 — EV / odds value [0, 1]
     ev         = float(leg.get("ev_per_unit") or 0.0)

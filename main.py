@@ -276,7 +276,13 @@ def _find_qualifying_legs(
         if coverage is None:
             continue  # below seasonal minimum games threshold
 
-        coverage_pct = round(coverage["coverage_rate"] * 100, 1)
+        # Apply confidence multiplier: shrink raw rate toward 50% baseline
+        # for small samples (blueprint §4.2). Without this, Poisson estimates
+        # from 10-19 split games are treated as fully reliable.
+        raw_rate   = coverage["coverage_rate"]
+        multiplier = coverage["confidence_multiplier"]
+        adjusted   = 0.50 + multiplier * (raw_rate - 0.50)
+        coverage_pct = round(adjusted * 100, 1)
         if coverage_pct < MIN_COVERAGE_PCT:
             continue
 
@@ -294,7 +300,7 @@ def _find_qualifying_legs(
             "odd_id":              odd_id,
             # Scoring signals
             "ev_per_unit":         prop.get("ev_per_unit", 0.0),
-            "p_over":              coverage["coverage_rate"],
+            "p_over":              round(adjusted, 4),
             "coverage_pct":        coverage_pct,
             "confidence_mult":     coverage["confidence_multiplier"],
             "split_used":          coverage["split_used"],
