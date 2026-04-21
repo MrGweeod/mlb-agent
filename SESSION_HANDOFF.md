@@ -1,185 +1,85 @@
 # MLB Parlay Agent — Session Handoff
-*April 18, 2026 — outcome resolver implemented; all batter prop legs resolving correctly*
+**Last Updated:** April 21, 2026
 
----
+## Current Status
+✅ **Web app deployed and functional** — interactive parlay builder with selection, correlation blocking, combined odds
+✅ **Pitcher K props enabled** — Poisson coverage model implemented, 278 pitcher K props available
+⚠️ **Web app needs work** — analyze button broken (shows modal instead of analyzing), no bet tracking system
+⚠️ **Pipeline needs cleanup** — still generating automated parlays 3x/day (wasting tokens)
 
-## Project Overview
+## What Was Built This Session (April 21)
 
-AI-powered MLB parlay recommendation system adapted from the NBA Parlay Agent v6.0.
-Python 3.10, WSL2 Ubuntu. Hosted on Railway. Discord bot delivers recommendations.
-PostgreSQL via Supabase (same instance as NBA agent, new `mlb_*` tables).
-GitHub: github.com/MrGweeod/mlb-agent.
-Blueprint: `MLB_Parlay_Agent_Blueprint_v1.docx` in repo root.
+**Interactive Web App Parlay Builder:**
+- Click to select legs (4-8 leg limit)
+- Real-time combined odds calculation
+- Correlation blocking (max 1 leg per player, max 2 per game, no pitcher+batter same game)
+- "Reaches target" indicator for legs that bring odds into +1000-1500 range
+- Mobile-first responsive design (bottom drawer on mobile, right sidebar on desktop)
+- File: `src/web/static/index.html` (17.5 KB single-file app)
 
----
+**Pitcher Strikeout Props:**
+- Added `calculate_pitcher_k_coverage()` to `src/engine/coverage.py`
+- Uses Poisson distribution based on season K/game rate (prefers games started, falls back to games pitched)
+- Minimum 3 appearances required for reliability
+- Removed blocking gates in `main.py` for pitcher K props
+- Fixed `leg_scorer.py` to route pitcher props correctly
+- Result: 278 pitcher K props now available (up from 0)
+- Files modified: `src/engine/coverage.py`, `main.py`, `src/engine/leg_scorer.py`
 
-## Status: Live and Producing Parlays
+## Known Issues
 
-All three phases complete and running. The agent produces 5 parlays per day on a 15-game
-slate. Last confirmed clean run: 2026-04-18, 157 eligible legs, 5 parlays (+1441–+1482).
+**High Priority:**
+1. **Web app analyze flow broken** — "Analyze Parlay" button shows modal with prompt text instead of calling Claude API
+2. **No bet tracking** — can't log bets or track outcomes
+3. **Pitcher props not visible in web app** — need to debug (props exist in pipeline but not displaying)
 
----
+**Medium Priority:**
+4. **Pool diversity** — same 2 legs (Del Castillo + Hicks RBI) anchor all 5 parlays every day
+5. **Pipeline wastes tokens** — generates automated parlays 3x/day that aren't used
 
-## Phase 2 — Complete (MLB Data Layer)
+## Architecture Debt from NBA Agent
 
-| File | Status | Notes |
-|------|--------|-------|
-| `src/apis/mlb_stats.py` | Done | Schedule, game logs, box scores, lineup, transactions, pitcher hand, player info |
-| `src/engine/coverage.py` | Done | Handedness-split coverage via statSplits+Poisson; fallback to game-log rate |
-| `src/pipelines/trend_analysis.py` | Done | 10/20-game windows; PA stability; `trend_pass` removed (see below) |
-| `src/apis/matchup.py` | Done | Per-pitcher ERA/K9/WHIP with normalised batter-perspective adjustments |
-| `src/pipelines/enrich_legs.py` | Done | Prop routing per blueprint §5.2; sets opponent_adjustment ∈ [-1, +1] |
-| `src/engine/leg_scorer.py` | Done | PA stability replaces minutes; recency-weighted coverage uses MLB log |
-| `src/apis/rotowire.py` | Done | Visible-text scraper for RotoWire MLB lineup/injury pages |
-| `src/engine/claude_agent.py` | Done | `analyze_parlays()` with web_search tool; `get_injured_players()` removed |
-| `src/apis/sportsgameodds.py` | Done | DK MLB props; `batting_` prefix; `_BLOCKED_STAT_IDS` for combo props |
-| `src/pipelines/lineup_poller.py` | Done | Confirms lineups 6–8PM ET and rescores legs; runs every 30 min |
-| `src/web/server.py` | Done | Minimal web server for Railway health checks |
+**Current (Legacy):**
+- Discord bot posts automated parlay recommendations 3x/day
+- Pipeline runs: resolve + fetch props + build parlays + Claude analysis → Discord
+- Web app is secondary (manual parlay builder with broken submit flow)
 
----
+**Desired (User-Defined):**
+- Web app is primary interface: browse legs → build parlay → analyze → place bet → auto-resolve
+- Morning run (9AM): resolve yesterday's legs + bets, fetch today's props, score legs (no parlay building)
+- Midday/evening runs (12PM/5:30PM): refresh odds, check lineups, rescore legs (no parlay building)
+- Claude analysis: only triggered manually from web app (not automated)
+- Bet tracking: user places bets via web app, resolver checks them next day
 
-## Phase 3 — Complete (Pipeline + Bot)
+## Next Session Priority
 
-| File | Status | Notes |
-|------|--------|-------|
-| `main.py` | Done | Full 8-step pipeline; single scored pool (two-pool arch removed 2026-04-18) |
-| `bot.py` | Done | Discord bot; 3 scheduled runs (9AM/12PM/5:30PM ET); lineup poller |
-| `src/bot/runner.py` | Done | Async wrappers around run_pipeline(), resolve, status, calibration |
-| `src/bot/formatter.py` | Done | Discord embed formatters |
-| `src/engine/parlay_builder.py` | Done | Single scored pool — see architecture section below |
-| `src/tracker/outcome_resolver.py` | Done | All four stubs implemented; batter props resolving correctly (see notes below) |
+**Goal:** Make web app fully functional with bet tracking (Option C from session discussion)
 
----
+**Tasks:**
+1. Create `mlb_placed_bets` table in Supabase
+2. Add `/api/analyze` endpoint — calls Claude API directly, returns analysis
+3. Add `/api/bets` endpoints — POST to place bet, GET for bet history
+4. Fix web app analyze flow — remove modal fallback, call API directly
+5. Add "Place Bet" button (appears after analysis)
+6. Add "Bet History" view in web app
+7. Update `outcome_resolver.py` to resolve placed bets
+8. Clean up pipeline: remove automated parlay generation from scheduled runs
 
-## main.py Pipeline (8 Steps)
+**Estimated time:** 3-4 hours in Claude Code
 
-```
-1. Transaction Wire    get_transactions() → filter SC/DES/OU/CU → blocked_names set
-2. Schedule            get_schedule() → build team_id_to_abbr, pitcher_id_map, opponent_map
-                       home_probable_pitcher (name str) → MLB person ID via statsapi.lookup_player()
-3. SGO Props           get_todays_games() + get_player_props() per game
-4. Coverage Gate       calculate_coverage() for each batter prop at standard line
-                       min 55% to enter pool; pitcher props skipped (_PITCHER_POSITIONS)
-5. Injury Filter       transaction wire blocked_names only (LLM check removed — wire is authoritative)
-                       team_to_blocked built BEFORE removing blocked legs
-6. Enrichment          enrich_legs(legs, pitcher_id_map, opponent_map, season)
-7. Trend Signals       get_trend_signal() per leg (role param unused; trend_pass removed)
-8. Parlay Builder      build_hybrid_parlays(legs, num_games, team_to_blocked)
-   → log_recommendations() + log_scored_legs() → analyze_parlays() (LLM + web_search)
-```
+## Key Files Modified This Session
+- `src/web/static/index.html` — full parlay builder UI
+- `src/engine/coverage.py` — pitcher K coverage model
+- `main.py` — removed pitcher K blocking gates
+- `src/engine/leg_scorer.py` — pitcher prop routing
 
----
+## Git Status
+**Latest commit:** `edf227c` — "feat: enable pitcher strikeout props with Poisson coverage model"
+**Deployed to Railway:** Yes (deployment successful)
 
-## Architecture Reference
-
-### Parlay builder — single scored pool (parlay_builder.py)
-
-```
-All legs with coverage ≥ 55% → score_legs_composite() → top 20 by composite_score
-
-B&B searches for combinations of 4–8 legs (Tier 1/2) or 3–8 legs (Tier 3)
-whose combined American odds land in +600 to +1500.
-
-Constraints:
-  - Max 1 batter leg per player (pitchers exempt — multiple pitcher props allowed)
-  - Max 3 legs per game (keyed by game_pk, fallback to team abbr)
-  - No duplicate odd_ids within a parlay
-
-Parlays ranked by avg_composite DESC; diversity filter (≤3 shared legs) yields top 5.
-
-Tier 1: ≥10 games, min 4 legs  |  Tier 2: 5–9 games, min 4 legs
-Tier 3: 2–4 games, min 3 legs  |  Tier 4: ≤1 game, returns []
-```
-
-Previous two-pool architecture (anchors/connectors/swings, +1000–+1500 target) produced
-0 parlays because high-coverage, positive-odds legs (+130–+215) fell in the swing bucket,
-which required connectors as bridges — rarely available. Replaced 2026-04-18.
-
-### Composite scoring weights (leg_scorer.py)
-
-| Factor | Weight | Signal |
-|--------|--------|--------|
-| Coverage (recency-weighted) | 40% | MLB game log, 3×/2×/1× recent weighting |
-| EV | 25% | SGO fairOverUnder vs DK book odds |
-| Trend score | 15% | HOT/COLD/NEUTRAL form over 10/20 game windows |
-| Opponent adjustment | 15% | Pitcher ERA/K9/WHIP rank (enrich_legs.py) |
-| PA stability | 5% | pa_avg_10 / 4.0 normalized |
-
-`score_legs_composite()` called with `role="swing"` for all legs (single pool).
-The anchor-weight variant (60% coverage, 0% EV) is no longer used.
-
-### Trend signals (trend_analysis.py)
-
-- Windows: 10/20 games (oldest-first native MLB log order)
-- PA proxy: `atBats` avg over last 10 games ≥ 3.0 → `pa_pass`
-- Form labels: HOT (streak ≥4 AND momentum), COLD (streak ≤-3 OR declining + no momentum), NEUTRAL
-- `trend_pass` boolean gate **removed** — early-season avg_10 ≈ avg_20 caused near-universal failure
-- `trend_score` contributes to composite_score via 15% weight but does not hard-gate eligibility
-- `role` parameter accepted but unused (defaults to `"swing"`)
-
-### Outcome resolver (outcome_resolver.py)
-
-- `STAT_MAP` maps SGO stat keys → MLB game log `stat` dict fields
-- SGO stores `"strikeouts"` and `"walks"`; MLB log uses `"strikeOuts"` and `"baseOnBalls"` — both forms in STAT_MAP
-- `_resolve_leg` uses `player_id` from `mlb_scored_legs` directly (skips name lookup) when available
-- Date matching: MLB game log `date` field is already ISO `YYYY-MM-DD` — no conversion needed
-- **Batter props only** — `_resolve_leg` calls `get_batter_game_log`. Pitcher strikeout/IP props need a separate branch using `get_pitcher_game_log` (not yet implemented — see Open Items)
-- Verified 2026-04-18: 347 legs resolved, 0 UNRESOLVABLE in batter pool; VOIDs are legitimate (player didn't play)
-
-### Prop routing (enrich_legs.py)
-
-| Stat | Primary signal | Secondary |
-|------|---------------|-----------|
-| hits | −K/9 (70%) | ERA (20%), WHIP (10%) |
-| totalBases | ERA (60%) | −K/9 (25%), WHIP (15%) |
-| rbi | ERA (55%) | WHIP (30%), −K/9 (15%) |
-| homeRuns | ERA (75%) | −K/9 (25%) |
-| walks | WHIP (80%) | ERA (20%) |
-| runsScored | ERA (50%) | WHIP (30%), −K/9 (20%) |
-| stolenBases | 0.0 | pitcher-independent |
-| strikeouts (batter Ks) | +K/9 (90%) | −ERA (10%) |
-
----
-
-## Known Bugs Fixed (cumulative)
-
-| Bug | Fix | Session |
-|-----|-----|---------|
-| `statsapi.teams()` AttributeError | `statsapi.get("teams", {"sportId": 1})` | 2026-04-17 |
-| 0 SGO props (`hitting_` prefix) | Renamed to `batting_` in `_SGO_STAT_ID_MAP` | 2026-04-17 |
-| `player_name` includes stat label | `_STAT_NAME_SUFFIX` dict to strip labels | 2026-04-17 |
-| `enrich_legs` TypeError on None pitcher | Filter `None` before `sorted()` | 2026-04-17 |
-| LLM injury check hallucinating dates | Removed `get_injured_players()` call entirely | 2026-04-17 |
-| `opposing_pitcher_id or 0` → 404 spam | Changed to `or None` | 2026-04-17 |
-| Combo props (`hits+runs+rbi`) logged as errors | `_BLOCKED_STAT_IDS` silent skip | 2026-04-17 |
-| `mlb_scored_legs` missing columns | `ALTER TABLE … ADD COLUMN IF NOT EXISTS` | 2026-04-17 |
-| 0 parlays (two-pool arch too narrow) | Single scored pool, +600–+1500 window | 2026-04-18 |
-| `trend_pass` failing early-season | Removed hard gate; trend_score contributes via 15% weight | 2026-04-18 |
-| `outcome_resolver` stubs all returning `None` | Implemented `_name_to_mlb_id`, `_calc_stat`, `_find_game_on_date`; wired `get_batter_game_log` | 2026-04-18 |
-| `strikeouts`/`walks` legs UNRESOLVABLE | SGO stores `"strikeouts"`/`"walks"`; MLB log uses `"strikeOuts"`/`"baseOnBalls"` — added both keys to `STAT_MAP` | 2026-04-18 |
-
----
-
-## Open Items / Next Steps
-
-| Item | Priority | Notes |
-|------|----------|-------|
-| Pitcher prop resolution in outcome_resolver | High | `_resolve_leg` calls `get_batter_game_log` for all props. Pitcher strikeout O/U and innings-pitched props must use `get_pitcher_game_log` instead. Need to detect pitcher legs (by position or stat name) and route to the correct log function. `mlb_scored_legs.player_id` is available; use `get_player_info(player_id).position` to branch. |
-| Pool diversity — same 2 legs anchor every parlay | Medium | Consider per-leg appearance cap (max 3 of 5 parlays) to force variety in top-5 output |
-| COLD legs in pool | Low | trend_pass removal means COLD legs eligible; consider soft COLD penalty in leg_scorer |
-| Pitcher prop coverage model | Low | Phase 4 extension; currently skipped via `_PITCHER_POSITIONS` |
-| Alt lines on DK MLB props | Low | Not yet tested when markets open; would improve leg diversity |
-| `get_batter_game_log(701678)` error | Low | One player ID returns `list index out of range`; likely non-MLB player in SGO feed |
-
----
-
-## Pre-Launch Checklist
-
-- [ ] Create Discord bot application → `DISCORD_BOT_TOKEN` in `.env`
-- [ ] Set `DISCORD_GUILD_ID` and `SCHEDULE_CHANNEL_ID` in `.env`
-- [ ] Create Railway project for MLB agent
-- [ ] Verify `DATABASE_URL`, `SPORTSGAMEODDS_API_KEY`, `ANTHROPIC_API_KEY` in `.env`
-
----
-
-*Please gamble responsibly.*
+## Environment
+- Repository: github.com/MrGweeod/mlb-agent
+- Deployment: Railway (mlb-agent project)
+- Web app: https://mlb-agent.up.railway.app
+- Database: Supabase PostgreSQL (same instance as NBA agent)
+- Python: 3.14 in venv (WSL2 Ubuntu)
