@@ -22,8 +22,10 @@ def analyze_parlays(parlays):
     for i, p in enumerate(parlays, 1):
         parlay_text += "\nParlay {}: {} odds, {} legs\n".format(i, p["parlay_odds"], p["num_legs"])
         for leg in p["legs"]:
-            parlay_text += "  - {} {} over {} ({}) - hit rate: {}%\n".format(
-                leg["player_name"], leg["stat"], leg["best_line"],
+            parlay_text += "  - {} {} {} {} ({}) - hit rate: {}%\n".format(
+                leg["player_name"], leg["stat"],
+                leg.get("direction", "over"),
+                leg["best_line"],
                 leg["best_odds"], leg["coverage_pct"]
             )
 
