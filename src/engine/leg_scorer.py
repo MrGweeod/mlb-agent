@@ -46,16 +46,19 @@ _WEIGHT_TREND_SWING      = 0.00
 _WEIGHT_OPPONENT_SWING   = 0.20
 _WEIGHT_PA_SWING         = 0.10
 
-# Per-prop overconfidence correction factors (2026-04-21 calibration).
-# strikeouts (Poisson pitcher model) is well-calibrated → 1.0.
-# All batter props cluster at ~50% actual despite 57-62% predictions → penalty.
+# Per-prop overconfidence correction factors (2026-04-21 calibration, 458 legs).
+# strikeouts (Poisson pitcher model): +2.6% error → 1.0 (well calibrated).
+# hits: +2.4% error → 0.85 (well calibrated after penalty).
+# totalBases: +13.4% error (24 legs) → tightened to 0.78.
+# rbi: +29.2% error (14 legs) — too small to retune; keep 0.90 pending more data.
+# walks: +13.0% error (11 legs) — too small to retune; keep 0.85 pending more data.
 # These multiply the recency-weighted coverage factor before composite scoring.
 _PROP_COVERAGE_PENALTY: dict[str, float] = {
-    "strikeouts":  1.00,  # pitcher K props — well calibrated
-    "hits":        0.85,  # 11.5% overconfident
-    "totalBases":  0.85,  # 10.3% overconfident
-    "rbi":         0.90,  # 7.9% overconfident
-    "walks":       0.85,  # 9.8% overconfident
+    "strikeouts":  1.00,  # pitcher K props — well calibrated (+2.6% error, 77 legs)
+    "hits":        0.85,  # well calibrated after penalty (+2.4% error, 150 legs)
+    "totalBases":  0.78,  # tightened: +13.4% error on 24 legs
+    "rbi":         0.90,  # insufficient data (14 legs) — pending retune
+    "walks":       0.85,  # insufficient data (11 legs) — pending retune
     "homeRuns":    0.85,
     "runsScored":  0.90,
     "stolenBases": 0.90,
