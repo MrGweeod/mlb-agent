@@ -151,6 +151,9 @@ async def handle_analyze(request: web.Request) -> web.Response:
                 "opponent":    leg.get("opponent", ""),
                 "position":    leg.get("position", ""),
                 "direction":   leg.get("direction", "over"),
+                "ev_per_unit": leg.get("ev_per_unit"),
+                "trend_score": leg.get("trend_score"),
+                "opponent_adjustment": leg.get("opponent_adjustment"),
             }
             for leg in legs
         ],
