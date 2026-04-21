@@ -712,20 +712,50 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
     """
     Bulk-insert all scored legs from a pipeline run into mlb_scored_legs.
 
+    Idempotent per odd_id: uses ON CONFLICT (odd_id) DO NOTHING so that
+    re-running the pipeline later in the same day (e.g. after pitcher K props
+    become available) appends new legs without duplicating existing ones.
+    Legs without an odd_id are skipped entirely.
+
     Marks in_parlay=True for any leg whose odd_id appears in parlay_odd_ids.
-    Idempotent: skips silently if rows already exist for run_date.
-    Returns the number of rows inserted (0 on a skip).
+    Returns the number of rows inserted.
     """
     if not legs:
         return 0
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM mlb_scored_legs WHERE run_date = %s", (run_date,))
-    if cur.fetchone()["count"] > 0:
+    ts = now_utc()
+    rows = [
+        (
+            run_date,
+            leg.get("player_name", ""),
+            leg.get("team"),
+            leg.get("opponent"),
+            leg.get("stat", ""),
+            leg.get("best_line"),
+            leg.get("direction", "over"),
+            str(leg.get("best_odds", "")),
+            leg.get("coverage_pct"),
+            leg.get("p_over"),
+            leg.get("ev_per_unit"),
+            leg.get("trend_pass"),
+            leg.get("trend_score"),
+            leg.get("opponent_adjustment"),
+            leg.get("position"),
+            leg.get("odd_id") in parlay_odd_ids,
+            leg.get("game_pk"),
+            str(leg.get("player_id")) if leg.get("player_id") else None,
+            str(leg.get("opposing_pitcher_id")) if leg.get("opposing_pitcher_id") else None,
+            ts,
+            leg.get("odd_id"),
+        )
+        for leg in legs
+        if leg.get("stat") and leg.get("player_name") and leg.get("odd_id")
+    ]
+    if not rows:
         cur.close()
         conn.close()
         return 0
-    ts = now_utc()
     psycopg2.extras.execute_values(
         cur,
         """
@@ -733,35 +763,11 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
             (run_date, player_name, team, opponent, stat, line, direction, odds,
              coverage_pct, p_over, ev_per_unit, trend_pass, trend_score,
              opponent_adjustment, position, in_parlay,
-             game_pk, player_id, opposing_pitcher_id, logged_at)
+             game_pk, player_id, opposing_pitcher_id, logged_at, odd_id)
         VALUES %s
+        ON CONFLICT (odd_id) DO NOTHING
         """,
-        [
-            (
-                run_date,
-                leg.get("player_name", ""),
-                leg.get("team"),
-                leg.get("opponent"),
-                leg.get("stat", ""),
-                leg.get("best_line"),
-                leg.get("direction", "over"),
-                str(leg.get("best_odds", "")),
-                leg.get("coverage_pct"),
-                leg.get("p_over"),
-                leg.get("ev_per_unit"),
-                leg.get("trend_pass"),
-                leg.get("trend_score"),
-                leg.get("opponent_adjustment"),
-                leg.get("position"),
-                leg.get("odd_id") in parlay_odd_ids,
-                leg.get("game_pk"),
-                str(leg.get("player_id")) if leg.get("player_id") else None,
-                str(leg.get("opposing_pitcher_id")) if leg.get("opposing_pitcher_id") else None,
-                ts,
-            )
-            for leg in legs
-            if leg.get("stat") and leg.get("player_name")  # skip totals legs (no player)
-        ],
+        rows,
     )
     conn.commit()
     inserted = cur.rowcount

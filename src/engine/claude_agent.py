@@ -4,7 +4,7 @@ from datetime import date
 import os
 
 load_dotenv()
-client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), timeout=60.0)
 
 
 def analyze_parlays(parlays):
