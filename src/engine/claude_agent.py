@@ -11,39 +11,56 @@ def analyze_parlays(parlays):
     if not parlays:
         return "No parlays to analyze today."
 
-    players = set()
-    for p in parlays:
-        for leg in p["legs"]:
-            players.add(leg["player_name"])
-
-    player_list = ", ".join(players)
-
     parlay_text = ""
     for i, p in enumerate(parlays, 1):
-        parlay_text += "\nParlay {}: {} odds, {} legs\n".format(i, p["parlay_odds"], p["num_legs"])
+        parlay_text += "\nParlay {}: {} combined odds, {} legs\n".format(
+            i, p["parlay_odds"], p["num_legs"]
+        )
         for leg in p["legs"]:
-            parlay_text += "  - {} {} {} {} ({}) - hit rate: {}%\n".format(
-                leg["player_name"], leg["stat"],
-                leg.get("direction", "over"),
-                leg["best_line"],
-                leg["best_odds"], leg["coverage_pct"]
+            cov = leg.get("coverage_pct")
+            cov_str = f"{cov:.1f}%" if cov is not None else "N/A"
+            ev = leg.get("ev_per_unit")
+            ev_str = f"{ev:+.3f}" if ev is not None else "N/A"
+            opp_adj = leg.get("opponent_adjustment")
+            opp_str = f"{opp_adj:+.2f}" if opp_adj is not None else "N/A"
+            trend = leg.get("trend_score")
+            trend_str = f"{trend:.1f}" if trend is not None else "N/A"
+            matchup = f"{leg.get('team','?')} vs {leg.get('opponent','?')}"
+            parlay_text += (
+                f"  {leg['player_name']} ({matchup})\n"
+                f"    {leg['stat']} {leg.get('direction','over')} {leg['best_line']}"
+                f" @ {leg['best_odds']}\n"
+                f"    Coverage: {cov_str} | EV: {ev_str}"
+                f" | Trend score: {trend_str} | Opp adj: {opp_str}\n"
             )
 
     prompt = (
-        "You are an MLB betting analyst.\n\n"
-        "First, search for today's lineup and IL/injury status for these players: {}\n\n".format(player_list) +
-        "Then review these parlay recommendations and for each one:\n"
-        "1. Give a 1-2 sentence explanation of why each leg makes sense tonight given the pitching matchup\n"
-        "2. Flag any IL placement, lineup scratch, or batting order concern you found\n"
-        "3. Give an overall confidence rating: HIGH, MEDIUM, or LOW\n" +
-        parlay_text +
-        "\nBe concise and practical. No fluff."
+        "You are an MLB betting analyst. Analyze this parlay based ONLY on the "
+        "statistical data provided below. Do NOT search for external information "
+        "or make assumptions about injuries, lineups, or schedules.\n\n"
+        + parlay_text +
+        "\nEvaluate the following and be concise:\n\n"
+        "COVERAGE QUALITY\n"
+        "- Flag any leg below 60% coverage as a weak link\n"
+        "- Note if coverage is well-distributed or stacked with marginal legs\n\n"
+        "CORRELATION RISKS\n"
+        "- Same-game stacking (max 3 legs per game recommended)\n"
+        "- Pitcher K over + opposing batter hits over = correlated risk\n"
+        "- Same player appearing more than once\n\n"
+        "PARLAY CONSTRUCTION\n"
+        "- Do the combined odds justify the number of legs?\n"
+        "- Identify the strongest and weakest legs by coverage\n\n"
+        "MATCHUP ANALYSIS\n"
+        "- Which legs have the best opponent adjustments?\n"
+        "- Any red flags in matchup quality?\n\n"
+        "OVERALL RECOMMENDATION\n"
+        "- Play as-is, modify, or skip — and why\n"
+        "- If modify: which leg(s) to drop\n"
     )
 
     response = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=2048,
-        tools=[{"type": "web_search_20250305", "name": "web_search"}],
+        max_tokens=1024,
         messages=[{"role": "user", "content": prompt}],
     )
 
