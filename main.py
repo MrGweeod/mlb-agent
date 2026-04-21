@@ -324,7 +324,13 @@ def _attach_trend_signals(legs: list[dict], season: int) -> None:
         player_id = leg.get("player_id")
         stat      = leg.get("stat", "")
         line      = leg.get("best_line")
+        position  = leg.get("position", "")
         if not player_id or not stat or line is None:
+            continue
+
+        # Pitcher K legs have no batter game log — skip trend signal for pitchers
+        is_pitcher_k = stat == "strikeouts" and position in _PITCHER_POSITIONS
+        if is_pitcher_k:
             continue
 
         game_log = get_batter_game_log(int(player_id), season)
