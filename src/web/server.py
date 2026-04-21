@@ -28,6 +28,7 @@ from datetime import date
 from aiohttp import web
 
 from src.utils.db import get_scored_legs
+from src.engine.claude_agent import analyze_parlays
 
 _PASSWORD = os.getenv("WEB_APP_PASSWORD", "")
 _STATIC_DIR = pathlib.Path(__file__).parent / "static"
@@ -97,12 +98,90 @@ async def handle_health(request: web.Request) -> web.Response:
     )
 
 
+async def handle_analyze(request: web.Request) -> web.Response:
+    """
+    Call Claude to analyze a user-selected parlay from the web app.
+
+    Request body:
+        {"legs": [...], "combined_odds": "+1200"}
+
+    Each leg must have: player_name, stat, line, direction, odds, coverage_pct,
+    team, opponent. The endpoint bridges the web-app field names (line, odds)
+    to the format analyze_parlays() expects (best_line, best_odds).
+
+    Returns:
+        {"analysis": "<Claude text>"}  or  {"error": "<message>"}
+    """
+    if not _check_auth(request):
+        return web.Response(
+            text=json.dumps({"error": "Unauthorized"}),
+            content_type="application/json",
+            status=401,
+        )
+
+    try:
+        data = await request.json()
+    except Exception:
+        return web.Response(
+            text=json.dumps({"error": "Invalid JSON body"}),
+            content_type="application/json",
+            status=400,
+        )
+
+    legs = data.get("legs", [])
+    if not legs:
+        return web.Response(
+            text=json.dumps({"error": "No legs provided"}),
+            content_type="application/json",
+            status=400,
+        )
+
+    combined_odds = data.get("combined_odds", "+1000")
+
+    # Bridge web-app field names → analyze_parlays() format
+    parlay = {
+        "legs": [
+            {
+                "player_name": leg.get("player_name", ""),
+                "stat":        leg.get("stat", ""),
+                "best_line":   leg.get("line"),
+                "best_odds":   leg.get("odds", ""),
+                "coverage_pct": leg.get("coverage_pct"),
+                "team":        leg.get("team", ""),
+                "opponent":    leg.get("opponent", ""),
+                "position":    leg.get("position", ""),
+                "direction":   leg.get("direction", "over"),
+            }
+            for leg in legs
+        ],
+        "parlay_odds": combined_odds,
+        "num_legs":    len(legs),
+    }
+
+    try:
+        import asyncio
+        loop = asyncio.get_event_loop()
+        analysis = await loop.run_in_executor(None, analyze_parlays, [parlay])
+    except Exception as exc:
+        return web.Response(
+            text=json.dumps({"error": str(exc)}),
+            content_type="application/json",
+            status=500,
+        )
+
+    return web.Response(
+        text=json.dumps({"analysis": analysis}),
+        content_type="application/json",
+    )
+
+
 def create_app() -> web.Application:
     """Build and return the aiohttp Application object."""
     app = web.Application()
     app.router.add_get("/", handle_index)
     app.router.add_get("/api/legs", handle_legs)
     app.router.add_get("/api/health", handle_health)
+    app.router.add_post("/api/analyze", handle_analyze)
     return app
 
 

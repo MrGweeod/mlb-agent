@@ -655,11 +655,11 @@
 <!-- ── Prompt modal ── -->
 <div id="overlay">
   <div class="modal">
-    <h3>Parlay Analysis Prompt</h3>
+    <h3>Claude Analysis</h3>
     <pre id="prompt-preview"></pre>
     <div class="modal-actions">
-      <button class="modal-btn secondary" id="modal-cancel-btn">Cancel</button>
-      <button class="modal-btn primary" id="modal-copy-btn">Copy to Clipboard</button>
+      <button class="modal-btn secondary" id="modal-cancel-btn">Close</button>
+      <button class="modal-btn primary" id="modal-copy-btn">Copy Analysis</button>
     </div>
   </div>
 </div>
@@ -960,48 +960,62 @@ document.getElementById('clear-btn').addEventListener('click', () => {
   render();
 });
 
-// ── Submit / Prompt ───────────────────────────────────────────────────────────
+// ── Submit / Analyze ─────────────────────────────────────────────────────────
 document.getElementById('submit-btn').addEventListener('click', submitParlay);
 
-function buildPromptText(legs) {
-  const combinedOdds = calcCombinedOdds(legs);
-  const today = new Date().toLocaleDateString('en-US', {
-    weekday: 'long', month: 'long', day: 'numeric', year: 'numeric'
-  });
-  const legsList = legs.map((leg, i) => [
-    `${i + 1}. ${leg.player_name} — ${statLabel(leg.stat)} ${fmtLine(leg.line, leg.direction)} (${leg.odds || 'odds unknown'})`,
-    `   Coverage: ${fmtPct(leg.coverage_pct)} | EV: ${fmtEv(leg.ev_per_unit)} | Trend: ${leg.trend_score != null ? leg.trend_score.toFixed(1) : '—'}`,
-    `   Matchup: ${leg.team} vs ${leg.opponent}${leg.lineup_confirmed ? '' : ' [lineup pending]'}`,
-  ].join('\n')).join('\n\n');
-
-  return `Please analyze this ${legs.length}-leg MLB parlay for ${today}:
-
-Combined odds: ${fmtAmerican(combinedOdds)}
-
-LEGS:
-${legsList}
-
-Please evaluate:
-1. Overall parlay quality and risk profile
-2. Any correlation or lineup concerns
-3. The strongest and weakest legs
-4. Whether you'd recommend this parlay at these odds
-5. Any suggested substitutions or adjustments`;
-}
-
-function submitParlay() {
+async function submitParlay() {
   const selected = getSelectedLegs();
   if (selected.length < 4 || selected.length > 8) return;
-  const prompt = buildPromptText(selected);
 
-  if (typeof window.sendPrompt === 'function') {
-    window.sendPrompt(prompt);
-    return;
+  const btn = document.getElementById('submit-btn');
+  const originalText = btn.textContent;
+  btn.textContent = 'Analyzing…';
+  btn.disabled = true;
+
+  const combinedOdds = calcCombinedOdds(selected);
+
+  try {
+    const response = await fetch('/api/analyze', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${password}`,
+      },
+      body: JSON.stringify({
+        legs: selected.map(leg => ({
+          player_name: leg.player_name,
+          stat:        leg.stat,
+          line:        leg.line,
+          direction:   leg.direction,
+          odds:        leg.odds,
+          coverage_pct: leg.coverage_pct,
+          team:        leg.team,
+          opponent:    leg.opponent,
+          position:    leg.position,
+        })),
+        combined_odds: fmtAmerican(combinedOdds),
+      }),
+    });
+
+    const data = await response.json();
+
+    if (data.error) {
+      showToast(`Error: ${data.error}`);
+      return;
+    }
+
+    // Show analysis in existing modal (repurposed from prompt copy flow)
+    document.querySelector('.modal h3').textContent = 'Claude Analysis';
+    document.getElementById('prompt-preview').textContent = data.analysis;
+    document.getElementById('modal-copy-btn').textContent = 'Copy Analysis';
+    document.getElementById('overlay').classList.add('visible');
+
+  } catch (err) {
+    showToast(`Failed to analyze: ${err.message}`);
+  } finally {
+    btn.textContent = originalText;
+    btn.disabled = selected.length < 4 || selected.length > 8;
   }
-
-  // Fallback: show modal
-  document.getElementById('prompt-preview').textContent = prompt;
-  document.getElementById('overlay').classList.add('visible');
 }
 
 document.getElementById('modal-cancel-btn').addEventListener('click', () => {
