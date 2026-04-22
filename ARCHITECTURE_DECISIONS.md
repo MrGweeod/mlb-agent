@@ -432,3 +432,89 @@ ALTER TABLE mlb_scored_legs ADD CONSTRAINT mlb_scored_legs_odd_id_uq UNIQUE (odd
 - PA stability: 10% (up from 5%)
 - EV: 0% (disabled until signal validates)
 - Trend: 0% (no predictive value)
+
+---
+
+## Coverage Calculation — Log-Odds Transformation
+**Date:** April 22, 2026
+
+**Decision:** Replace linear split ratio multiplication with a log-odds transformation when applying handedness adjustments to coverage rates.
+
+**Problem with linear multiplication:**
+```python
+# Old (broken):
+coverage = overall_rate × (rate_vs_hand / rate_overall)
+# → Jeremiah Jackson vs LHP: 65.2% × 1.608 = 104.8% → capped to 100%
+# → Both OVER and UNDER of the same prop could get 100% coverage
+# → Same coverage for both directions is mathematically impossible
+```
+
+**Fix — log-odds transformation:**
+```python
+# New (fixed):
+log_odds_base = math.log(overall_rate / (1 - overall_rate))   # logit(overall_rate)
+log_odds_adj  = math.log(rate_vs_hand / rate_overall)          # split adjustment
+coverage_rate = 1.0 / (1.0 + math.exp(-(log_odds_base + log_odds_adj)))  # sigmoid
+# → Jeremiah Jackson vs LHP: logit(0.652) + log(0.471/0.293) = sigmoid(1.104) = 75.1%
+# → Always in (0, 1) — no capping needed
+```
+
+**Result:**
+- Coverage range: 23.1%–90.5% (was many at 100%)
+- Historical legs rescored: 618/639 updated via `scripts/rescore_historical_legs.py`
+- Files: `src/engine/coverage.py` — commit `f849237`
+
+**Remaining issue:** Coverage is still systematically overconfident (12-23pp errors in upper buckets). The log-odds fix eliminated the 100% clipping problem but did not close the gap between predicted and actual rates. A global deflation multiplier (0.85×) is under consideration.
+
+---
+
+## Database Deduplication — DEDUP_CTE
+**Date:** April 22, 2026
+
+**Decision:** Add a `DEDUP_CTE` to all dashboard calibration queries, and surgically delete 59 true-duplicate NULL odd_id rows from the database.
+
+**Problem:** PostgreSQL UNIQUE constraints do NOT prevent multiple NULLs. `ON CONFLICT (odd_id) DO NOTHING` only fires for non-NULL values. Some legs were inserted twice — once with `odd_id=NULL` (early pipeline run) and once with a real odd_id (later run). This inflated calibration sample sizes by ~10%.
+
+**Investigation:**
+- 673 raw resolved legs → 614 unique after dedup
+- 59 rows safely deletable: NULL odd_id rows with a non-NULL sibling for the same (run_date, player_name, stat, direction)
+- 504 NULL odd_id rows kept: sole records with no non-NULL equivalent
+
+**Fix 1 — Delete true duplicates (one-time migration):**
+```sql
+DELETE FROM mlb_scored_legs
+WHERE odd_id IS NULL
+  AND id NOT IN (
+    SELECT MIN(id) FROM mlb_scored_legs
+    WHERE odd_id IS NULL
+    GROUP BY run_date, player_name, stat, direction
+  )
+  AND (run_date, player_name, stat, direction) IN (
+    SELECT run_date, player_name, stat, direction
+    FROM mlb_scored_legs
+    WHERE odd_id IS NOT NULL
+  );
+```
+
+**Fix 2 — DEDUP_CTE in all dashboard queries (defensive, ongoing):**
+```sql
+WITH deduped AS (
+    SELECT *,
+           ROW_NUMBER() OVER (
+               PARTITION BY run_date, player_name, stat, direction
+               ORDER BY ev_per_unit DESC NULLS LAST
+           ) AS _rn
+    FROM mlb_scored_legs
+    WHERE result IS NOT NULL
+)
+SELECT ... FROM deduped WHERE _rn = 1
+```
+
+**Fix 3 — init_db() schema updated:**
+```sql
+odd_id TEXT,
+UNIQUE (odd_id)
+```
+Added to `CREATE TABLE mlb_scored_legs` so fresh Railway deployments include the column without requiring a manual `ALTER TABLE`.
+
+**Files:** `src/utils/db.py` — commit `41be85d`
