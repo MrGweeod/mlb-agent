@@ -298,9 +298,29 @@ def calculate_coverage(
             rate_vs_hand = float(split_stats.get(rate_stat) or 0)
             rate_overall = float(overall_stats.get(rate_stat) or 0)
 
-            if split_games >= 10 and rate_overall > 0:
-                split_ratio = rate_vs_hand / rate_overall
-                coverage_rate = max(0.0, min(1.0, overall_rate * split_ratio))
+            if split_games >= 10 and rate_overall > 0 and rate_vs_hand > 0:
+                # Log-odds adjustment: apply the split ratio in log-odds space
+                # so the result stays in (0, 1) even for extreme handedness splits.
+                #
+                # Linear multiplication breaks when overall_rate × ratio > 1.0 —
+                # a player hitting .471 vs LHP but .293 overall (ratio 1.61)
+                # with 65% overall coverage gives 104.8%, capped to 100% (wrong).
+                #
+                # Log-odds transform:
+                #   adjusted_log_odds = logit(overall_rate) + log(rate_vs_hand / rate_overall)
+                #   coverage_rate = sigmoid(adjusted_log_odds)
+                #
+                # Example — Jeremiah Jackson vs LHP:
+                #   logit(0.652) = 0.628
+                #   log(.471/.293) = 0.476
+                #   sigmoid(1.104) = 0.751  →  75.1% (vs the broken 100%)
+                if 0 < overall_rate < 1:
+                    log_odds_base = math.log(overall_rate / (1 - overall_rate))
+                    log_odds_adj  = math.log(rate_vs_hand / rate_overall)
+                    coverage_rate = 1.0 / (1.0 + math.exp(-(log_odds_base + log_odds_adj)))
+                else:
+                    # overall_rate is exactly 0 or 1 — adjustment has no meaning, keep as-is
+                    coverage_rate = overall_rate
                 games_used = split_games
                 split_used = "handedness"
                 multiplier = _confidence_multiplier(split_games)
