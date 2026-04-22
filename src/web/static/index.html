@@ -245,13 +245,33 @@
 
   .leg-scores {
     grid-column: 2;
-    grid-row: 1 / span 3;
+    grid-row: 1 / span 4;
     display: flex;
     flex-direction: column;
     align-items: flex-end;
     gap: 4px;
     justify-content: center;
   }
+  .leg-stats {
+    grid-column: 1;
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 3px;
+  }
+  .stat-pill {
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 10px;
+    background: var(--bg);
+    color: var(--muted);
+    border: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .stat-pill.hot { color: var(--green); border-color: #166534; }
+  .stat-pill.cold { color: var(--red); border-color: #3f1515; }
+  .stat-pill.pos { color: var(--green); }
+  .stat-pill.neg { color: var(--red); }
   .coverage-badge {
     padding: 3px 8px;
     border-radius: 12px;
@@ -1060,14 +1080,14 @@ function esc(s) {
 
 function covClass(pct) {
   if (pct === null || pct === undefined) return 'cov-low';
-  if (pct >= 0.65) return 'cov-high';
-  if (pct >= 0.52) return 'cov-mid';
+  if (pct >= 65) return 'cov-high';
+  if (pct >= 52) return 'cov-mid';
   return 'cov-low';
 }
 
 function fmtPct(val) {
   if (val === null || val === undefined) return '—';
-  return (val * 100).toFixed(0) + '%';
+  return val.toFixed(1) + '%';
 }
 
 function fmtEv(val) {
@@ -1078,6 +1098,24 @@ function fmtEv(val) {
 function fmtLine(line, direction) {
   if (line === null || line === undefined) return '—';
   return `${direction === 'under' ? 'U' : 'O'} ${line}`;
+}
+
+function fmtTrend(val) {
+  if (val === null || val === undefined) return '';
+  let label, cls;
+  if (val >= 7)      { label = 'HOT';  cls = 'hot'; }
+  else if (val <= 3) { label = 'COLD'; cls = 'cold'; }
+  else               { label = val.toFixed(1); cls = ''; }
+  return `<span class="stat-pill ${cls}">Trend: ${label}</span>`;
+}
+
+function fmtMatchup(val) {
+  if (val === null || val === undefined) return '';
+  let label, cls;
+  if (val >= 0.05)       { label = 'Favorable'; cls = 'pos'; }
+  else if (val <= -0.05) { label = 'Tough';     cls = 'neg'; }
+  else                   { label = 'Neutral';   cls = ''; }
+  return `<span class="stat-pill ${cls}">Matchup: ${label}</span>`;
 }
 
 function statLabel(stat) {
@@ -1159,6 +1197,11 @@ function render() {
         &nbsp;
         <span class="${dirCls}">${esc(fmtLine(leg.line, leg.direction))}</span>
         ${leg.odds ? `<span style="color:var(--muted)"> (${esc(String(leg.odds))})</span>` : ''}
+      </div>
+
+      <div class="leg-stats">
+        ${fmtTrend(leg.trend_score)}
+        ${fmtMatchup(leg.opponent_adjustment)}
       </div>
 
       <div class="leg-scores">

@@ -887,7 +887,11 @@ def mark_lineup_confirmed(leg_id: int):
 
 def get_scored_legs(run_date: str) -> list[dict]:
     """
-    Return all scored legs for a given date, ordered by stat then ev_per_unit desc.
+    Return the best-direction leg per player+stat for a given date.
+
+    For each (player_name, stat) pair, keeps only the direction with the
+    higher ev_per_unit (tiebreak: higher coverage_pct). This eliminates
+    both OVER and UNDER showing for the same player prop.
 
     Used by the web API to serve today's leg table.
     """
@@ -895,12 +899,25 @@ def get_scored_legs(run_date: str) -> list[dict]:
     cur = conn.cursor()
     cur.execute(
         """
+        WITH ranked_legs AS (
+            SELECT id, player_name, team, opponent, stat, line, direction, odds,
+                   coverage_pct, p_over, ev_per_unit, trend_pass, trend_score,
+                   opponent_adjustment, position, in_parlay, result, actual_value,
+                   lineup_confirmed, last_updated, logged_at,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY player_name, stat
+                       ORDER BY ev_per_unit DESC NULLS LAST,
+                                coverage_pct DESC NULLS LAST
+                   ) AS rn
+            FROM mlb_scored_legs
+            WHERE run_date = %s
+        )
         SELECT id, player_name, team, opponent, stat, line, direction, odds,
                coverage_pct, p_over, ev_per_unit, trend_pass, trend_score,
                opponent_adjustment, position, in_parlay, result, actual_value,
                lineup_confirmed, last_updated, logged_at
-        FROM mlb_scored_legs
-        WHERE run_date = %s
+        FROM ranked_legs
+        WHERE rn = 1
         ORDER BY stat, ev_per_unit DESC NULLS LAST
         """,
         (run_date,)
