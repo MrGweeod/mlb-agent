@@ -27,7 +27,7 @@ from datetime import date
 
 from aiohttp import web
 
-from src.utils.db import get_scored_legs
+from src.utils.db import get_scored_legs, get_dashboard_data
 from src.engine.claude_agent import analyze_parlays
 
 _PASSWORD = os.getenv("WEB_APP_PASSWORD", "")
@@ -96,6 +96,28 @@ async def handle_health(request: web.Request) -> web.Response:
         text=json.dumps({"status": "ok", "date": str(date.today())}),
         content_type="application/json",
     )
+
+
+async def handle_dashboard(request: web.Request) -> web.Response:
+    """Return calibration and performance analytics for the dashboard view."""
+    if not _check_auth(request):
+        return web.Response(
+            text=json.dumps({"error": "Unauthorized"}),
+            content_type="application/json",
+            status=401,
+        )
+    try:
+        data = get_dashboard_data()
+        return web.Response(
+            text=json.dumps(data, default=str),
+            content_type="application/json",
+        )
+    except Exception as exc:
+        return web.Response(
+            text=json.dumps({"error": str(exc)}),
+            content_type="application/json",
+            status=500,
+        )
 
 
 async def handle_analyze(request: web.Request) -> web.Response:
@@ -184,6 +206,7 @@ def create_app() -> web.Application:
     app.router.add_get("/", handle_index)
     app.router.add_get("/api/legs", handle_legs)
     app.router.add_get("/api/health", handle_health)
+    app.router.add_get("/api/dashboard", handle_dashboard)
     app.router.add_post("/api/analyze", handle_analyze)
     return app
 

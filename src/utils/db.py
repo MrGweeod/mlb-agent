@@ -928,4 +928,170 @@ def get_scored_legs(run_date: str) -> list[dict]:
     return rows
 
 
+def get_dashboard_data() -> dict:
+    """
+    Return all dashboard analytics sections in a single DB round-trip.
+
+    Queries mlb_scored_legs for resolved legs (result IS NOT NULL) across
+    all dates. Returns a dict with six keys, one per dashboard section.
+
+    Coverage calibration note: coverage_pct is stored on the 0-100 scale.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # ── Section 1: Coverage calibration ──────────────────────────────────────
+    cur.execute("""
+        SELECT
+            CASE
+                WHEN coverage_pct < 55 THEN '<55%'
+                WHEN coverage_pct < 60 THEN '55-60%'
+                WHEN coverage_pct < 65 THEN '60-65%'
+                WHEN coverage_pct < 70 THEN '65-70%'
+                ELSE '70%+'
+            END AS bucket,
+            AVG(coverage_pct)                                        AS avg_predicted,
+            COUNT(*)                                                  AS total,
+            SUM(CASE WHEN result = 'won'  THEN 1 ELSE 0 END)         AS won,
+            SUM(CASE WHEN result = 'lost' THEN 1 ELSE 0 END)         AS lost,
+            AVG(CASE WHEN result = 'won'  THEN 1.0 ELSE 0.0 END)     AS actual_rate
+        FROM mlb_scored_legs
+        WHERE result IS NOT NULL
+          AND coverage_pct IS NOT NULL
+        GROUP BY bucket
+        ORDER BY avg_predicted
+    """)
+    calibration = [dict(r) for r in cur.fetchall()]
+
+    # ── Section 2: Prop type performance ─────────────────────────────────────
+    cur.execute("""
+        SELECT
+            stat,
+            COUNT(*)                                                  AS total,
+            SUM(CASE WHEN result = 'won'  THEN 1 ELSE 0 END)         AS won,
+            SUM(CASE WHEN result = 'lost' THEN 1 ELSE 0 END)         AS lost,
+            AVG(CASE WHEN result = 'won'  THEN 1.0 ELSE 0.0 END)     AS win_rate,
+            AVG(coverage_pct)                                         AS avg_coverage,
+            AVG(
+                CASE
+                    WHEN odds ~ '^[+-]?[0-9]+$'
+                    THEN odds::numeric
+                    ELSE NULL
+                END
+            )                                                         AS avg_odds
+        FROM mlb_scored_legs
+        WHERE result IS NOT NULL
+        GROUP BY stat
+        ORDER BY total DESC
+    """)
+    by_prop = [dict(r) for r in cur.fetchall()]
+
+    # ── Section 3: Direction analysis ────────────────────────────────────────
+    cur.execute("""
+        SELECT
+            direction,
+            COUNT(*)                                                  AS total,
+            SUM(CASE WHEN result = 'won'  THEN 1 ELSE 0 END)         AS won,
+            AVG(CASE WHEN result = 'won'  THEN 1.0 ELSE 0.0 END)     AS win_rate,
+            AVG(coverage_pct)                                         AS avg_coverage
+        FROM mlb_scored_legs
+        WHERE result IS NOT NULL
+        GROUP BY direction
+        ORDER BY direction
+    """)
+    by_direction = [dict(r) for r in cur.fetchall()]
+
+    # ── Section 4: Recent 7-day trend ────────────────────────────────────────
+    cur.execute("""
+        SELECT
+            run_date,
+            COUNT(*)                                                  AS total,
+            SUM(CASE WHEN result = 'won'  THEN 1 ELSE 0 END)         AS won,
+            SUM(CASE WHEN result = 'lost' THEN 1 ELSE 0 END)         AS lost,
+            AVG(CASE WHEN result = 'won'  THEN 1.0 ELSE 0.0 END)     AS win_rate
+        FROM mlb_scored_legs
+        WHERE result IS NOT NULL
+          AND run_date >= (CURRENT_DATE - INTERVAL '7 days')::text
+        GROUP BY run_date
+        ORDER BY run_date DESC
+    """)
+    recent_trend = [dict(r) for r in cur.fetchall()]
+
+    # Compute rolling 3-day win rate (chronological then re-reverse)
+    days_chron = list(reversed(recent_trend))
+    for i, row in enumerate(days_chron):
+        window = days_chron[max(0, i - 2): i + 1]
+        total_w = sum(d["won"] for d in window)
+        total_n = sum(d["total"] for d in window)
+        row["rolling_3d"] = round(total_w / total_n, 4) if total_n else None
+    recent_trend = list(reversed(days_chron))
+
+    # ── Section 5: Top performers (min 5 resolved legs) ──────────────────────
+    cur.execute("""
+        SELECT
+            player_name,
+            stat,
+            COUNT(*)                                                  AS total,
+            SUM(CASE WHEN result = 'won'  THEN 1 ELSE 0 END)         AS won,
+            SUM(CASE WHEN result = 'lost' THEN 1 ELSE 0 END)         AS lost,
+            AVG(CASE WHEN result = 'won'  THEN 1.0 ELSE 0.0 END)     AS win_rate
+        FROM mlb_scored_legs
+        WHERE result IS NOT NULL
+        GROUP BY player_name, stat
+        HAVING COUNT(*) >= 5
+        ORDER BY win_rate DESC, total DESC
+        LIMIT 10
+    """)
+    top_performers = [dict(r) for r in cur.fetchall()]
+
+    # ── Section 6: EV signal validation ──────────────────────────────────────
+    cur.execute("""
+        SELECT
+            CASE
+                WHEN ev_per_unit < -0.10 THEN 'Strong -EV (<-10%)'
+                WHEN ev_per_unit < 0     THEN 'Weak -EV (-10% to 0)'
+                WHEN ev_per_unit < 0.10  THEN 'Neutral (0 to 10%)'
+                WHEN ev_per_unit < 0.15  THEN 'Weak +EV (10-15%)'
+                ELSE                          'Strong +EV (>15%)'
+            END AS ev_bucket,
+            MIN(ev_per_unit)                                          AS _sort_key,
+            COUNT(*)                                                  AS total,
+            SUM(CASE WHEN result = 'won'  THEN 1 ELSE 0 END)         AS won,
+            AVG(CASE WHEN result = 'won'  THEN 1.0 ELSE 0.0 END)     AS win_rate
+        FROM mlb_scored_legs
+        WHERE result IS NOT NULL
+          AND ev_per_unit IS NOT NULL
+        GROUP BY ev_bucket
+        ORDER BY _sort_key
+    """)
+    ev_validation = [dict(r) for r in cur.fetchall()]
+    for row in ev_validation:
+        row.pop("_sort_key", None)
+
+    # ── Summary totals ────────────────────────────────────────────────────────
+    cur.execute("""
+        SELECT
+            COUNT(*)                                                  AS total_resolved,
+            SUM(CASE WHEN result = 'won'  THEN 1 ELSE 0 END)         AS total_won,
+            AVG(CASE WHEN result = 'won'  THEN 1.0 ELSE 0.0 END)     AS overall_win_rate,
+            COUNT(DISTINCT run_date)                                  AS days_tracked
+        FROM mlb_scored_legs
+        WHERE result IS NOT NULL
+    """)
+    summary = dict(cur.fetchone())
+
+    cur.close()
+    conn.close()
+
+    return {
+        "summary":        summary,
+        "calibration":    calibration,
+        "by_prop":        by_prop,
+        "by_direction":   by_direction,
+        "recent_trend":   recent_trend,
+        "top_performers": top_performers,
+        "ev_validation":  ev_validation,
+    }
+
+
 init_db()
