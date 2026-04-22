@@ -225,7 +225,9 @@ def init_db():
             opposing_pitcher_id TEXT,
             lineup_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
             last_updated TEXT,
-            logged_at TEXT NOT NULL
+            logged_at TEXT NOT NULL,
+            odd_id TEXT,
+            UNIQUE (odd_id)
         )
     """)
 
@@ -940,8 +942,25 @@ def get_dashboard_data() -> dict:
     conn = get_conn()
     cur = conn.cursor()
 
+    # Dedup CTE used by all dashboard queries.
+    # The raw mlb_scored_legs table can have same-direction duplicates when
+    # odd_id is NULL (PostgreSQL UNIQUE constraints don't treat NULLs as equal).
+    # This CTE keeps the highest-EV row per (run_date, player_name, stat, direction).
+    DEDUP_CTE = """
+        deduped AS (
+            SELECT *,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY run_date, player_name, stat, direction
+                       ORDER BY ev_per_unit DESC NULLS LAST
+                   ) AS _rn
+            FROM mlb_scored_legs
+            WHERE result IS NOT NULL
+        )
+    """
+
     # ── Section 1: Coverage calibration ──────────────────────────────────────
-    cur.execute("""
+    cur.execute(f"""
+        WITH {DEDUP_CTE}
         SELECT
             CASE
                 WHEN coverage_pct < 55 THEN '<55%'
@@ -955,8 +974,8 @@ def get_dashboard_data() -> dict:
             SUM(CASE WHEN result = 'won'  THEN 1 ELSE 0 END)         AS won,
             SUM(CASE WHEN result = 'lost' THEN 1 ELSE 0 END)         AS lost,
             AVG(CASE WHEN result = 'won'  THEN 1.0 ELSE 0.0 END)     AS actual_rate
-        FROM mlb_scored_legs
-        WHERE result IS NOT NULL
+        FROM deduped
+        WHERE _rn = 1
           AND coverage_pct IS NOT NULL
         GROUP BY bucket
         ORDER BY avg_predicted
@@ -964,7 +983,8 @@ def get_dashboard_data() -> dict:
     calibration = [dict(r) for r in cur.fetchall()]
 
     # ── Section 2: Prop type performance ─────────────────────────────────────
-    cur.execute("""
+    cur.execute(f"""
+        WITH {DEDUP_CTE}
         SELECT
             stat,
             COUNT(*)                                                  AS total,
@@ -979,38 +999,40 @@ def get_dashboard_data() -> dict:
                     ELSE NULL
                 END
             )                                                         AS avg_odds
-        FROM mlb_scored_legs
-        WHERE result IS NOT NULL
+        FROM deduped
+        WHERE _rn = 1
         GROUP BY stat
         ORDER BY total DESC
     """)
     by_prop = [dict(r) for r in cur.fetchall()]
 
     # ── Section 3: Direction analysis ────────────────────────────────────────
-    cur.execute("""
+    cur.execute(f"""
+        WITH {DEDUP_CTE}
         SELECT
             direction,
             COUNT(*)                                                  AS total,
             SUM(CASE WHEN result = 'won'  THEN 1 ELSE 0 END)         AS won,
             AVG(CASE WHEN result = 'won'  THEN 1.0 ELSE 0.0 END)     AS win_rate,
             AVG(coverage_pct)                                         AS avg_coverage
-        FROM mlb_scored_legs
-        WHERE result IS NOT NULL
+        FROM deduped
+        WHERE _rn = 1
         GROUP BY direction
         ORDER BY direction
     """)
     by_direction = [dict(r) for r in cur.fetchall()]
 
     # ── Section 4: Recent 7-day trend ────────────────────────────────────────
-    cur.execute("""
+    cur.execute(f"""
+        WITH {DEDUP_CTE}
         SELECT
             run_date,
             COUNT(*)                                                  AS total,
             SUM(CASE WHEN result = 'won'  THEN 1 ELSE 0 END)         AS won,
             SUM(CASE WHEN result = 'lost' THEN 1 ELSE 0 END)         AS lost,
             AVG(CASE WHEN result = 'won'  THEN 1.0 ELSE 0.0 END)     AS win_rate
-        FROM mlb_scored_legs
-        WHERE result IS NOT NULL
+        FROM deduped
+        WHERE _rn = 1
           AND run_date >= (CURRENT_DATE - INTERVAL '7 days')::text
         GROUP BY run_date
         ORDER BY run_date DESC
@@ -1027,7 +1049,8 @@ def get_dashboard_data() -> dict:
     recent_trend = list(reversed(days_chron))
 
     # ── Section 5: Top performers (min 5 resolved legs) ──────────────────────
-    cur.execute("""
+    cur.execute(f"""
+        WITH {DEDUP_CTE}
         SELECT
             player_name,
             stat,
@@ -1035,8 +1058,8 @@ def get_dashboard_data() -> dict:
             SUM(CASE WHEN result = 'won'  THEN 1 ELSE 0 END)         AS won,
             SUM(CASE WHEN result = 'lost' THEN 1 ELSE 0 END)         AS lost,
             AVG(CASE WHEN result = 'won'  THEN 1.0 ELSE 0.0 END)     AS win_rate
-        FROM mlb_scored_legs
-        WHERE result IS NOT NULL
+        FROM deduped
+        WHERE _rn = 1
         GROUP BY player_name, stat
         HAVING COUNT(*) >= 5
         ORDER BY win_rate DESC, total DESC
@@ -1045,7 +1068,8 @@ def get_dashboard_data() -> dict:
     top_performers = [dict(r) for r in cur.fetchall()]
 
     # ── Section 6: EV signal validation ──────────────────────────────────────
-    cur.execute("""
+    cur.execute(f"""
+        WITH {DEDUP_CTE}
         SELECT
             CASE
                 WHEN ev_per_unit < -0.10 THEN 'Strong -EV (<-10%)'
@@ -1058,8 +1082,8 @@ def get_dashboard_data() -> dict:
             COUNT(*)                                                  AS total,
             SUM(CASE WHEN result = 'won'  THEN 1 ELSE 0 END)         AS won,
             AVG(CASE WHEN result = 'won'  THEN 1.0 ELSE 0.0 END)     AS win_rate
-        FROM mlb_scored_legs
-        WHERE result IS NOT NULL
+        FROM deduped
+        WHERE _rn = 1
           AND ev_per_unit IS NOT NULL
         GROUP BY ev_bucket
         ORDER BY _sort_key
@@ -1069,14 +1093,15 @@ def get_dashboard_data() -> dict:
         row.pop("_sort_key", None)
 
     # ── Summary totals ────────────────────────────────────────────────────────
-    cur.execute("""
+    cur.execute(f"""
+        WITH {DEDUP_CTE}
         SELECT
             COUNT(*)                                                  AS total_resolved,
             SUM(CASE WHEN result = 'won'  THEN 1 ELSE 0 END)         AS total_won,
             AVG(CASE WHEN result = 'won'  THEN 1.0 ELSE 0.0 END)     AS overall_win_rate,
             COUNT(DISTINCT run_date)                                  AS days_tracked
-        FROM mlb_scored_legs
-        WHERE result IS NOT NULL
+        FROM deduped
+        WHERE _rn = 1
     """)
     summary = dict(cur.fetchone())
 
