@@ -142,3 +142,23 @@ CREATE TABLE mlb_training_data (
 | `mlb_training_data` | CREATED — 73,942 rows inserted, 66,174 resolved |
 
 ## Git Status
+
+HEAD: (to be committed)
+Branch: master
+Untracked: scripts/backfill_training_data.py
+
+---
+
+## SGO API Usage
+- Monthly quota: 5,000 / 100,000 objects (5%)
+- Backfill consumed: ~400 objects
+- Plenty of headroom for daily prospective collection
+
+---
+
+## Environment
+- Repository: github.com/MrGweeod/mlb-agent
+- Deployment: Railway (mlb-agent project) — production pipeline still running
+- Web app: https://mlb-agent-production.up.railway.app
+- Database: Supabase PostgreSQL (mlb_training_data + mlb_scored_legs tables)
+- Python: 3.14 in venv (WSL2 Ubuntu)
