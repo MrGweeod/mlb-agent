@@ -1,16 +1,16 @@
 # MLB Parlay Agent — Build Status
 
-**Last Updated:** 2026-04-22
+**Last Updated:** 2026-04-23
 **Blueprint Version:** v1.0
 **Repo:** github.com/MrGweeod/mlb-agent
 
 ## Infrastructure Status
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Railway Deployment | ✅ Running | Commit: 41be85d |
+| Railway Deployment | ✅ Running | Production pipeline 3×/day |
 | Discord Bot | ✅ Connected | Scheduled runs: 9AM/12PM/5:30PM ET |
-| Web App | ✅ Fully Functional | Dashboard tab, position filters, analyze button |
-| Supabase PostgreSQL | ✅ Live | mlb_* tables active, 614 clean resolved legs |
+| Web App | ✅ Fully Functional | Dashboard, position filters, analyze button |
+| Supabase PostgreSQL | ✅ Live | mlb_scored_legs (614 rows) + mlb_training_data (73,942 rows) |
 
 ## Build Progress
 
@@ -23,97 +23,113 @@ All modules adapted for MLB including pitcher K props (Poisson model).
 ### ✅ Phase 3 — New Modules (Complete)
 All modules built and deployed.
 
-### ✅ April 22 Improvements (Complete)
-- Coverage model fixed (log-odds transformation — no more 100% clipping)
-- Performance analytics dashboard built (6 sections)
-- Historical legs rescored (618/639 updated with new model)
-- Database deduplicated (614 clean legs from 673 raw)
+### ✅ Phase 4 — ML Training Data Collection (NEW — Complete)
+- Historical backfill script built and tested
+- 66,174 resolved training samples collected (March 28 - April 22)
+- Database table `mlb_training_data` created and populated
+- Ready for feature engineering + model training
 
-## Calibration Results (614 Deduplicated Legs, April 17-21)
+## Training Data Status (NEW)
 
-### Coverage Accuracy (After Log-Odds Fix)
-| Bucket | Avg Predicted | Count | Won | Actual Rate | Error | Assessment |
-|--------|--------------|-------|-----|-------------|-------|------------|
-| <55%   | 47.0%        | 135   | 55  | 40.7%       | -6.3pp | ✅ Good |
-| 55-60% | 57.3%        | 52    | 21  | 40.4%       | -16.9pp | ❌ Worst bucket |
-| 60-65% | 62.6%        | 128   | 64  | 50.0%       | -12.6pp | ⚠️ Overconfident |
-| 65-70% | 67.7%        | 112   | 50  | 44.6%       | -23.1pp | ❌ Most overconfident |
-| 70%+   | 77.4%        | 187   | 103 | 55.1%       | -22.3pp | ❌ Overconfident |
+### Backfill Results
+| Metric | Count |
+|--------|-------|
+| Total props logged | 73,942 |
+| Resolved (hit/miss) | 66,174 (89.5%) |
+| Hits | 31,450 (47.5%) |
+| Misses | 34,724 (52.5%) |
+| NULL (DNP/scratched) | 7,768 (10.5%) |
 
-**Overall win rate:** 47.7% (293/614)
+### Date Coverage
+- **Start:** March 28, 2026 (Opening Day)
+- **End:** April 22, 2026
+- **Days:** 26 days
+- **Avg props/day:** ~2,850
 
-### Prop Type Performance
-| Stat       | Total | Win Rate | Notes |
-|------------|-------|----------|-------|
-| Strikeouts | 122   | 53.3%    | Best performer ✅ |
-| Total Bases| 53    | 47.2%    | |
-| RBI        | 32    | 46.9%    | |
-| Hits       | 386   | 46.4%    | |
-| Walks      | 21    | 42.9%    | |
+### Sample Distribution by Stat
+| Stat | Count | Notes |
+|------|-------|-------|
+| Hits | ~40,000 | Largest category |
+| Strikeouts | ~15,000 | Pitcher + batter combined |
+| Total Bases | ~8,000 | |
+| RBI | ~3,000 | |
+| Walks | ~2,500 | |
+| Other | ~5,000 | Runs, HRs, stolen bases |
 
-### Direction Bias
-| Direction | Count | Win Rate |
-|-----------|-------|----------|
-| Over      | 368   | 50.0%    |
-| Under     | 246   | 44.3%    |
-
-### EV Signal Status
-**Status:** Still inverted — investigation needed
-- Strong -EV legs: 55.3% hit rate (should be worst bucket) ❌
-- Strong +EV legs: lower win rate ❌
-- Root cause: April 21 EV formula fix not yet generating enough new data (< 50 legs)
-
-## What's Built and Working
+## Production Pipeline Status (Unchanged)
 
 ### ✅ Core Pipeline
 - 8-step daily pipeline (9AM/12PM/5:30PM ET)
 - SGO props fetch (MLB-specific)
 - Coverage calculation with handedness splits (log-odds transformation)
 - Pitcher K props via Poisson model
-- Composite leg scoring (5 factors)
+- Composite leg scoring (coverage 70%, opponent 20%, stability 10%)
 - Branch-and-Bound parlay builder
-- Automated outcome resolution (box-score-based, 1 call per game)
+- Automated outcome resolution
 
 ### ✅ Web App
 - Interactive parlay builder
-- Performance analytics dashboard (6 sections, auto-refresh 60s)
+- Performance analytics dashboard (6 sections)
 - Position filters (All / Hitters / Pitchers)
-- Stat filters (hits, strikeouts, totalBases, etc.)
+- Stat filters
 - Real-time combined odds calculation
-- Correlation blocking (max 1 leg per player, max 3 per game)
-- Analyze button → Claude API (10-20s, statistical analysis only)
-- Trend (HOT/COLD) + Matchup (Favorable/Tough) pills on cards
-- Mobile-responsive design
+- Analyze button → Claude API (statistical analysis)
 
 ### ✅ Database & Resolution
-- 614 clean deduplicated resolved legs (April 17-21)
+- 614 production legs (April 17-22)
+- 66,174 training legs (March 28 - April 22)
 - Daily automated resolution at 9AM ET
-- Per-odd_id deduplication (allows pitcher K props in afternoon runs)
-- DEDUP_CTE in all dashboard queries (eliminates NULL odd_id duplication)
-- Calibration tracking (coverage, EV, trend, direction validation)
+- Calibration tracking
 
-## Known Issues
+## Calibration Results (614 Production Legs, April 17-21)
 
-### Critical
-- ❌ **EV signal inverted** — Strong -EV legs winning at 55.3%. Root cause under investigation. EV weight currently 0%.
-- ❌ **Coverage systematically overconfident** — 12-23pp errors in upper buckets despite log-odds fix. Model still overpredicts.
+### Coverage Accuracy
+| Bucket | Predicted | Actual | Error | Assessment |
+|--------|-----------|--------|-------|------------|
+| <55% | 47.0% | 40.7% | -6.3pp | ✅ Good |
+| 55-60% | 57.3% | 40.4% | -16.9pp | ❌ Worst |
+| 60-65% | 62.6% | 50.0% | -12.6pp | ⚠️ Overconfident |
+| 65-70% | 67.7% | 44.6% | -23.1pp | ❌ Very overconfident |
+| 70%+ | 77.4% | 55.1% | -22.3pp | ❌ Overconfident |
 
-### High Priority
-- ⚠️ **Opponent adjustment distribution unknown** — Worth querying whether it systematically discounts coverage
-- ⚠️ **55-60% bucket worst calibrated** (-16.9pp) — May need a separate penalty for this range
-- ⚠️ **Under direction underperforms** — 44.3% vs 50.0% overs; consider raising under eligibility threshold
+**Overall:** 47.7% win rate (293/614)
 
-### Medium Priority
-- Apply global coverage deflation factor (0.85×) to reduce systematic overconfidence
-- Monitor April 22+ legs (first scored with log-odds model, no old linear coverage)
+### Prop Type Performance
+| Stat | Total | Win Rate |
+|------|-------|----------|
+| Strikeouts | 122 | 53.3% ✅ |
+| Total Bases | 53 | 47.2% |
+| RBI | 32 | 46.9% |
+| Hits | 386 | 46.4% |
+| Walks | 21 | 42.9% |
+
+### Known Issues
+- ❌ Coverage systematically overconfident (12-23pp errors)
+- ⚠️ Under direction underperforms (44.3% vs 50.0% overs)
+
+## What's Built and Working
+
+### ✅ Training Data Infrastructure (NEW)
+- `scripts/backfill_training_data.py` — Historical data collection script
+- `mlb_training_data` table — 73,942 rows with props + outcomes
+- Idempotent backfill (safe to re-run, won't duplicate)
+- Three modes: full, props-only, resolve-only
 
 ## What's NOT Built
 
-**Bet Tracking System (Optional):**
-- `mlb_placed_bets` table schema exists but not wired to web app
-- Manual bet logging via DraftKings → spreadsheet → outcome resolver
+### ML Model Training (Phase 5 — Next)
+- Feature calculation module (populate NULL columns in training_data)
+- Gradient boosting classifier training script
+- ML-based leg scorer (`ml_scorer.py` to replace `leg_scorer.py`)
+- A/B testing framework (ML vs heuristic scoring)
 
-**Advanced Features (Roadmap):**
-- Learning loop (regression-based weight recalibration)
-- Weather adjustment (wind/temp for outdoor games)
-- Same-game parlay correlation detection
+### Prospective Collection (Phase 4.5 — Next)
+- Add training data logging to daily 9AM pipeline
+- Automated feature calculation for new props
+- Growing dataset: +300 samples/day
+
+### Advanced Features (Roadmap)
+- Ballpark factors
+- Weather data integration
+- Line movement tracking
+- Parlay-level ML optimizer
