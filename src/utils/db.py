@@ -1119,4 +1119,176 @@ def get_dashboard_data() -> dict:
     }
 
 
+def get_training_dashboard_data() -> dict:
+    """
+    Return dashboard analytics from mlb_training_data (66K historical samples).
+
+    All six sections query mlb_training_data instead of mlb_scored_legs.
+    Results use 'hit'/'miss' terminology (not 'won'/'lost').
+    Percentage values are pre-computed on the 0-100 scale by the DB.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # ── Summary ────────────────────────────────────────────────────────────────
+    cur.execute("""
+        SELECT
+            COUNT(*)                                                         AS total_props,
+            COUNT(*) FILTER (
+                WHERE composite_score IS NOT NULL AND result IN ('hit', 'miss')
+            )                                                                AS calibrated_samples,
+            COUNT(*) FILTER (WHERE result IN ('hit', 'miss'))                AS total_resolved,
+            COUNT(*) FILTER (WHERE result = 'hit')                           AS total_hits,
+            ROUND(
+                100.0 * COUNT(*) FILTER (WHERE result = 'hit') /
+                NULLIF(COUNT(*) FILTER (WHERE result IN ('hit', 'miss')), 0),
+                1
+            )                                                                AS overall_hit_rate
+        FROM mlb_training_data
+    """)
+    summary = dict(cur.fetchone())
+
+    # ── Section 1: Calibration by composite_score bucket ──────────────────────
+    cur.execute("""
+        SELECT
+            CASE
+                WHEN composite_score < 25 THEN '<25'
+                WHEN composite_score < 35 THEN '25-35'
+                WHEN composite_score < 45 THEN '35-45'
+                WHEN composite_score < 55 THEN '45-55'
+                WHEN composite_score < 65 THEN '55-65'
+                ELSE '65+'
+            END                                                              AS score_bucket,
+            COUNT(*)                                                         AS total,
+            COUNT(*) FILTER (WHERE result = 'hit')                          AS hits,
+            ROUND(
+                100.0 * COUNT(*) FILTER (WHERE result = 'hit') / COUNT(*),
+                1
+            )                                                                AS hit_rate_pct,
+            ROUND(AVG(coverage_pct)::numeric, 1)                            AS avg_predicted_coverage
+        FROM mlb_training_data
+        WHERE composite_score IS NOT NULL
+          AND result IN ('hit', 'miss')
+        GROUP BY score_bucket
+        ORDER BY score_bucket
+    """)
+    calibration = [dict(r) for r in cur.fetchall()]
+
+    # ── Section 2: Prop performance by stat ───────────────────────────────────
+    cur.execute("""
+        SELECT
+            stat,
+            COUNT(*)                                                         AS total,
+            COUNT(*) FILTER (WHERE result = 'hit')                          AS hits,
+            ROUND(
+                100.0 * COUNT(*) FILTER (WHERE result = 'hit') / COUNT(*),
+                1
+            )                                                                AS hit_rate_pct,
+            ROUND(AVG(composite_score)::numeric, 1)                         AS avg_composite
+        FROM mlb_training_data
+        WHERE result IN ('hit', 'miss')
+        GROUP BY stat
+        ORDER BY total DESC
+        LIMIT 15
+    """)
+    by_prop = [dict(r) for r in cur.fetchall()]
+
+    # ── Section 3: Direction bias ──────────────────────────────────────────────
+    cur.execute("""
+        SELECT
+            direction,
+            COUNT(*)                                                         AS total,
+            COUNT(*) FILTER (WHERE result = 'hit')                          AS hits,
+            ROUND(
+                100.0 * COUNT(*) FILTER (WHERE result = 'hit') / COUNT(*),
+                1
+            )                                                                AS hit_rate_pct
+        FROM mlb_training_data
+        WHERE result IN ('hit', 'miss')
+        GROUP BY direction
+        ORDER BY total DESC
+    """)
+    by_direction = [dict(r) for r in cur.fetchall()]
+
+    # ── Section 4: Coverage accuracy (predicted vs actual) ────────────────────
+    cur.execute("""
+        SELECT
+            CASE
+                WHEN coverage_pct < 30 THEN '<30%'
+                WHEN coverage_pct < 40 THEN '30-40%'
+                WHEN coverage_pct < 50 THEN '40-50%'
+                WHEN coverage_pct < 60 THEN '50-60%'
+                WHEN coverage_pct < 70 THEN '60-70%'
+                ELSE '70%+'
+            END                                                              AS coverage_bucket,
+            COUNT(*)                                                         AS total,
+            COUNT(*) FILTER (WHERE result = 'hit')                          AS hits,
+            ROUND(
+                100.0 * COUNT(*) FILTER (WHERE result = 'hit') / COUNT(*),
+                1
+            )                                                                AS actual_hit_rate,
+            ROUND(AVG(coverage_pct)::numeric, 1)                            AS predicted_coverage
+        FROM mlb_training_data
+        WHERE coverage_pct IS NOT NULL
+          AND result IN ('hit', 'miss')
+        GROUP BY coverage_bucket
+        ORDER BY coverage_bucket
+    """)
+    coverage_accuracy = [dict(r) for r in cur.fetchall()]
+
+    # ── Section 5: Trend validation ───────────────────────────────────────────
+    cur.execute("""
+        SELECT
+            CASE
+                WHEN trend_score >= 0.7 THEN 'HOT'
+                WHEN trend_score <= 0.3 THEN 'COLD'
+                ELSE 'NEUTRAL'
+            END                                                              AS trend_category,
+            COUNT(*)                                                         AS total,
+            COUNT(*) FILTER (WHERE result = 'hit')                          AS hits,
+            ROUND(
+                100.0 * COUNT(*) FILTER (WHERE result = 'hit') / COUNT(*),
+                1
+            )                                                                AS hit_rate_pct
+        FROM mlb_training_data
+        WHERE trend_score IS NOT NULL
+          AND result IN ('hit', 'miss')
+        GROUP BY trend_category
+        ORDER BY trend_category
+    """)
+    trend_validation = [dict(r) for r in cur.fetchall()]
+
+    # ── Section 6: Recent legs ─────────────────────────────────────────────────
+    cur.execute("""
+        SELECT
+            game_date,
+            player_name,
+            stat,
+            direction,
+            line,
+            composite_score,
+            coverage_pct,
+            result,
+            actual_stat
+        FROM mlb_training_data
+        WHERE result IS NOT NULL
+        ORDER BY game_date DESC, id DESC
+        LIMIT 50
+    """)
+    recent_legs = [dict(r) for r in cur.fetchall()]
+
+    cur.close()
+    conn.close()
+
+    return {
+        "summary":           summary,
+        "calibration":       calibration,
+        "by_prop":           by_prop,
+        "by_direction":      by_direction,
+        "coverage_accuracy": coverage_accuracy,
+        "trend_validation":  trend_validation,
+        "recent_legs":       recent_legs,
+    }
+
+
 init_db()

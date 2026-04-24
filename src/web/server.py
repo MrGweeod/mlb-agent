@@ -27,7 +27,7 @@ from datetime import date
 
 from aiohttp import web
 
-from src.utils.db import get_scored_legs, get_dashboard_data
+from src.utils.db import get_scored_legs, get_training_dashboard_data
 from src.engine.claude_agent import analyze_parlays
 
 _PASSWORD = os.getenv("WEB_APP_PASSWORD", "")
@@ -107,7 +107,7 @@ async def handle_dashboard(request: web.Request) -> web.Response:
             status=401,
         )
     try:
-        data = get_dashboard_data()
+        data = get_training_dashboard_data()
         return web.Response(
             text=json.dumps(data, default=str),
             content_type="application/json",
