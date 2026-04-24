@@ -229,6 +229,12 @@
     align-items: center;
     gap: 6px;
   }
+  .leg-game-time {
+    font-size: 11px;
+    color: var(--muted);
+    grid-column: 1;
+    margin-bottom: 1px;
+  }
   .leg-matchup {
     font-size: 11px;
     color: var(--muted);
@@ -733,6 +739,7 @@
 
   <div class="sort-bar">
     <span>Sort:</span>
+    <button class="sort-btn" data-sort="game_time">Time</button>
     <button class="sort-btn active" data-sort="coverage">Coverage</button>
     <button class="sort-btn" data-sort="ev">EV</button>
     <button class="sort-btn" data-sort="player">Player</button>
@@ -898,7 +905,13 @@ async function fetchLegs() {
     const res = await fetch(`/api/legs?password=${encodeURIComponent(password)}`);
     if (res.status === 401) return false;
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    allLegs = await res.json();
+    const data = await res.json();
+    const currentTimeEST = data.current_time_est;
+    // Filter out legs from games that have already started
+    allLegs = data.legs.filter(leg => {
+      if (!leg.game_start_time) return true;
+      return leg.game_start_time > currentTimeEST;
+    });
     render();
     return true;
   } catch (err) {
@@ -1260,6 +1273,26 @@ function covClass(pct) {
   return 'cov-low';
 }
 
+function formatPlayerName(leg) {
+  const name = leg.player_name || '—';
+  const team = leg.team || '???';
+  const position = leg.position || '';
+  if (['SP', 'RP', 'P'].includes(position) && leg.pitcher_hand) {
+    return `${name} (${team}, ${leg.pitcher_hand})`;
+  }
+  return `${name} (${team})`;
+}
+
+function formatGameTime(timestamp) {
+  if (!timestamp) return null;
+  const [, time] = timestamp.split(' ');
+  const [hourStr, minute] = time.split(':');
+  const h = parseInt(hourStr, 10);
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  const hour12 = h % 12 || 12;
+  return `${hour12}:${minute} ${ampm} EST`;
+}
+
 function fmtPct(val) {
   if (val === null || val === undefined) return '—';
   return val.toFixed(1) + '%';
@@ -1324,6 +1357,11 @@ function render() {
   });
 
   legs = legs.slice().sort((a, b) => {
+    if (sortKey === 'game_time') {
+      const tA = a.game_start_time || '9999-12-31';
+      const tB = b.game_start_time || '9999-12-31';
+      return tA.localeCompare(tB);
+    }
     if (sortKey === 'coverage') return (b.coverage_pct || 0) - (a.coverage_pct || 0);
     if (sortKey === 'ev') return (b.ev_per_unit || -99) - (a.ev_per_unit || -99);
     if (sortKey === 'player') return (a.player_name || '').localeCompare(b.player_name || '');
@@ -1363,9 +1401,10 @@ function render() {
 
     return `<div class="${classes}" data-id="${esc(String(leg.id))}">
       <div class="leg-player">
-        ${esc(leg.player_name || '—')}
+        ${esc(formatPlayerName(leg))}
         <button class="leg-info-btn" title="Show details">ⓘ</button>
       </div>
+      ${leg.game_start_time ? `<div class="leg-game-time">${esc(formatGameTime(leg.game_start_time))}</div>` : ''}
       <div class="leg-matchup">${esc(leg.team || '—')} vs ${esc(leg.opponent || '—')}</div>
       <div class="leg-prop">
         <span class="stat-name">${esc(statLabel(leg.stat))}</span>
@@ -1441,8 +1480,8 @@ function showError(msg) {
     `<div class="center-msg"><div style="color:var(--red)">${esc(msg)}</div></div>`;
 }
 
-// Auto-refresh every 5 minutes
-setInterval(() => { if (password) fetchLegs(); }, 5 * 60 * 1000);
+// Auto-refresh every 60 seconds to drop started games
+setInterval(() => { if (password) fetchLegs(); }, 60 * 1000);
 
 // ── Tab switching ─────────────────────────────────────────────────────────────
 const legsView = () => {

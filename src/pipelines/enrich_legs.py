@@ -29,7 +29,42 @@ from __future__ import annotations
 
 import datetime
 
+import pytz
+import statsapi
+
 from src.apis.matchup import get_pitcher_matchup_profile
+
+
+def get_game_start_time(game_pk: int) -> str | None:
+    """Fetch game start time from MLB-StatsAPI. Returns ISO timestamp string in EST."""
+    try:
+        game_data = statsapi.get('game', {'gamePk': game_pk})
+        game_datetime = game_data['gameData']['datetime']['dateTime']
+        utc_time = datetime.datetime.fromisoformat(game_datetime.replace('Z', '+00:00'))
+        est = pytz.timezone('America/New_York')
+        est_time = utc_time.astimezone(est)
+        return est_time.strftime('%Y-%m-%d %H:%M:%S')
+    except Exception as e:
+        print(f"Warning: Failed to fetch game time for game_pk {game_pk}: {e}")
+        return None
+
+
+def get_pitcher_handedness(player_id: int, position: str) -> str | None:
+    """Fetch pitcher handedness from MLB-StatsAPI. Returns 'RHP', 'LHP', or None."""
+    if position not in ('SP', 'RP', 'P'):
+        return None
+    try:
+        player_data = statsapi.lookup_player(player_id)
+        if player_data:
+            pitch_hand = player_data[0].get('pitchHand', {}).get('code')
+            if pitch_hand == 'R':
+                return 'RHP'
+            elif pitch_hand == 'L':
+                return 'LHP'
+        return None
+    except Exception as e:
+        print(f"Warning: Failed to fetch handedness for player {player_id}: {e}")
+        return None
 
 # ── Prop routing ──────────────────────────────────────────────────────────────
 
@@ -137,6 +172,12 @@ def enrich_legs(
     for pid in sorted(pid for pid in unique_pitcher_ids if pid is not None):
         profiles[pid] = get_pitcher_matchup_profile(pid, season)
 
+    # Pre-fetch game start times (one API call per unique game_pk)
+    unique_game_pks = {leg["game_pk"] for leg in legs if leg.get("game_pk")}
+    game_times: dict[int, str | None] = {
+        gk: get_game_start_time(gk) for gk in sorted(unique_game_pks)
+    }
+
     enriched = 0
     for leg in legs:
         team = leg.get("team", "")
@@ -147,6 +188,14 @@ def enrich_legs(
 
         leg["opponent"] = opp_team
         leg["opposing_pitcher_id"] = pitcher_id
+
+        # NEW: populate game start time and pitcher handedness
+        game_pk = leg.get("game_pk")
+        leg["game_start_time"] = game_times.get(game_pk) if game_pk else None
+
+        position = leg.get("position", "")
+        player_id = leg.get("player_id")
+        leg["pitcher_hand"] = get_pitcher_handedness(player_id, position) if player_id else None
 
         if not pitcher_id:
             leg["opponent_adjustment"] = 0.0
@@ -159,7 +208,6 @@ def enrich_legs(
 
         # Determine if this is a pitcher prop: position "SP"/"RP" or
         # stat explicitly in the pitcher-only set.
-        position = leg.get("position", "")
         is_pitcher_prop = (
             position in ("SP", "RP", "P")
             or stat in _PITCHER_STATS

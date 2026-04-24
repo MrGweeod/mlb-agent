@@ -750,6 +750,8 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
             str(leg.get("opposing_pitcher_id")) if leg.get("opposing_pitcher_id") else None,
             ts,
             leg.get("odd_id"),
+            leg.get("game_start_time"),
+            leg.get("pitcher_hand"),
         )
         for leg in legs
         if leg.get("stat") and leg.get("player_name") and leg.get("odd_id")
@@ -765,7 +767,8 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
             (run_date, player_name, team, opponent, stat, line, direction, odds,
              coverage_pct, p_over, ev_per_unit, trend_pass, trend_score,
              opponent_adjustment, position, in_parlay,
-             game_pk, player_id, opposing_pitcher_id, logged_at, odd_id)
+             game_pk, player_id, opposing_pitcher_id, logged_at, odd_id,
+             game_start_time, pitcher_hand)
         VALUES %s
         ON CONFLICT (odd_id) DO NOTHING
         """,

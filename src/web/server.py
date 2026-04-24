@@ -23,7 +23,8 @@ from __future__ import annotations
 import os
 import json
 import pathlib
-from datetime import date
+import pytz
+from datetime import date, datetime
 
 from aiohttp import web
 
@@ -77,9 +78,10 @@ async def handle_legs(request: web.Request) -> web.Response:
     date_param = request.rel_url.query.get("date", str(date.today()))
     try:
         legs = get_scored_legs(date_param)
-        # Convert None to null safely via json.dumps (psycopg2 returns Python None)
+        est = pytz.timezone('America/New_York')
+        current_time_est = datetime.now(est).strftime('%Y-%m-%d %H:%M:%S')
         return web.Response(
-            text=json.dumps(legs, default=str),
+            text=json.dumps({'legs': legs, 'current_time_est': current_time_est}, default=str),
             content_type="application/json",
         )
     except Exception as exc:
