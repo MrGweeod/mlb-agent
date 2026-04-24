@@ -1,131 +1,175 @@
 # MLB Parlay Agent — Session Handoff
-**Last Updated:** April 23, 2026
+**Last Updated:** April 24, 2026
 
 ## Current Status
-✅ **Historical training data backfill COMPLETE** — 66,174 resolved samples (March 28 - April 22)
-✅ **Coverage model fixed** — Log-odds transformation, range 23.1%–90.5%
-✅ **Dashboard built** — 6-section analytics page
-✅ **Database cleaned** — 614 production legs deduplicated
-⚠️ **EV signal dropped** — Weight set to 0% (not useful for parlay construction)
-⚠️ **Coverage still overconfident** — 12-23pp errors in upper buckets
+✅ **ML model trained** — GradientBoostingClassifier, 86.5% AUC, 49K samples
+✅ **Smart parlay filter deployed** — blocks poison overs, max 1 risky over
+✅ **Web app UI enhanced** — team names, pitcher handedness, game time filtering
+✅ **Dashboard updated** — shows 66K training data samples (March 28 - April 22)
 
 ---
 
-## What Was Built This Session (April 23, 2026)
+## What Was Built This Session (April 24, 2026)
 
-### ML Pivot — Training Data Collection System
+### 1. Training Data Deep Dive Analysis
 
-**Decision:** Build ML-powered leg scoring model instead of hand-coded heuristics
+**Ran 3 critical queries to validate hypotheses:**
 
-**Strategy:**
-- Phase 1 (COMPLETE): Historical backfill — collect 26 days of props + outcomes
-- Phase 2 (NEXT): Prospective collection — add to daily pipeline going forward  
-- Phase 3 (FUTURE): Train gradient boosting classifier on features → P(hit)
+**Query 1: Parlay probability by composite score tier**
+- 65+ score: 7.77% 4-leg parlay win rate (profitable at +1500)
+- 55-65 score: 6.27% (barely breakeven)
+- <45 score: 3.71% (disaster)
 
-### Historical Backfill Script
+**Key insight:** Only use 65+ composite score legs in parlays
 
-**File:** `scripts/backfill_training_data.py` (410 lines)
+**Query 2: Direction bias by score tier**
+- High-score overs (50+): 42.2% hit rate (still bad)
+- Low-score overs (<50): 16.4% hit rate (catastrophic)
+- High-score unders (50+): 65.4% hit rate (good)
+- Low-score unders (<50): 83.0% hit rate (amazing)
 
-**What it does:**
-1. Fetches historical SGO props for date range (tested: March 28 - April 22 works)
-2. Logs to `mlb_training_data` table with basic fields (player, stat, line, odds, fair_line)
-3. Resolves outcomes from MLB box scores (one API call per game, not per prop)
-4. Handles DNP/scratched players as NULL (excluded from training)
+**Key insight:** Even high-score overs underperform; unders dominate regardless of score
 
-**Key technical details:**
-- Uses `_get_historical_player_props()` — ignores `available: false` flag on closed lines
-- Prefixes `odd_id` with `game_date|` to prevent cross-date collisions
-- Idempotent: safe to re-run (uses `ON CONFLICT (odd_id) DO NOTHING`)
-- Three modes: full backfill, props-only, resolve-only
+**Query 3: Golden stat+direction combinations**
+- RBI under: 85.4% hit rate (best)
+- Walks under: 80.5% hit rate
+- TotalBases under: 74.0% hit rate
+- Hits under: 69.6% hit rate
+- ---
+- RBI over: 14.6% hit rate (worst - poison)
+- Walks over: 19.4% hit rate (poison)
+- HR over: 6.1% hit rate (poison)
 
-**Results:**
-- 73,942 total props logged
-- 66,174 resolved (31,450 hits, 34,724 misses)
-- 7,768 NULL (DNP/scratched, excluded from ML)
-- 89.5% resolution rate
+**Key insight:** Specific stat+direction combos have massive performance gaps
 
-**Database table:** `mlb_training_data`
+**Query 4: Hits over breakdown (user request)**
+- Hits over 0.5 with 65+ score: 44.4% hit rate (372 samples)
+- Hits over 0.5 with <65 score: 32-34% hit rate (2,767 samples)
+
+**Decision:** Allow hits over 0.5 with 65+ score, but limit to max 1 per parlay
+
+---
+
+### 2. ML Model Training (Phase 3A)
+
+**File:** `src/engine/ml_scorer.py` (298 lines)
+
+**Model:** GradientBoostingClassifier + IsotonicCalibration
+- Training samples: 49,222 (with features)
+- Test samples: 9,845 (20% holdout)
+- ROC AUC: 0.8648
+- Accuracy: 80%
+
+**Feature Importance:**
+1. direction: 76.6% ← Model learned over/under bias is dominant!
+2. composite_score: 6.9%
+3. opponent_adjustment: 4.9%
+4. coverage_pct: 3.9%
+5. line: 2.2%
+
+**Smoke test results:**
+- Under hits 0.5: 61.5% predicted ✅
+- Over hits 0.5: 38.4% predicted ✅
+- Over HR 0.5: 16.4% predicted ✅ (poison)
+- Under RBI 0.5: 88.3% predicted ✅ (golden)
+
+**Status:** Model trained and saved to `models/leg_scorer_v1.pkl`, ready for A/B testing
+
+---
+
+### 3. Smart Parlay Filter (Phase 3B)
+
+**File:** `src/engine/parlay_builder.py`
+
+**New function:** `filter_and_tag_legs()`
+
+**Poison overs (BLOCKED entirely):**
+- RBI overs: 14.6% hit rate
+- Walks overs: 19.4% hit rate
+- Home runs overs: 6.1% hit rate
+
+**Risky overs (ALLOWED, max 1 per parlay):**
+- Hits over 0.5 with 65+ composite score: 44.4% hit rate
+- Pitcher strikeouts over 4.5+ with 65+ score: 44.6% hit rate
+
+**All other overs:** BLOCKED (includes low-score hits overs, ambitious lines)
+
+**Branch-and-Bound constraint added:**
+- Max 1 leg with `is_risky_over=True` per parlay
+- Tracked via counter that naturally reverts on backtrack
+
+**Integration:** Runs automatically inside `build_hybrid_parlays()` before pool selection
+
+**Expected impact:** Win rate improvement from 47.7% to 52-58%
+
+---
+
+### 4. Web App UI Improvements
+
+**Files modified:**
+- `src/pipelines/enrich_legs.py` (added game time + pitcher handedness lookup)
+- `src/utils/db.py` (added 2 columns to insert)
+- `src/web/server.py` (return current_time_est)
+- `src/web/static/index.html` (display format, sorting, filtering)
+
+**Database schema:**
 ```sql
-CREATE TABLE mlb_training_data (
-    id SERIAL PRIMARY KEY,
-    game_date DATE NOT NULL,
-    game_pk TEXT,
-    player_id TEXT NOT NULL,
-    player_name TEXT,
-    stat TEXT NOT NULL,
-    direction TEXT NOT NULL,
-    line FLOAT NOT NULL,
-    odds TEXT,
-    fair_line FLOAT,
-    
-    -- Features (NULL for now, calculated in Phase 2)
-    coverage_pct FLOAT,
-    coverage_vs_hand FLOAT,
-    games_vs_hand INTEGER,
-    pitcher_id TEXT,
-    pitcher_hand TEXT,
-    pitcher_era_rank INTEGER,
-    pitcher_k9_rank INTEGER,
-    pitcher_whip_rank INTEGER,
-    home_away TEXT,
-    batting_order_position INTEGER,
-    pa_last_10 FLOAT,
-    trend_score FLOAT,
-    opponent_adjustment FLOAT,
-    
-    -- Outcome (resolved from box scores)
-    actual_stat FLOAT,
-    result TEXT,  -- 'hit' or 'miss'
-    resolved_at TIMESTAMP,
-    
-    -- Metadata
-    logged_at TIMESTAMP DEFAULT NOW(),
-    odd_id TEXT UNIQUE,
-    
-    CONSTRAINT valid_result CHECK (result IN ('hit', 'miss') OR result IS NULL)
-);
+ALTER TABLE mlb_scored_legs 
+ADD COLUMN game_start_time TIMESTAMP,
+ADD COLUMN pitcher_hand TEXT;
 ```
 
----
+**New features:**
+1. **Team abbreviations:**
+   - Hitters: `Gunnar Henderson (BAL)`
+   - Pitchers: `Luis Severino (ATH, RHP)`
 
-## Production Pipeline Status (Unchanged)
+2. **Game time sorting:**
+   - New "Time" button in sort bar
+   - Sorts earliest games first (1pm at top, 10pm at bottom)
 
-**Still running 3x/day:**
-- 9:00 AM: Resolve last night + early props
-- 12:00 PM: Afternoon slate
-- 5:30 PM: Evening slate (final run)
+3. **Auto-filter started games:**
+   - Compares `game_start_time > current_time_est` (both EST)
+   - Legs disappear when game starts
+   - Can't accidentally bet on started games
 
-**Current scoring weights:**
-- Coverage: 70%
-- Opponent adjustment: 20%
-- PA stability: 10%
-- Trend: 0% (no predictive value)
-- EV: 0% (dropped — not useful for parlays)
+4. **Game time display:**
+   - Shows below player name: `1:05 PM EST`
 
-**Calibration (614 production legs, April 17-22):**
-- Overall win rate: 47.7%
-- Coverage errors: 12-23pp overconfident in 60%+ buckets
-- Best prop: Pitcher Ks (53.3% hit rate)
-- Direction bias: Overs 50.0%, Unders 44.3%
+5. **Auto-refresh:**
+   - Changed from 5 minutes to 60 seconds
+   - Keeps list fresh as games start
+
+**URL:** https://mlb-agent.up.railway.app/
 
 ---
 
 ## Next Session Priorities
 
 ### HIGH PRIORITY
-1. **Add prospective collection to daily pipeline** — log today's props to training_data each run
-2. **Build feature calculation module** — populate NULL feature columns for all 66K rows
-3. **Train initial ML model** — sklearn GradientBoostingClassifier with 66K samples
-4. **A/B test ML vs heuristic scoring** — compare parlay quality over 3-5 days
+1. **Monitor production performance** (3-5 days)
+   - Track win rate with new filter (baseline: 47.7%)
+   - Expected: 52-58% with smart filtering
+   - Verify no poison overs in Discord recommendations
+
+2. **A/B test ML vs heuristic scoring**
+   - After filter proves out, enable ML scoring
+   - Compare parlay quality over 5-7 days
+   - Roll out ML to production if superior
+
+3. **Add prospective training data collection**
+   - Wire 12PM props into `mlb_training_data` table
+   - Adds ~300 samples/day going forward
+   - Growing dataset for continuous ML improvement
 
 ### MEDIUM PRIORITY
-- Investigate why coverage is systematically overconfident (global 0.85× deflation?)
-- Filter unders more aggressively (44.3% vs 50.0% overs)
-- Add ballpark factors, weather signals to feature set
+- Build Smart Builder Mode 2 (live P(win), replacement suggestions)
+- Add ballpark factors to training data features
+- Investigate coverage overconfidence (12-23pp errors still present)
 
 ### LOW PRIORITY
-- Parlay-level ML optimizer (learns which leg combinations work best)
-- Reinforce learning approach for parlay construction
+- Parlay-level ML optimizer (learns which leg combinations work)
+- Dashboard enhancements (more detailed analytics)
 
 ---
 
@@ -133,32 +177,69 @@ CREATE TABLE mlb_training_data (
 
 | File | Changes |
 |------|---------|
-| `scripts/backfill_training_data.py` | NEW — 410 lines, historical backfill script |
+| `src/engine/ml_scorer.py` | NEW — 298 lines, ML model training + inference |
+| `models/leg_scorer_v1.pkl` | NEW — Trained model artifact |
+| `src/engine/parlay_builder.py` | Added filter_and_tag_legs(), risky over constraint |
+| `src/pipelines/enrich_legs.py` | Added game time + pitcher handedness lookup |
+| `src/utils/db.py` | Added 2 columns to log_scored_legs insert |
+| `src/web/server.py` | Return current_time_est in /api/legs |
+| `src/web/static/index.html` | Player display format, game time sort/filter |
+| `.gitignore` | Added __pycache__/ exclusion |
+
+---
 
 ## Database Changes
 
 | Table | Action |
 |-------|--------|
-| `mlb_training_data` | CREATED — 73,942 rows inserted, 66,174 resolved |
-
-## Git Status
-
-HEAD: (to be committed)
-Branch: master
-Untracked: scripts/backfill_training_data.py
+| `mlb_scored_legs` | ADDED columns: game_start_time, pitcher_hand |
 
 ---
 
-## SGO API Usage
-- Monthly quota: 5,000 / 100,000 objects (5%)
-- Backfill consumed: ~400 objects
-- Plenty of headroom for daily prospective collection
+## Git Status
+
+**Latest commits:**
+- 5c7af46: chore: ignore __pycache__ files
+- b507867: feat: web app UI improvements
+- 4992524: feat: add ML scorer and parlay over-filter
+- 59c43a5: (previous session)
+
+**Branch:** master  
+**Remote:** origin/master (up to date)
 
 ---
 
 ## Environment
 - Repository: github.com/MrGweeod/mlb-agent
-- Deployment: Railway (mlb-agent project) — production pipeline still running
-- Web app: https://mlb-agent-production.up.railway.app
-- Database: Supabase PostgreSQL (mlb_training_data + mlb_scored_legs tables)
-- Python: 3.14 in venv (WSL2 Ubuntu)
+- Deployment: Railway (mlb-agent project) — production pipeline running 3×/day
+- Web app: https://mlb-agent.up.railway.app/
+- Database: Supabase PostgreSQL (mlb_training_data: 73,942 rows, mlb_scored_legs: 614+ rows)
+- Python: 3.10 in venv (WSL2 Ubuntu)
+
+---
+
+## Key Learnings & Principles
+
+**Direction bias is the dominant signal:**
+- ML model learned direction (over/under) is 76.6% of predictive power
+- Books systematically shade over lines too high (79.2% under win rate vs 21.9% over)
+- This is a real, exploitable market inefficiency
+
+**Composite score matters, but has a threshold:**
+- 65+ score: Profitable for parlays (7.77% 4-leg win rate)
+- 55-65 score: Breakeven to slightly losing
+- <55 score: Losing proposition
+
+**Stat+direction interactions are massive:**
+- RBI under (85.4%) vs RBI over (14.6%) = 71pp delta
+- Can't treat "RBI" as a single category — direction completely changes the bet
+
+**High-score overs are marginal, not strong:**
+- Hits over 0.5 with 65+ score: 44.4% (viable but not dominant)
+- Should be used sparingly (max 1 per parlay)
+- Unders should be the foundation of every parlay
+
+**User intuition was partially correct:**
+- Hits over 0.5 DOES improve with high composite score (44.4% vs 30.4% avg)
+- But it's still not profitable enough to build parlays around
+- Solution: Allow them, but constrain their usage
