@@ -1,122 +1,97 @@
+# MLB Parlay Agent — Architecture Decisions
+
+**Last Updated:** April 24, 2026
+
 ---
 
-## ML-Powered Leg Scoring (Pivot Decision)
-**Date:** April 23, 2026
+## Smart Parlay Filter (April 24, 2026)
+
+**Decision:** Block poison overs entirely, allow only high-confidence risky overs with max 1 per parlay.
+
+**Context:**
+- Training data analysis revealed massive direction bias (79.2% under vs 21.9% over)
+- Some stat+direction combos are poison (RBI over 14.6%, walks over 19.4%, HR over 6.1%)
+- High-score hits over 0.5 shows 44.4% hit rate (marginal but viable)
+- User wanted to continue tracking hits overs but not overuse them
+
+**Filter rules:**
+
+**Poison overs (BLOCKED):**
+- RBI overs: 14.6% hit rate
+- Walks overs: 19.4% hit rate
+- Home runs overs: 6.1% hit rate
+
+**Risky overs (max 1 per parlay):**
+- Hits over 0.5 with 65+ composite score: 44.4% hit rate
+- Pitcher strikeouts over 4.5+ with 65+ composite score: 44.6% hit rate
+
+**All other overs:** BLOCKED (low-score hits overs, ambitious lines, etc.)
+
+**Implementation:**
+- `filter_and_tag_legs()` runs after scoring, before pool selection
+- Branch-and-Bound tracks risky_overs counter (max 1)
+- Filter logs breakdown: "blocked N poison overs, M other overs | kept X unders + Y risky overs"
+
+**Rationale:**
+- Prevents catastrophic parlay compositions (all overs = 3.88% 4-leg win rate)
+- Allows data collection on viable overs (hits 0.5, pitcher Ks)
+- Protects parlay probability from tanking below breakeven
+- User retains some flexibility without shooting themselves in the foot
+
+**Expected impact:** Win rate improvement from 47.7% to 52-58%
+
+---
+
+## ML-Powered Leg Scoring (April 24, 2026)
 
 **Decision:** Build a machine learning model to predict P(hit) for each prop leg instead of using hand-coded composite scoring weights.
 
 **Context:**
 - Current system uses fixed weights: coverage 70%, opponent 20%, stability 10%
 - These are "principled priors" that need calibration with real data
-- We have access to unlimited historical data via SGO API + MLB-StatsAPI
-- 614 production legs show coverage is systematically overconfident (12-23pp errors)
+- 49,222 training samples available with features + outcomes
+- Coverage formula is systematically overconfident (12-23pp errors)
 
 **New Architecture:**
 
-### Phase 1: Training Data Collection (COMPLETE)
-- Built `scripts/backfill_training_data.py` to fetch historical props + outcomes
-- Collected 66,174 resolved training samples (March 28 - April 22, 2026)
-- Database: `mlb_training_data` table with props, outcomes, and feature slots
+### Model Trained (COMPLETE)
+- **Algorithm:** GradientBoostingClassifier + IsotonicCalibration
+- **Training data:** 49,222 samples (March 28 - April 22, 2026)
+- **Features:** coverage_pct, composite_score, opponent_adjustment, trend_score, pa_last_10, line, direction, stat (one-hot)
+- **Performance:** ROC AUC 0.8648, Accuracy 80%
+- **Top features:** direction (76.6%), composite_score (6.9%), opponent_adjustment (4.9%)
 
-### Phase 2: Feature Engineering (NEXT)
-- Calculate features for all 66K samples:
-  - Player performance: coverage_pct, coverage_vs_hand, games_vs_hand, avg_last_10
-  - Matchup: pitcher_era_rank, pitcher_k9_rank, pitcher_whip_rank, pitcher_hand
-  - Context: home_away, batting_order_position, pa_last_10
-  - Market: fair_line (SGO sharp consensus)
-- Store in training_data table feature columns
+**Key insight:** Model correctly learned that direction (over/under) is the DOMINANT signal — even more important than coverage.
 
-### Phase 3: Model Training (FUTURE)
-- Train sklearn GradientBoostingClassifier:
-```python
-  X = [coverage_vs_hand, pitcher_era_rank, trend_score, ...]  # ~15 features
-  y = [1 if result=='hit' else 0]  # binary target
-  model.fit(X, y)
-  p_hit = model.predict_proba(X_new)[:, 1]
-```
-- Use p_hit as leg score (replaces hand-coded composite_score)
-- Keep Branch-and-Bound parlay builder (architecture-agnostic)
+### Deployment Strategy (PENDING)
+
+**Phase 1 (Current):** Filter deployed, ML model trained but not in production
+**Phase 2 (After 3-5 days):** A/B test ML vs heuristic scoring
+**Phase 3 (If ML wins):** Replace heuristic scoring in production
 
 **Rationale:**
-- ML learns optimal feature weights from data (no more guessing 70% vs 20%)
-- Automatically discovers interactions ("high coverage + tough pitcher = lower than formula")
+- Smart filter is the higher-impact change (blocks poison bets)
+- Need to validate filter works before changing scoring system
+- ML model learns optimal feature weights from data (no more guessing 70% vs 20%)
+- Automatically discovers interactions ("high coverage + over direction = lower than formula")
 - Can add new features (weather, ballpark, line movement) without manual weight tuning
-- 66K samples is plenty for gradient boosting (needs 2K+, we have 30×)
 
 **What stays the same:**
 - Production pipeline still runs 3×/day (9AM/12PM/5:30PM)
 - Branch-and-Bound parlay builder unchanged
 - Discord delivery, web app unchanged
-- Database, Railway deployment unchanged
 
-**What changes:**
-- `leg_scorer.py` eventually replaced with `ml_scorer.py`
-- Daily pipeline adds training data collection step
-- New table: `mlb_training_data` (separate from production `mlb_scored_legs`)
-
----
-
-## Training Data Collection Architecture
-**Date:** April 23, 2026
-
-**Decision:** Build separate training data table and backfill script instead of trying to retrofit production scored_legs table.
-
-**Database schema:**
-```sql
-mlb_training_data:
-  - Raw prop data: player_id, stat, line, odds, fair_line, odd_id
-  - Features: coverage_pct, pitcher_era_rank, trend_score, etc. (NULL initially)
-  - Outcome: actual_stat, result ('hit'/'miss'), resolved_at
-  - Allows WHERE result IS NOT NULL for clean training set
-```
-
-**Backfill strategy:**
-- SGO API confirmed to have historical access (tested April 15, worked)
-- Full backfill: March 28 - April 22 (26 days, Opening Day through yesterday)
-- Result: 73,942 props logged, 66,174 resolved (89.5% resolution rate)
-
-**Key implementation details:**
-1. **odd_id collision fix** — SGO reuses IDs across dates, so we prefix with `game_date|` to make each day independent
-2. **Historical prop extraction** — `_get_historical_player_props()` ignores `available: false` flag (closed lines still have valid data)
-3. **Efficient resolution** — One box score fetch per game covers all props in that game (not one API call per prop)
-4. **DNP handling** — Players not in box score → result=NULL (excluded from training, not marked as 'void')
-
-**Prospective collection (Phase 2):**
-- Add to daily 9AM run: log today's props → resolve tomorrow morning
-- Adds ~300 samples/day going forward
-- Same table, same schema, idempotent inserts
+**What changes (when enabled):**
+- `leg_scorer.py` replaced with `ml_scorer.py` for scoring
+- Legs sorted by `ml_hit_probability` instead of `composite_score`
+- Parlay builder uses ML probabilities for pool selection
 
 ---
 
-## EV Signal Dropped from Scoring
-**Date:** April 23, 2026
+## Training Data Analysis Findings (April 24, 2026)
 
-**Decision:** Set EV weight to 0% in composite scoring.
+**Decision:** Use training data insights to inform filter design and validate ML model approach.
 
-**Rationale:**
-- EV measures single-bet profitability: `(fair_prob × profit) - (1-fair_prob × loss)`
-- We're building PARLAYS where combined probability is exponential: `0.70^5 = 0.168`
-- In parlays, coverage quality >> individual leg EV
-- Example: 4 legs at 70% coverage + 0% EV crushes 4 legs at 55% coverage + 15% EV
+**Key findings from 66,174 resolved samples:**
 
-**What EV was supposed to do:**
-- Compare SGO fair line vs DK book line
-- Positive line_diff = easier to beat = positive EV
-- Used a 0.25 probability shift heuristic per line unit
-
-**Why it didn't work:**
-- The 0.25 multiplier was a guess (could be 0.15 or 0.35 for MLB)
-- Historical data showed inversion: strong -EV legs won at 55.3% (best bucket)
-- Root cause unclear — could be bad multiplier, bad formula, or EV genuinely doesn't matter for parlays
-
-**Better use of fair lines:**
-- Use as coverage calibration: "My model says 72%, market says 45% → I'm probably wrong"
-- Implement divergence penalty instead of EV calculation
-- Or just use for filtering: "Don't bet legs where my coverage disagrees with market by >20pp"
-
-**Current weights (post-EV drop):**
-- Coverage: 70%
-- Opponent adjustment: 20%
-- PA stability: 10%
-- Trend: 0%
-- EV: 0%
+### 1. Composite Score Profitability Thresholds
