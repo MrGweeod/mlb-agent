@@ -34,12 +34,12 @@ from src.engine.parlay_builder import build_hybrid_parlays, _tier_params
 from src.pipelines.enrich_legs import enrich_legs
 from src.pipelines.trend_analysis import get_trend_signal
 from src.tracker.recommendation_logger import log_recommendations
-from src.utils.db import log_scored_legs
+from src.utils.db import log_scored_legs, log_training_data_legs
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 # Minimum raw coverage rate (%) to enter the candidate pool.
-# The parlay builder applies stricter thresholds (70% anchors, 55% swings).
+# The parlay builder applies a stricter internal threshold (60% minimum).
 MIN_COVERAGE_PCT = 55.0
 
 # Transaction typeCodes that affect player availability.
@@ -488,6 +488,11 @@ def run_pipeline() -> tuple[list[dict], str]:
     n_logged = log_scored_legs(qualifying_legs, today, parlay_odd_ids)
     if n_logged:
         print(f"  Logged {n_logged} scored leg(s) ({len(parlay_odd_ids)} in parlay)")
+
+    # Prospective training data collection (all scored legs, outcome=NULL until resolver runs)
+    n_training = log_training_data_legs(qualifying_legs, today)
+    if n_training:
+        print(f"  Logged {n_training} prop(s) to training data (prospective collection)")
 
     if not parlays:
         print("  No valid parlays found. Exiting.")

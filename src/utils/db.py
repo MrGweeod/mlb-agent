@@ -781,6 +781,71 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
     return inserted
 
 
+def log_training_data_legs(legs: list[dict], run_date: str) -> int:
+    """
+    Bulk-insert all scored legs from a live pipeline run into mlb_training_data.
+
+    Uses the same {date}|{odd_id} prefix format as the backfill script so
+    prospective and backfill rows coexist under the UNIQUE (odd_id) constraint.
+
+    Called after build_hybrid_parlays() so composite_score is populated for
+    legs that made the 60%+ pool; it remains NULL for the 55-60% bucket.
+    ON CONFLICT (odd_id) DO NOTHING — safe to re-run the same pipeline day.
+
+    Returns the number of newly inserted rows.
+    """
+    if not legs:
+        return 0
+    ts = now_utc()
+    rows = []
+    for leg in legs:
+        raw_odd_id = leg.get("odd_id")
+        line = leg.get("best_line")
+        if not raw_odd_id or line is None:
+            continue
+        odd_id = f"{run_date}|{raw_odd_id}"
+        rows.append((
+            str(leg.get("player_id") or ""),
+            leg.get("player_name", ""),
+            leg.get("stat", ""),
+            leg.get("direction", "over"),
+            float(line),
+            str(leg.get("best_odds", "")),
+            odd_id,
+            run_date,
+            leg.get("game_pk"),
+            leg.get("coverage_pct"),
+            leg.get("composite_score"),
+            leg.get("opponent_adjustment"),
+            leg.get("trend_score"),
+            ts,
+        ))
+
+    if not rows:
+        return 0
+
+    conn = get_conn()
+    cur = conn.cursor()
+    psycopg2.extras.execute_values(
+        cur,
+        """
+        INSERT INTO mlb_training_data
+            (player_id, player_name, stat, direction, line, odds,
+             odd_id, game_date, game_pk,
+             coverage_pct, composite_score, opponent_adjustment, trend_score,
+             logged_at)
+        VALUES %s
+        ON CONFLICT (odd_id) DO NOTHING
+        """,
+        rows,
+    )
+    conn.commit()
+    inserted = cur.rowcount
+    cur.close()
+    conn.close()
+    return inserted
+
+
 def get_pitcher_profile(pitcher_id: str, max_age_hours: int = 24) -> dict | None:
     """Return cached pitcher profile, or None if missing/expired (TTL 24hr)."""
     conn = get_conn()

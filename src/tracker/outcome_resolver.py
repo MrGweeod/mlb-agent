@@ -664,15 +664,176 @@ def resolve_scored_legs(verbose: bool = True) -> None:
         print(f"\n  Resolved {resolved} scored leg(s).")
 
 
+# ── Training data resolver ────────────────────────────────────────────────────
+
+def resolve_training_data(game_date: str, verbose: bool = True) -> dict:
+    """
+    Resolve all unresolved mlb_training_data rows for *game_date* using box scores.
+
+    Mirrors resolve_all_legs() but targets mlb_training_data with its own
+    schema (game_date, actual_stat, result as 'hit'/'miss'/'void').
+
+    Player lookup: tries MLB player_id (int) first — populated for prospective
+    rows logged by the live pipeline. Falls back to name lookup for backfill
+    rows that carry an SGO player_id or no valid MLB id.
+
+    Args:
+        game_date: 'YYYY-MM-DD' matching mlb_training_data.game_date.
+        verbose:   Print progress to stdout.
+
+    Returns:
+        {'hit': int, 'miss': int, 'void': int, 'total': int}
+    """
+    conn = get_conn()
+    cur  = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, player_id, player_name, stat, direction, line, odd_id, game_pk
+        FROM mlb_training_data
+        WHERE game_date = %s AND result IS NULL AND game_pk IS NOT NULL
+        ORDER BY game_pk, id
+        """,
+        (game_date,),
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+
+    if not rows:
+        if verbose:
+            print(f"[TRAINING RESOLVER] No unresolved rows for {game_date}.")
+        return {"hit": 0, "miss": 0, "void": 0, "total": 0}
+
+    if verbose:
+        print(f"[TRAINING RESOLVER] {len(rows)} unresolved props for {game_date}...")
+
+    # Group by game_pk — one box score per game covers all players
+    by_game: dict[int, list] = {}
+    for row in rows:
+        gp = row.get("game_pk")
+        if gp:
+            by_game.setdefault(int(gp), []).append(row)
+
+    counts  = {"hit": 0, "miss": 0, "void": 0}
+    updates: list[tuple] = []  # (result, actual_stat, resolved_at, row_id)
+
+    for game_pk, game_rows in sorted(by_game.items()):
+        if verbose:
+            print(f"  game_pk={game_pk} ({len(game_rows)} props)...")
+        try:
+            box = statsapi.boxscore_data(game_pk)
+        except Exception as exc:
+            print(f"  boxscore fetch failed for {game_pk}: {exc} — skipping")
+            counts["void"] += len(game_rows)
+            for row in game_rows:
+                updates.append(("void", None, now_utc(), row["id"]))
+            continue
+
+        # Build both id-keyed and name-keyed indexes
+        id_index:   dict[int, dict]  = {}
+        name_index: dict[str, tuple] = {}
+        for side in ("away", "home"):
+            for _, player in box.get(side, {}).get("players", {}).items():
+                person = player.get("person", {})
+                pid    = person.get("id")
+                name   = person.get("fullName", "")
+                pos    = player.get("position", {}).get("abbreviation", "")
+                stats  = player.get("stats", {})
+                if pid:
+                    id_index[int(pid)] = stats
+                if name:
+                    name_index[name.lower()] = (stats, pos)
+
+        for row in game_rows:
+            stat      = row.get("stat", "")
+            line      = float(row.get("line") or 0)
+            direction = row.get("direction", "over")
+            odd_id    = row.get("odd_id", "")
+            name      = row.get("player_name", "")
+
+            # Determine position for strikeout routing
+            position = ""
+            p_stats  = None
+
+            # Try MLB player_id first (prospective rows)
+            try:
+                mlb_id = int(row.get("player_id") or 0)
+                if mlb_id:
+                    p_stats = id_index.get(mlb_id)
+            except (ValueError, TypeError):
+                pass
+
+            # Fall back to name lookup (backfill rows)
+            if p_stats is None and name:
+                entry = name_index.get(name.lower())
+                if entry:
+                    p_stats, position = entry
+
+            if p_stats is None:
+                counts["void"] += 1
+                updates.append(("void", None, now_utc(), row["id"]))
+                if verbose:
+                    print(f"    {name} {stat}: not in boxscore → void (DNP/scratched)")
+                continue
+
+            # Route strikeouts: if odd_id contains 'pitching', treat as pitcher K
+            if stat == "strikeouts" and "pitching" in odd_id.lower():
+                position = "SP"
+
+            actual = extract_stat_from_boxscore(p_stats, stat, position)
+            if actual is None:
+                counts["void"] += 1
+                updates.append(("void", None, now_utc(), row["id"]))
+                if verbose:
+                    print(f"    {name} {stat}: extraction failed → void")
+                continue
+
+            is_hit = (actual > line) if direction == "over" else (actual < line)
+            result = "hit" if is_hit else "miss"
+            counts[result] += 1
+            updates.append((result, actual, now_utc(), row["id"]))
+
+            if verbose:
+                dl = "o" if direction == "over" else "u"
+                print(f"    {name} {stat} {dl}{line}: got {actual:.1f} → {result}")
+
+    # Flush all updates in one pass
+    if updates:
+        conn = get_conn()
+        cur  = conn.cursor()
+        for result, actual, resolved_at, row_id in updates:
+            cur.execute(
+                """
+                UPDATE mlb_training_data
+                SET result = %s, actual_stat = %s, resolved_at = %s
+                WHERE id = %s
+                """,
+                (result, actual, resolved_at, row_id),
+            )
+        conn.commit()
+        cur.close()
+        conn.close()
+
+    total = sum(counts.values())
+    if verbose:
+        print(
+            f"\n[TRAINING RESOLVER] Complete: "
+            f"{counts['hit']} hit, {counts['miss']} miss, {counts['void']} void "
+            f"({total} total)"
+        )
+    return {**counts, "total": total}
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     # Usage:
-    #   python -m src.tracker.outcome_resolver 2026-04-21   # box-score resolver for one date
+    #   python -m src.tracker.outcome_resolver 2026-04-21   # resolve scored + training data for one date
     #   python -m src.tracker.outcome_resolver               # run all resolvers (no date filter)
     if len(sys.argv) > 1:
         run_date = sys.argv[1]
         resolve_all_legs(run_date)
+        resolve_training_data(run_date)
     else:
         resolve_recommendations()
         resolve_placed_bets()
