@@ -1388,7 +1388,7 @@ def get_training_analytics_data() -> dict:
             )                                                        AS hit_rate,
             COUNT(*) FILTER (WHERE coverage_pct IS NOT NULL AND coverage_pct >= 60) AS high_coverage
         FROM mlb_training_data
-        WHERE game_date >= (CURRENT_DATE - INTERVAL '14 days')::text
+        WHERE game_date >= CURRENT_DATE - INTERVAL '14 days'
         GROUP BY game_date
         ORDER BY game_date DESC
     """)
@@ -1409,7 +1409,7 @@ def get_training_analytics_data() -> dict:
             )                                                        AS hit_rate
         FROM mlb_training_data
         WHERE result IN ('hit', 'miss')
-          AND game_date >= (CURRENT_DATE - INTERVAL '30 days')::text
+          AND game_date >= CURRENT_DATE - INTERVAL '30 days'
         GROUP BY stat, direction
         HAVING COUNT(*) >= 20
         ORDER BY stat, direction
@@ -1434,8 +1434,8 @@ def get_training_analytics_data() -> dict:
             )                                                        AS actual_hit_rate,
             ROUND(AVG(coverage_pct)::numeric, 1)                     AS avg_predicted,
             ROUND(
-                AVG(coverage_pct) -
-                100.0 * COUNT(*) FILTER (WHERE result = 'hit') / COUNT(*),
+                (AVG(coverage_pct) -
+                100.0 * COUNT(*) FILTER (WHERE result = 'hit') / COUNT(*))::numeric,
                 1
             )                                                        AS error_pp
         FROM mlb_training_data
@@ -1456,7 +1456,7 @@ def get_training_analytics_data() -> dict:
             ROUND(100.0 * COUNT(*) FILTER (WHERE opponent_adjustment IS NOT NULL) / COUNT(*), 1) AS opponent_pct,
             ROUND(100.0 * COUNT(*) FILTER (WHERE trend_score IS NOT NULL)        / COUNT(*), 1) AS trend_pct
         FROM mlb_training_data
-        WHERE game_date >= (CURRENT_DATE - INTERVAL '7 days')::text
+        WHERE game_date >= CURRENT_DATE - INTERVAL '7 days'
         GROUP BY game_date
         ORDER BY game_date DESC
     """)
