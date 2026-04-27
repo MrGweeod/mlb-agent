@@ -1,7 +1,7 @@
 """
 parlay_builder.py — Single scored-pool parlay builder for MLB.
 
-All eligible legs (coverage >= 55%) are scored once by composite_score,
+All eligible legs (coverage >= 60%) are scored once by composite_score,
 then the top POOL_SIZE are searched for combinations of MIN_LEGS–MAX_LEGS
 whose combined parlay odds land in +600 to +1500.
 
@@ -130,7 +130,7 @@ def build_hybrid_parlays(
     MIN_LEGS        = params["min_legs"]
     MAX_LEGS        = params["max_legs"]
     TIER            = params["tier"]
-    MIN_COV         = 55.0
+    MIN_COV         = 60.0
     MIN_PARLAY_ODDS = 600
     MAX_PARLAY_ODDS = 1500
     MAX_LEGS_PER_GAME = 3

@@ -261,7 +261,8 @@ def calculate_coverage(
         return None
 
     # 1. Pitcher handedness — from mlb_stats in-memory cache (7-day TTL)
-    pitcher_hand = get_pitcher_hand(opposing_pitcher_id)
+    # opposing_pitcher_id is None for pitcher props (they have no opposing pitcher)
+    pitcher_hand = get_pitcher_hand(opposing_pitcher_id) if opposing_pitcher_id is not None else None
 
     # 2. Batter handedness — from DB position cache; None if not populated yet
     try:
