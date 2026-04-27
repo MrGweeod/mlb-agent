@@ -28,7 +28,7 @@ from datetime import date, datetime
 
 from aiohttp import web
 
-from src.utils.db import get_scored_legs, get_training_dashboard_data
+from src.utils.db import get_scored_legs, get_training_dashboard_data, get_training_analytics_data
 from src.engine.claude_agent import analyze_parlays
 
 _PASSWORD = os.getenv("WEB_APP_PASSWORD", "")
@@ -110,6 +110,28 @@ async def handle_dashboard(request: web.Request) -> web.Response:
         )
     try:
         data = get_training_dashboard_data()
+        return web.Response(
+            text=json.dumps(data, default=str),
+            content_type="application/json",
+        )
+    except Exception as exc:
+        return web.Response(
+            text=json.dumps({"error": str(exc)}),
+            content_type="application/json",
+            status=500,
+        )
+
+
+async def handle_training_analytics(request: web.Request) -> web.Response:
+    """Return training data analytics for the Training Data tab."""
+    if not _check_auth(request):
+        return web.Response(
+            text=json.dumps({"error": "Unauthorized"}),
+            content_type="application/json",
+            status=401,
+        )
+    try:
+        data = get_training_analytics_data()
         return web.Response(
             text=json.dumps(data, default=str),
             content_type="application/json",
@@ -209,6 +231,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/legs", handle_legs)
     app.router.add_get("/api/health", handle_health)
     app.router.add_get("/api/dashboard", handle_dashboard)
+    app.router.add_get("/api/training-analytics", handle_training_analytics)
     app.router.add_post("/api/analyze", handle_analyze)
     return app
 

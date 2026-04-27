@@ -513,7 +513,7 @@
     cursor: pointer;
   }
 
-  /* ── Dashboard tab toggle ── */
+  /* ── Tab bar ── */
   #tab-bar {
     display: flex;
     gap: 0;
@@ -527,12 +527,43 @@
     border: none;
     border-bottom: 2px solid transparent;
     color: var(--muted);
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 600;
     cursor: pointer;
     transition: color 0.15s, border-color 0.15s;
   }
   .tab-btn.active { color: var(--text); border-bottom-color: var(--accent); }
+
+  /* ── Training Data page ── */
+  #training {
+    display: none;
+    padding: 12px 12px 60px;
+    max-width: 900px;
+    margin: 0 auto;
+  }
+  .train-health-dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    margin-right: 5px;
+    vertical-align: middle;
+  }
+  .dot-green  { background: var(--green); }
+  .dot-yellow { background: var(--yellow); }
+  .dot-red    { background: var(--red); }
+  .dir-cell-high   { color: var(--green); font-weight: 700; }
+  .dir-cell-mid    { color: var(--yellow); font-weight: 700; }
+  .dir-cell-low    { color: var(--red); font-weight: 700; }
+  .cal-err-pos  { color: var(--red); font-weight: 700; }
+  .cal-err-neg  { color: var(--green); font-weight: 700; }
+  .feat-bar {
+    display: inline-block;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--accent);
+    vertical-align: middle;
+    margin-right: 4px;
+  }
 
   /* ── Dashboard page ── */
   #dashboard {
@@ -716,6 +747,7 @@
   <div id="tab-bar">
     <button class="tab-btn active" id="tab-legs">Legs</button>
     <button class="tab-btn" id="tab-dashboard">Dashboard</button>
+    <button class="tab-btn" id="tab-training">Training</button>
   </div>
 
   <div class="filters" id="position-filters">
@@ -847,6 +879,49 @@
         <span class="dash-section-sub">Last 50 resolved props</span>
       </div>
       <div id="dash-ev"><div class="dash-empty">Loading…</div></div>
+    </div>
+  </div>
+</div>
+
+  <!-- ── Training Data view ── -->
+  <div id="training">
+    <!-- Summary cards -->
+    <div class="dash-summary" id="train-summary"></div>
+
+    <!-- Section 1: Daily Collection Health -->
+    <div class="dash-section">
+      <div class="dash-section-header">
+        Daily Collection Health
+        <span class="dash-section-sub">Last 14 days — props logged per day</span>
+      </div>
+      <div id="train-daily"><div class="dash-empty">Loading…</div></div>
+    </div>
+
+    <!-- Section 2: Direction Bias -->
+    <div class="dash-section">
+      <div class="dash-section-header">
+        Direction Bias
+        <span class="dash-section-sub">Hit rate by stat + direction · last 30 days · ≥20 samples</span>
+      </div>
+      <div id="train-direction"><div class="dash-empty">Loading…</div></div>
+    </div>
+
+    <!-- Section 3: Coverage Calibration -->
+    <div class="dash-section">
+      <div class="dash-section-header">
+        Coverage Calibration
+        <span class="dash-section-sub">Predicted coverage vs actual hit rate by bucket</span>
+      </div>
+      <div id="train-calibration"><div class="dash-empty">Loading…</div></div>
+    </div>
+
+    <!-- Section 4: Feature Health -->
+    <div class="dash-section">
+      <div class="dash-section-header">
+        Feature Health
+        <span class="dash-section-sub">ML feature completeness % · last 7 days</span>
+      </div>
+      <div id="train-features"><div class="dash-empty">Loading…</div></div>
     </div>
   </div>
 </div>
@@ -1484,34 +1559,42 @@ function showError(msg) {
 setInterval(() => { if (password) fetchLegs(); }, 60 * 1000);
 
 // ── Tab switching ─────────────────────────────────────────────────────────────
-const legsView = () => {
-  document.getElementById('position-filters').style.display = '';
-  document.getElementById('stat-filters').style.display = '';
-  document.getElementById('sort-bar') && (document.querySelector('.sort-bar').style.display = '');
-  document.getElementById('summary-bar').style.display = '';
-  document.querySelector('.main-layout').style.display = '';
-  document.getElementById('dashboard').style.display = 'none';
-};
-const dashView = () => {
+function hideAll() {
   document.getElementById('position-filters').style.display = 'none';
   document.getElementById('stat-filters').style.display = 'none';
   document.querySelector('.sort-bar').style.display = 'none';
   document.getElementById('summary-bar').style.display = 'none';
   document.querySelector('.main-layout').style.display = 'none';
+  document.getElementById('dashboard').style.display = 'none';
+  document.getElementById('training').style.display = 'none';
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+}
+
+const legsView = () => {
+  hideAll();
+  document.getElementById('position-filters').style.display = '';
+  document.getElementById('stat-filters').style.display = '';
+  document.querySelector('.sort-bar').style.display = '';
+  document.getElementById('summary-bar').style.display = '';
+  document.querySelector('.main-layout').style.display = '';
+  document.getElementById('tab-legs').classList.add('active');
+};
+const dashView = () => {
+  hideAll();
   document.getElementById('dashboard').style.display = 'block';
+  document.getElementById('tab-dashboard').classList.add('active');
   if (password) fetchDashboard();
 };
+const trainingView = () => {
+  hideAll();
+  document.getElementById('training').style.display = 'block';
+  document.getElementById('tab-training').classList.add('active');
+  if (password) fetchTrainingAnalytics();
+};
 
-document.getElementById('tab-legs').addEventListener('click', () => {
-  document.getElementById('tab-legs').classList.add('active');
-  document.getElementById('tab-dashboard').classList.remove('active');
-  legsView();
-});
-document.getElementById('tab-dashboard').addEventListener('click', () => {
-  document.getElementById('tab-dashboard').classList.add('active');
-  document.getElementById('tab-legs').classList.remove('active');
-  dashView();
-});
+document.getElementById('tab-legs').addEventListener('click', legsView);
+document.getElementById('tab-dashboard').addEventListener('click', dashView);
+document.getElementById('tab-training').addEventListener('click', trainingView);
 
 // ── Dashboard data fetching ───────────────────────────────────────────────────
 let dashData = null;
@@ -1773,6 +1856,206 @@ function renderRecentLegs(rows) {
         <td class="num">${r.actual_stat != null ? r.actual_stat : '—'}</td>
       </tr>`;
     }).join('')}</tbody>
+  </table></div>`;
+}
+
+// ── Training Analytics ────────────────────────────────────────────────────────
+let trainData = null;
+
+async function fetchTrainingAnalytics() {
+  if (!password) return;
+  try {
+    const res = await fetch(`/api/training-analytics?password=${encodeURIComponent(password)}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    trainData = await res.json();
+    renderTrainingAnalytics(trainData);
+  } catch (err) {
+    document.getElementById('train-daily').innerHTML =
+      `<div class="dash-empty" style="color:var(--red)">${esc(err.message)}</div>`;
+  }
+}
+
+// Auto-refresh training tab every 60 seconds when visible
+setInterval(() => {
+  if (password && document.getElementById('training').style.display !== 'none') {
+    fetchTrainingAnalytics();
+  }
+}, 60 * 1000);
+
+function renderTrainingAnalytics(d) {
+  renderTrainSummary(d.summary);
+  renderTrainDaily(d.daily_health);
+  renderTrainDirection(d.direction_bias);
+  renderTrainCalibration(d.calibration);
+  renderTrainFeatures(d.feature_health);
+}
+
+function renderTrainSummary(s) {
+  if (!s) return;
+  const hr = s.overall_hit_rate;
+  const hrCls = hr >= 50 ? 'green' : hr >= 40 ? 'yellow' : 'red';
+  const unresClass = s.unresolved_count > 500 ? 'red' : s.unresolved_count > 0 ? 'yellow' : 'green';
+  const lastUpdated = s.last_updated ? s.last_updated.slice(0, 16).replace('T', ' ') + ' UTC' : '—';
+  document.getElementById('train-summary').innerHTML = `
+    <div class="dash-stat">
+      <div class="dash-stat-label">Total Props</div>
+      <div class="dash-stat-value">${fmtNum(s.total_props)}</div>
+    </div>
+    <div class="dash-stat">
+      <div class="dash-stat-label">Days Covered</div>
+      <div class="dash-stat-value">${fmtNum(s.days_covered)}</div>
+    </div>
+    <div class="dash-stat">
+      <div class="dash-stat-label">Hit Rate (all)</div>
+      <div class="dash-stat-value ${hrCls}">${hr != null ? parseFloat(hr).toFixed(1) + '%' : '—'}</div>
+    </div>
+    <div class="dash-stat">
+      <div class="dash-stat-label">Unresolved</div>
+      <div class="dash-stat-value ${unresClass}">${fmtNum(s.unresolved_count)}</div>
+    </div>
+  `;
+}
+
+function renderTrainDaily(rows) {
+  const el = document.getElementById('train-daily');
+  if (!rows || !rows.length) { el.innerHTML = '<div class="dash-empty">No daily data.</div>'; return; }
+  el.innerHTML = `<div style="overflow-x:auto"><table class="dash-table">
+    <thead><tr>
+      <th>Date</th>
+      <th class="num">Total</th>
+      <th class="num">Resolved</th>
+      <th class="num">Pending</th>
+      <th class="num">Hit Rate</th>
+      <th class="num">Cov≥60</th>
+    </tr></thead>
+    <tbody>${rows.map(r => {
+      const resolved = (r.hits || 0) + (r.misses || 0);
+      const pending = r.pending || 0;
+      const total = r.total || 0;
+      let dot;
+      if (pending === 0 && resolved > 0)       dot = '<span class="train-health-dot dot-green"></span>';
+      else if (pending > 0 && resolved > 0)     dot = '<span class="train-health-dot dot-yellow"></span>';
+      else if (total < 50 && total > 0)         dot = '<span class="train-health-dot dot-red"></span>';
+      else                                       dot = '<span class="train-health-dot dot-yellow"></span>';
+      return `<tr>
+        <td>${dot}${esc(r.game_date)}</td>
+        <td class="num">${fmtNum(total)}</td>
+        <td class="num" style="color:var(--muted)">${fmtNum(resolved)}</td>
+        <td class="num" style="color:${pending > 0 ? 'var(--yellow)' : 'var(--muted)'}">${fmtNum(pending)}</td>
+        <td class="num" ${hitRateColor(r.hit_rate)}>${r.hit_rate != null ? parseFloat(r.hit_rate).toFixed(1) + '%' : '—'}</td>
+        <td class="num">${fmtNum(r.high_coverage)}</td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table></div>`;
+}
+
+function renderTrainDirection(rows) {
+  const el = document.getElementById('train-direction');
+  if (!rows || !rows.length) { el.innerHTML = '<div class="dash-empty">No direction data (need ≥20 samples per stat+direction).</div>'; return; }
+
+  // Group by stat, show over/under side by side with delta
+  const byStatDir = {};
+  for (const r of rows) {
+    if (!byStatDir[r.stat]) byStatDir[r.stat] = {};
+    byStatDir[r.stat][r.direction] = r;
+  }
+  const stats = Object.keys(byStatDir).sort();
+
+  const dirClass = val => {
+    const v = parseFloat(val);
+    if (isNaN(v)) return '';
+    if (v >= 55) return 'dir-cell-high';
+    if (v >= 40) return 'dir-cell-mid';
+    return 'dir-cell-low';
+  };
+
+  el.innerHTML = `<div style="overflow-x:auto"><table class="dash-table">
+    <thead><tr>
+      <th>Stat</th>
+      <th class="num">Over %</th>
+      <th class="num">Over n</th>
+      <th class="num">Under %</th>
+      <th class="num">Under n</th>
+      <th class="num">Delta (U−O)</th>
+    </tr></thead>
+    <tbody>${stats.map(stat => {
+      const ov = byStatDir[stat]['over'];
+      const un = byStatDir[stat]['under'];
+      const ovRate = ov ? parseFloat(ov.hit_rate) : null;
+      const unRate = un ? parseFloat(un.hit_rate) : null;
+      const delta = ovRate !== null && unRate !== null ? (unRate - ovRate).toFixed(1) : null;
+      const deltaCls = delta !== null ? (parseFloat(delta) > 5 ? 'dir-cell-high' : parseFloat(delta) < -5 ? 'dir-cell-low' : '') : '';
+      return `<tr>
+        <td><strong>${esc(stat)}</strong></td>
+        <td class="num ${dirClass(ovRate)}">${ovRate !== null ? ovRate.toFixed(1) + '%' : '—'}</td>
+        <td class="num" style="color:var(--muted)">${ov ? fmtNum(ov.total) : '—'}</td>
+        <td class="num ${dirClass(unRate)}">${unRate !== null ? unRate.toFixed(1) + '%' : '—'}</td>
+        <td class="num" style="color:var(--muted)">${un ? fmtNum(un.total) : '—'}</td>
+        <td class="num ${deltaCls}">${delta !== null ? (parseFloat(delta) > 0 ? '+' : '') + delta + 'pp' : '—'}</td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table></div>`;
+}
+
+function renderTrainCalibration(rows) {
+  const el = document.getElementById('train-calibration');
+  if (!rows || !rows.length) { el.innerHTML = '<div class="dash-empty">No calibration data.</div>'; return; }
+
+  const bucketOrder = ['<55%', '55-60%', '60-65%', '65-70%', '70%+'];
+  rows = [...rows].sort((a, b) => bucketOrder.indexOf(a.bucket) - bucketOrder.indexOf(b.bucket));
+
+  el.innerHTML = `<div style="overflow-x:auto"><table class="dash-table">
+    <thead><tr>
+      <th>Coverage Bucket</th>
+      <th class="num">Count</th>
+      <th class="num">Hits</th>
+      <th class="num">Actual Hit%</th>
+      <th class="num">Avg Predicted</th>
+      <th class="num">Error (pred−actual)</th>
+    </tr></thead>
+    <tbody>${rows.map(r => {
+      const errPp = r.error_pp != null ? parseFloat(r.error_pp) : null;
+      const errStr = errPp !== null ? (errPp > 0 ? '+' : '') + errPp.toFixed(1) + 'pp' : '—';
+      const errCls = errPp === null ? '' : errPp > 5 ? 'cal-err-pos' : errPp < -3 ? 'cal-err-neg' : '';
+      return `<tr>
+        <td><strong>${esc(r.bucket)}</strong></td>
+        <td class="num">${fmtNum(r.total)}</td>
+        <td class="num" style="color:var(--green)">${fmtNum(r.hits)}</td>
+        <td class="num" ${hitRateColor(r.actual_hit_rate)}>${r.actual_hit_rate != null ? parseFloat(r.actual_hit_rate).toFixed(1) + '%' : '—'}</td>
+        <td class="num">${r.avg_predicted != null ? parseFloat(r.avg_predicted).toFixed(1) + '%' : '—'}</td>
+        <td class="num"><span class="${errCls}">${errStr}</span></td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table></div>`;
+}
+
+function renderTrainFeatures(rows) {
+  const el = document.getElementById('train-features');
+  if (!rows || !rows.length) { el.innerHTML = '<div class="dash-empty">No feature health data.</div>'; return; }
+
+  const bar = pct => {
+    const p = pct != null ? parseFloat(pct) : 0;
+    const color = p >= 90 ? 'var(--green)' : p >= 70 ? 'var(--yellow)' : 'var(--red)';
+    return `<span class="feat-bar" style="width:${Math.max(2, p * 0.6)}px;background:${color}"></span>${p.toFixed(0)}%`;
+  };
+
+  el.innerHTML = `<div style="overflow-x:auto"><table class="dash-table">
+    <thead><tr>
+      <th>Date</th>
+      <th class="num">Total</th>
+      <th class="num">Coverage</th>
+      <th class="num">Score</th>
+      <th class="num">Opp Adj</th>
+      <th class="num">Trend</th>
+    </tr></thead>
+    <tbody>${rows.map(r => `<tr>
+      <td>${esc(r.game_date)}</td>
+      <td class="num">${fmtNum(r.total)}</td>
+      <td class="num">${bar(r.coverage_pct)}</td>
+      <td class="num">${bar(r.score_pct)}</td>
+      <td class="num">${bar(r.opponent_pct)}</td>
+      <td class="num">${bar(r.trend_pct)}</td>
+    </tr>`).join('')}</tbody>
   </table></div>`;
 }
 

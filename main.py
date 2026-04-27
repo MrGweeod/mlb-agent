@@ -494,6 +494,21 @@ def run_pipeline() -> tuple[list[dict], str]:
     if n_training:
         print(f"  Logged {n_training} prop(s) to training data (prospective collection)")
 
+    # Training data health check (runs after prospective logging so today's rows are included)
+    try:
+        from scripts.training_health_check import check_training_health
+        health = check_training_health(days_back=7)
+        if not health["healthy"]:
+            print("\n  [health] TRAINING DATA ISSUES DETECTED:")
+            for issue in health["issues"]:
+                print(f"    {issue}")
+        else:
+            print(f"  [health] Training data OK")
+        if health["hit_rate"] is not None:
+            print(f"  [health] Hit rate (7d): {health['hit_rate']:.1f}%")
+    except Exception as _hc_err:
+        print(f"  [health] Health check failed: {_hc_err}")
+
     if not parlays:
         print("  No valid parlays found. Exiting.")
         return [], ""

@@ -1359,4 +1359,144 @@ def get_training_dashboard_data() -> dict:
     }
 
 
+def get_training_analytics_data() -> dict:
+    """
+    Return all data needed for the Training Data analytics tab.
+
+    Five sections:
+      daily_health    — last 14 days of collection volume + resolution
+      direction_bias  — hit rate by stat+direction (last 30 days, ≥20 samples)
+      calibration     — predicted coverage vs actual hit rate by bucket
+      feature_health  — feature completeness % per day (last 7 days)
+      summary         — aggregate totals, date range, unresolved count
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # ── Daily health ──────────────────────────────────────────────────────────
+    cur.execute("""
+        SELECT
+            game_date,
+            COUNT(*)                                                 AS total,
+            COUNT(*) FILTER (WHERE result = 'hit')                   AS hits,
+            COUNT(*) FILTER (WHERE result = 'miss')                  AS misses,
+            COUNT(*) FILTER (WHERE result IS NULL)                   AS pending,
+            ROUND(
+                100.0 * COUNT(*) FILTER (WHERE result = 'hit') /
+                NULLIF(COUNT(*) FILTER (WHERE result IN ('hit','miss')), 0),
+                1
+            )                                                        AS hit_rate,
+            COUNT(*) FILTER (WHERE coverage_pct IS NOT NULL AND coverage_pct >= 60) AS high_coverage
+        FROM mlb_training_data
+        WHERE game_date >= (CURRENT_DATE - INTERVAL '14 days')::text
+        GROUP BY game_date
+        ORDER BY game_date DESC
+    """)
+    daily_health = [dict(r) for r in cur.fetchall()]
+
+    # ── Direction bias ────────────────────────────────────────────────────────
+    cur.execute("""
+        SELECT
+            stat,
+            direction,
+            COUNT(*)                                                 AS total,
+            COUNT(*) FILTER (WHERE result = 'hit')                   AS hits,
+            COUNT(*) FILTER (WHERE result = 'miss')                  AS misses,
+            ROUND(
+                100.0 * COUNT(*) FILTER (WHERE result = 'hit') /
+                NULLIF(COUNT(*) FILTER (WHERE result IN ('hit','miss')), 0),
+                1
+            )                                                        AS hit_rate
+        FROM mlb_training_data
+        WHERE result IN ('hit', 'miss')
+          AND game_date >= (CURRENT_DATE - INTERVAL '30 days')::text
+        GROUP BY stat, direction
+        HAVING COUNT(*) >= 20
+        ORDER BY stat, direction
+    """)
+    direction_bias = [dict(r) for r in cur.fetchall()]
+
+    # ── Calibration ───────────────────────────────────────────────────────────
+    cur.execute("""
+        SELECT
+            CASE
+                WHEN coverage_pct < 55 THEN '<55%'
+                WHEN coverage_pct < 60 THEN '55-60%'
+                WHEN coverage_pct < 65 THEN '60-65%'
+                WHEN coverage_pct < 70 THEN '65-70%'
+                ELSE '70%+'
+            END                                                      AS bucket,
+            COUNT(*)                                                 AS total,
+            COUNT(*) FILTER (WHERE result = 'hit')                   AS hits,
+            ROUND(
+                100.0 * COUNT(*) FILTER (WHERE result = 'hit') / COUNT(*),
+                1
+            )                                                        AS actual_hit_rate,
+            ROUND(AVG(coverage_pct)::numeric, 1)                     AS avg_predicted,
+            ROUND(
+                AVG(coverage_pct) -
+                100.0 * COUNT(*) FILTER (WHERE result = 'hit') / COUNT(*),
+                1
+            )                                                        AS error_pp
+        FROM mlb_training_data
+        WHERE coverage_pct IS NOT NULL
+          AND result IN ('hit', 'miss')
+        GROUP BY bucket
+        ORDER BY bucket
+    """)
+    calibration = [dict(r) for r in cur.fetchall()]
+
+    # ── Feature health ────────────────────────────────────────────────────────
+    cur.execute("""
+        SELECT
+            game_date,
+            COUNT(*)                                                                       AS total,
+            ROUND(100.0 * COUNT(*) FILTER (WHERE coverage_pct IS NOT NULL)       / COUNT(*), 1) AS coverage_pct,
+            ROUND(100.0 * COUNT(*) FILTER (WHERE composite_score IS NOT NULL)    / COUNT(*), 1) AS score_pct,
+            ROUND(100.0 * COUNT(*) FILTER (WHERE opponent_adjustment IS NOT NULL) / COUNT(*), 1) AS opponent_pct,
+            ROUND(100.0 * COUNT(*) FILTER (WHERE trend_score IS NOT NULL)        / COUNT(*), 1) AS trend_pct
+        FROM mlb_training_data
+        WHERE game_date >= (CURRENT_DATE - INTERVAL '7 days')::text
+        GROUP BY game_date
+        ORDER BY game_date DESC
+    """)
+    feature_health = [dict(r) for r in cur.fetchall()]
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    cur.execute("""
+        SELECT
+            COUNT(*)                                                         AS total_props,
+            MIN(game_date)                                                   AS first_date,
+            MAX(game_date)                                                   AS last_date,
+            COUNT(DISTINCT game_date)                                        AS days_covered,
+            ROUND(
+                100.0 * COUNT(*) FILTER (WHERE result = 'hit') /
+                NULLIF(COUNT(*) FILTER (WHERE result IN ('hit', 'miss')), 0),
+                1
+            )                                                                AS overall_hit_rate,
+            COUNT(*) FILTER (WHERE result IS NULL)                           AS unresolved_count
+        FROM mlb_training_data
+    """)
+    s = dict(cur.fetchone())
+    summary = {
+        "total_props":      s["total_props"],
+        "days_covered":     s["days_covered"],
+        "date_range":       f"{s['first_date']} to {s['last_date']}",
+        "overall_hit_rate": s["overall_hit_rate"],
+        "unresolved_count": s["unresolved_count"],
+        "last_updated":     now_utc(),
+    }
+
+    cur.close()
+    conn.close()
+
+    return {
+        "daily_health":   daily_health,
+        "direction_bias": direction_bias,
+        "calibration":    calibration,
+        "feature_health": feature_health,
+        "summary":        summary,
+    }
+
+
 init_db()
