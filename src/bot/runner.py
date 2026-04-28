@@ -55,7 +55,7 @@ async def pipeline_resolve() -> str:
     def _resolve():
         import io, sys
         from datetime import date, timedelta
-        from src.tracker.outcome_resolver import resolve_recommendations, resolve_all_legs
+        from src.tracker.outcome_resolver import resolve_recommendations, resolve_all_legs, resolve_training_data
         buf = io.StringIO()
         old_stdout = sys.stdout
         sys.stdout = buf
@@ -67,6 +67,9 @@ async def pipeline_resolve() -> str:
             today     = date.today().strftime("%Y-%m-%d")
             resolve_all_legs(yesterday, verbose=True)
             resolve_all_legs(today, verbose=True)
+            # Resolve training data props for ML model
+            resolve_training_data(yesterday, verbose=False)
+            resolve_training_data(today, verbose=False)
         finally:
             sys.stdout = old_stdout
         return buf.getvalue().strip() or "Nothing to resolve."
