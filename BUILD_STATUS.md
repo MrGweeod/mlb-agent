@@ -1,6 +1,6 @@
 # MLB Parlay Agent — Build Status
 
-**Last Updated:** 2026-04-24
+**Last Updated:** 2026-04-27
 **Blueprint Version:** v1.0
 **Repo:** github.com/MrGweeod/mlb-agent
 
@@ -23,10 +23,13 @@ All modules adapted for MLB including pitcher K props (Poisson model).
 ### ✅ Phase 3 — New Modules (Complete)
 All modules built and deployed.
 
-### ✅ Phase 4 — ML Training Data Collection (Complete)
-- Historical backfill: 66,174 resolved samples (March 28 - April 22)
-- Feature engineering: 49,222 samples with calculated features
-- Database: mlb_training_data table fully populated
+### ✅ Phase 4 — ML Training Data Collection (Complete - April 27)
+- **Historical backfill:** 66,174 resolved samples (March 28 - April 22)
+- **Gap fill:** 2,053 samples (April 23-27)
+- **Prospective collection:** ✅ DEPLOYED — logs ~150-200 props daily automatically
+- **Outcome resolver:** ✅ EXTENDED — resolves both mlb_scored_legs and mlb_training_data
+- **Database:** mlb_training_data table fully populated (76,000+ rows)
+- **Date coverage:** March 28 - April 27, 2026 (31 days continuous)
 
 ### ✅ Phase 5 — ML Model Training (Complete - April 24)
 - Gradient boosting classifier trained on 49,222 samples
@@ -34,25 +37,35 @@ All modules built and deployed.
 - Model saved: models/leg_scorer_v1.pkl
 - Ready for A/B testing vs heuristic scoring
 
+### ✅ Phase 5.5 — Training Data Analytics (Complete - April 27)
+- **SQL views:** 4 views for ad-hoc analysis in Supabase
+- **Health check script:** Automated monitoring with daily alerts
+- **Web app tab:** Live analytics dashboard with 5 sections
+- **Pipeline integration:** Health check runs after every 12PM pipeline
+
 ## Production Pipeline Status
 
-### ✅ Core Pipeline (Enhanced - April 24)
+### ✅ Core Pipeline (Enhanced - April 27)
 - 8-step daily pipeline (9AM/12PM/5:30PM ET)
 - SGO props fetch (MLB-specific)
 - Coverage calculation with handedness splits
 - Pitcher K props via Poisson model
 - Composite leg scoring (coverage 70%, opponent 20%, stability 10%)
-- **NEW:** Smart parlay filter (blocks poison overs, max 1 risky over)
+- **Smart parlay filter (April 24):** Blocks poison overs, max 1 risky over
+- **Coverage threshold raised (April 27):** 60% minimum (was 55%)
 - Branch-and-Bound parlay builder
 - Automated outcome resolution
+- **Prospective training data logging (April 27):** All scored legs logged automatically
+- **Health check monitoring (April 27):** Runs after 12PM pipeline
 
-### ✅ Web App (Enhanced - April 24)
+### ✅ Web App (Enhanced - April 27)
 - Interactive parlay builder with real-time odds
-- **NEW:** Team abbreviations (BAL, NYY, LAD, etc.)
-- **NEW:** Pitcher handedness display (RHP, LHP)
-- **NEW:** Game time sorting (earliest games first)
-- **NEW:** Auto-filter started games (60-second refresh)
+- Team abbreviations (BAL, NYY, LAD, etc.)
+- Pitcher handedness display (RHP, LHP)
+- Game time sorting (earliest games first)
+- Auto-filter started games (60-second refresh)
 - Performance analytics dashboard (6 sections, 66K training samples)
+- **NEW: Training Data tab (April 27):** 5 analytical sections
 - Position filters (All / Hitters / Pitchers)
 - Stat filters
 - Analyze button → Claude API
@@ -61,151 +74,71 @@ All modules built and deployed.
 
 ### ✅ Database & Resolution
 - mlb_scored_legs: 614+ production legs (growing daily)
-- mlb_training_data: 73,942 historical props (66,174 resolved)
+- mlb_training_data: **76,000+ props** (March 28 - April 27, growing ~150-200/day)
 - Daily automated resolution at 9AM ET
+- **NEW: Training data resolution (April 27):** mlb_training_data resolved alongside mlb_scored_legs
 - Calibration tracking
+- **NEW: SQL analytics views (April 27):** 4 views for instant metrics
 
-## Smart Parlay Filter (NEW - April 24)
+## Training Data Analytics Dashboard (NEW - April 27)
 
-**Poison overs (BLOCKED entirely):**
-- RBI overs: 14.6% hit rate
-- Walks overs: 19.4% hit rate  
-- Home runs overs: 6.1% hit rate
+### SQL Views (Supabase)
+Created in `sql/training_data_views.sql`:
 
-**Risky overs (max 1 per parlay):**
-- Hits over 0.5 with 65+ composite score: 44.4% hit rate
-- Pitcher strikeouts over 4.5+ with 65+ score: 44.6% hit rate
+| View | Purpose |
+|------|---------|
+| `training_data_daily_health` | Last 14 days collection volume + resolution status |
+| `training_data_feature_health` | Feature completeness % by date (last 14 days) |
+| `training_data_direction_analysis` | Hit rates by stat+direction (last 30 days, ≥20 samples) |
+| `training_data_calibration` | Predicted coverage vs actual hit rate by bucket |
 
-**All other overs:** BLOCKED
+**To activate:** Run `sql/training_data_views.sql` in Supabase SQL Editor
 
-**Expected impact:** Win rate improvement from 47.7% to 52-58%
+### Health Check Script
+File: `scripts/training_health_check.py`
 
-## ML Model Status (NEW - April 24)
+**Checks:**
+1. Daily collection volume (flags missing days)
+2. Resolver failures (>40% unresolved = broken resolver)
+3. Feature completeness (prospective rows only)
+4. Hit rate validation (40-58% range)
 
-**Model:** GradientBoostingClassifier + IsotonicCalibration
-- Training samples: 49,222
-- ROC AUC: 0.8648
-- Accuracy: 80%
-- Top feature: direction (76.6% importance)
+**Current status:**
+Status: 1 ISSUE(S) DETECTED
+Hit rate (7d): 45.2%
+RESOLVER FAILURE: 254 props unresolved (>40%) —
+resolver likely did not run for: 2026-04-02
 
-**Status:** Trained and saved, ready for production
-**Next step:** A/B test vs heuristic scoring (after filter proves out)
+**Runs:** Automatically after every 12PM pipeline (appears in Railway logs)
 
-## Calibration Results (614 Production Legs, April 17-22)
+### Web App Training Tab
+**Sections:**
 
-### Overall Performance
-- Win rate: 47.7% (293/614)
-- **Expected after filter:** 52-58%
+1. **Summary Cards:** Total props, days covered, hit rate, unresolved
+2. **Daily Collection Health:** Last 14 days with color-coded status
+3. **Direction Bias Heatmap:** Over vs under hit rates by stat
+4. **Coverage Calibration:** Predicted vs actual with error tracking
+5. **Feature Health Timeline:** ML feature completeness over time
 
-### Coverage Accuracy (Known Issue)
-| Bucket | Predicted | Actual | Error |
-|--------|-----------|--------|-------|
-| <55% | 47.0% | 40.7% | -6.3pp |
-| 55-60% | 57.3% | 40.4% | -16.9pp |
-| 60-65% | 62.6% | 50.0% | -12.6pp |
-| 65-70% | 67.7% | 44.6% | -23.1pp |
-| 70%+ | 77.4% | 55.1% | -22.3pp |
+**Access:** https://mlb-agent.up.railway.app/ → Training tab
 
-**Note:** Coverage formula still overconfident; ML model should correct this
+## Next Milestones
 
-### Prop Type Performance
-| Stat | Total | Win Rate |
-|------|-------|----------|
-| Strikeouts | 122 | 53.3% ✅ |
-| Total Bases | 53 | 47.2% |
-| RBI | 32 | 46.9% |
-| Hits | 386 | 46.4% |
-| Walks | 21 | 42.9% |
+### Immediate (Next Session)
+1. Run validation queries on training data
+2. Interpret results (direction bias, coverage accuracy)
+3. Adjust strategy if needed (deflation, all-unders, etc.)
 
-### Direction Performance
-| Direction | Total | Win Rate |
-|-----------|-------|----------|
-| Over | 307 | 50.0% |
-| Under | 307 | 44.3% |
+### Short-term (Next 3-5 Days)
+4. Monitor 60% threshold performance
+5. Verify win rate improvement from 47.7% baseline
+6. Create SQL views in Supabase
 
-**Note:** This was BEFORE the smart filter. Direction bias should flip with new filter.
+### Medium-term (Next 1-2 Weeks)
+7. A/B test ML vs heuristic scoring
+8. Roll out ML to production if superior
+9. Add charts to web app analytics
 
-## Training Data Summary
-
-### Backfill (Historical)
-| Metric | Count |
-|--------|-------|
-| Total props logged | 73,942 |
-| Resolved (hit/miss) | 66,174 (89.5%) |
-| Hits | 30,090 (45.5%) |
-| Misses | 36,084 (54.5%) |
-| NULL (DNP/scratched) | 7,768 (excluded) |
-
-### Feature Engineering
-| Feature | Populated | Coverage |
-|---------|-----------|----------|
-| opponent_adjustment | 66,174 | 100.0% |
-| coverage_pct | 49,222 | 74.4% |
-| composite_score | 49,222 | 74.4% |
-| trend_score | 63,092 | 95.3% |
-| pa_last_10 | 63,092 | 95.3% |
-
-**Date range:** March 28 - April 22, 2026 (26 days, Opening Day through yesterday)
-
-### Market Insights (from 66K samples)
-- **Overall hit rate:** 45.5%
-- **Direction bias:** Overs 21.9%, Unders 79.2%
-- **Golden combos:** RBI under (85.4%), Walks under (80.5%)
-- **Poison combos:** RBI over (14.6%), Walks over (19.4%), HR over (6.1%)
-
-## What's Built and Working
-
-### ✅ ML Infrastructure (NEW)
-- `src/engine/ml_scorer.py` — Model training + inference
-- `models/leg_scorer_v1.pkl` — Trained model artifact
-- Feature engineering pipeline (backfill complete)
-
-### ✅ Smart Filtering (NEW)
-- `filter_and_tag_legs()` in parlay_builder.py
-- Branch-and-Bound risky over constraint
-- Integrated into production pipeline
-
-### ✅ Web App Enhancements (NEW)
-- Team abbreviations + pitcher handedness
-- Game time sorting
-- Auto-filter started games
-- 60-second auto-refresh
-
-### ✅ Training Data Infrastructure
-- `scripts/backfill_training_data.py` — Historical data collection
-- `mlb_training_data` table — 73,942 rows with props + outcomes
-- `scripts/backfill_features.py` — Feature calculation (49,222 rows)
-
-## What's NOT Built
-
-### Prospective Training Data Collection (Phase 4.5 — Next)
-- Add 12PM props to mlb_training_data daily
-- Automated feature calculation for new props
-- Growing dataset: +300 samples/day
-
-### ML Scorer in Production (Phase 5.5 — After Filter Validation)
-- Replace heuristic composite_score with ml_hit_probability
-- A/B test framework (ML vs heuristic)
-- Rollout after 3-5 days of validation
-
-### Smart Builder Mode 2 (Phase 6 — Future)
-- Live P(win) calculator
-- Warning flags (over concentration, poison combos)
-- Suggested replacements
-- ML probability per leg
-
-### Advanced Features (Roadmap)
-- Ballpark factors
-- Weather data integration
-- Line movement tracking
-- Parlay-level ML optimizer
-
-## Recent Deployments
-
-| Date | Feature | Status |
-|------|---------|--------|
-| 2026-04-24 | Web app UI improvements | ✅ Deployed |
-| 2026-04-24 | Smart parlay filter | ✅ Deployed |
-| 2026-04-24 | ML model training | ✅ Complete |
-| 2026-04-23 | Historical backfill | ✅ Complete |
-| 2026-04-23 | Dashboard overhaul | ✅ Deployed |
+### Long-term (Future)
+10. Parlay-level ML optimizer
+11. Advanced features (ballpark, weather, line movement)
