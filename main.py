@@ -29,7 +29,7 @@ from src.apis.mlb_stats import (
 )
 from src.apis.sportsgameodds import get_todays_games, get_player_props
 from src.engine.claude_agent import analyze_parlays
-from src.engine.coverage import calculate_coverage, calculate_pitcher_k_coverage, PROP_STAT_MAP
+from src.engine.coverage import calculate_coverage, PROP_STAT_MAP
 from src.engine.parlay_builder import build_hybrid_parlays, _tier_params
 from src.pipelines.enrich_legs import enrich_legs
 from src.pipelines.trend_analysis import get_trend_signal
@@ -257,32 +257,21 @@ def _find_qualifying_legs(
 
         opposing_pitcher_id = pitcher_id_map.get(team_abbr) or None
 
-        # Coverage calculation: pitcher K props use season K/game Poisson model;
-        # batter props use handedness-split statSplits + game-log fallback.
-        if is_pitcher_k:
-            coverage = calculate_pitcher_k_coverage(
-                pitcher_id=mlb_player_id,
-                line=line,
-                season=season,
-            )
-        else:
-            coverage = calculate_coverage(
-                player_id=mlb_player_id,
-                prop_type=stat,
-                line=line,
-                opposing_pitcher_id=opposing_pitcher_id,
-                season=season,
-            )
+        # Coverage calculation — all props route through calculate_coverage().
+        # Pitcher position is passed so pitcher props use game-log coverage.
+        coverage = calculate_coverage(
+            player_id=mlb_player_id,
+            prop_type=stat,
+            line=line,
+            opposing_pitcher_id=opposing_pitcher_id,
+            season=season,
+            position=position,
+        )
         if coverage is None:
             continue  # below seasonal minimum games threshold
 
-        # Apply confidence multiplier: shrink raw rate toward 50% baseline
-        # for small samples (blueprint §4.2). Without this, Poisson estimates
-        # from 10-19 split games are treated as fully reliable.
-        raw_rate   = coverage["coverage_rate"]
-        multiplier = coverage["confidence_multiplier"]
-        adjusted   = 0.50 + multiplier * (raw_rate - 0.50)
-        coverage_pct = round(adjusted * 100, 1)
+        # Gate on best available coverage signal: vs-hand if available, else overall.
+        coverage_pct = coverage.get("coverage_vs_hand") or coverage.get("coverage_overall") or 0.0
         if coverage_pct < MIN_COVERAGE_PCT:
             continue
 
@@ -300,12 +289,18 @@ def _find_qualifying_legs(
             "odd_id":              odd_id,
             # Scoring signals
             "ev_per_unit":         prop.get("ev_per_unit", 0.0),
-            "p_over":              round(adjusted, 4),
+            "p_over":              round(coverage_pct / 100.0, 4),
             "coverage_pct":        coverage_pct,
-            "confidence_mult":     coverage["confidence_multiplier"],
-            "split_used":          coverage["split_used"],
-            "pitcher_hand":        coverage["pitcher_hand"],
-            "batter_hand":         coverage["batter_hand"],
+            # New multi-signal coverage values
+            "coverage_overall":    coverage.get("coverage_overall"),
+            "coverage_vs_hand":    coverage.get("coverage_vs_hand"),
+            "coverage_recent_10":  coverage.get("coverage_recent_10"),
+            "coverage_recent_4":   coverage.get("coverage_recent_4"),
+            "games_total":         coverage.get("games_total"),
+            "games_vs_hand":       coverage.get("games_vs_hand"),
+            "games_recent":        coverage.get("games_recent"),
+            "pitcher_hand":        coverage.get("pitcher_hand"),
+            "batter_hand":         coverage.get("batter_hand"),
             # Game context
             "game_pk":             game_pk,
             "opposing_pitcher_id": opposing_pitcher_id if opposing_pitcher_id else None,

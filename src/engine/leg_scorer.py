@@ -5,13 +5,11 @@ MLB adaptation of the NBA leg_scorer. Key differences:
   - PA stability replaces minutes stability as the 5th factor.
     pa_avg_10 (avg atBats/game over last 10) is sourced from the trend signal
     attached to each leg dict by the scoring pipeline.
-  - Recency-weighted coverage uses the MLB batter game log (oldest-first)
-    rather than nba_api game log (most-recent-first).
+  - Coverage factor reads pre-computed values from the leg dict
+    (coverage_recent_10 for hitters, coverage_recent_4 for pitchers)
+    set by calculate_coverage() in main.py. Falls back to coverage_pct.
   - _build_team_to_blocked uses leg dict team fields rather than nba_api static
     player lookup. Fallback builds the map from the candidate leg pool.
-  - Pitcher props (position SP/RP) fall back to coverage_pct / 100 for the
-    recency-weighted coverage factor since pitcher prop coverage is not yet
-    implemented in a separate pipeline stage.
 
 Factors and weights (emergency recalibration 2026-04-21):
 
@@ -73,89 +71,26 @@ _PA_FULL      =  4.0   # 4+ AB/game → PA stability = 1.0
 _PITCHER_STATS = frozenset({"inningsPitched", "hitsAllowed", "earnedRuns"})
 
 
-def _recency_weighted_coverage(leg: dict) -> float:
+def _recent_coverage_factor(leg: dict) -> float:
     """
-    Compute recency-weighted hit rate for a batter prop leg.
+    Return recent coverage rate [0, 1] from pre-computed leg dict values.
 
-    MLB game log is OLDEST-FIRST from mlb_stats. Most recent 5 games are
-    at the end of the list: games[-5:] carry 3×, games[-10:-5] carry 2×,
-    games[:-10] carry 1×.
-
-    Falls back to coverage_pct / 100 when:
-      - player_id, stat, or best_line is missing from the leg
-      - the game log cannot be fetched
-      - the stat belongs to a pitcher prop (separate coverage logic TBD)
-      - the player has no game log entries
-
-    Returns:
-        Float ∈ [0, 1].
+    Reads coverage_recent_10 (hitters) or coverage_recent_4 (pitchers) set
+    by calculate_coverage() in main.py. Falls back to coverage_pct / 100
+    for legs that predate the Phase 1 refactor.
     """
-    from src.engine.coverage import PROP_STAT_MAP
-    from src.apis.mlb_stats import get_batter_game_log
-
-    pid       = leg.get("player_id", "")
-    stat      = leg.get("stat", "")
-    line      = leg.get("best_line")
-    direction = leg.get("direction", "over")
-    fallback  = leg.get("coverage_pct", 0.0) / 100.0
-
-    if not pid or not stat or line is None:
-        return fallback
-
-    # Pitcher props — batter game log doesn't apply; use coverage_pct fallback.
-    # Check both the pitcher-stat set and position field so that pitcher K props
-    # (stat='strikeouts', position='SP'/'RP') are correctly routed here rather
-    # than falling through to the batter game-log path.
+    fallback = leg.get("coverage_pct", 0.0) / 100.0
     position = leg.get("position", "")
-    if stat in _PITCHER_STATS or position in {"SP", "RP", "P", "TWP"}:
+    stat = leg.get("stat", "")
+
+    if position in {"SP", "RP", "P", "TWP"} or stat in _PITCHER_STATS:
+        val = leg.get("coverage_recent_4")
+    else:
+        val = leg.get("coverage_recent_10")
+
+    if val is None:
         return fallback
-
-    stat_field = PROP_STAT_MAP.get(stat)
-    if not stat_field:
-        return fallback
-
-    # MLB player_id may be stored as string "664285" or int; normalise to int
-    try:
-        mlb_id = int(pid)
-    except (ValueError, TypeError):
-        return fallback
-
-    import datetime
-    season = datetime.datetime.now().year
-    games = get_batter_game_log(mlb_id, season)
-    if not games:
-        return fallback
-
-    weighted_hits  = 0.0
-    weighted_total = 0.0
-    n = len(games)
-
-    for i, game in enumerate(games):
-        val_raw = game.get("stat", {}).get(stat_field)
-        if val_raw is None:
-            continue
-        try:
-            val = float(val_raw)
-        except (ValueError, TypeError):
-            continue
-
-        # Recency weight: last 5 games (i >= n-5) = 3×, next 5 (i >= n-10) = 2×, older = 1×
-        if i >= n - 5:
-            weight = 3.0
-        elif i >= n - 10:
-            weight = 2.0
-        else:
-            weight = 1.0
-
-        weighted_total += weight
-        hit = (val <= line) if direction == "under" else (val >= line)
-        if hit:
-            weighted_hits += weight
-
-    if weighted_total == 0.0:
-        return fallback
-
-    return weighted_hits / weighted_total
+    return val / 100.0
 
 
 def _build_team_to_blocked(blocked_players: set[str], candidate_legs: list[dict]) -> dict[str, int]:
@@ -225,12 +160,13 @@ def score_leg(
     Returns:
         Float ∈ [0, 100].
     """
-    # Factor 1 — recency-weighted coverage [0, 1] with prop-specific penalty.
+    # Factor 1 — recent coverage [0, 1] with prop-specific penalty.
     # Penalty corrects for systematic overconfidence identified in calibration
     # (April 17-18 data: batter props 10-30% overconfident vs actual hit rate).
+    # Phase 2 will remove the penalty and re-weight using all 3 coverage signals.
     stat       = leg.get("stat", "")
     prop_mult  = _PROP_COVERAGE_PENALTY.get(stat, 0.85)
-    f_coverage = _recency_weighted_coverage(leg) * prop_mult
+    f_coverage = _recent_coverage_factor(leg) * prop_mult
 
     # Factor 2 — EV / odds value [0, 1]
     ev         = float(leg.get("ev_per_unit") or 0.0)

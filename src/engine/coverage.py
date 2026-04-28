@@ -1,66 +1,59 @@
 """
-coverage.py — Handedness-split batter coverage rate calculator.
+coverage.py — Multi-signal coverage calculator for MLB prop legs.
 
-For a given player, prop type, line, and opposing pitcher, returns the
-historical coverage rate (how often the batter's stat meets or exceeds
-the line) adjusted for pitcher handedness via the split ratio method.
+Returns three distinct coverage rates so they can be weighted independently
+in composite scoring (Phase 2), rather than being collapsed into one number.
 
-## API reality (confirmed April 2026)
+## Return structure
 
-MLB-StatsAPI gameLog ignores sitCodes — it returns all games regardless.
-Handedness splits are available via statSplits&sitCodes=vl/vr, which gives
-rate stats (avg, slg, obp) and gamesPlayed vs that pitcher type.
+For HITTERS:
+    coverage_overall   — % of ALL games this season where stat met the line
+    coverage_vs_hand   — % adjusted for pitcher handedness (None if <10 games
+                         vs that hand, or if the prop type lacks a split-ratio
+                         mapping)
+    coverage_recent_10 — % of the LAST 10 games where stat met the line
+    games_total        — total games in game log this season
+    games_vs_hand      — games vs this pitcher handedness (None if unknown)
+    games_recent       — number of recent games used (≤10)
+    pitcher_hand       — 'L', 'R', or None
+    batter_hand        — 'L', 'R', 'S', or None
 
-## Split ratio method
+For PITCHERS (position in SP/RP/P/TWP, or stat in pitcher-only set):
+    coverage_overall   — % of ALL starts where stat met the line
+    coverage_vs_hand   — None (no handedness split for pitchers)
+    coverage_recent_4  — % of LAST 4 starts where stat met the line
+    games_total        — total starts in log this season
+    games_vs_hand      — None
+    games_recent       — number of recent starts used (≤4)
+    pitcher_hand       — None
+    batter_hand        — None
 
-1. Compute exact overall coverage from game-by-game logs (count games >= line)
-2. Fetch rate stat (avg/slg/obp) from statSplits for the specific pitcher hand
-3. Fetch overall season rate stat for denominator
-4. Split ratio = rate_vs_hand / rate_overall
-5. Adjusted coverage = exact_overall_coverage × split_ratio
+## Handedness adjustment (hitters only)
 
-This avoids the Poisson approximation error (which was inverted relative to
-actual calibrated results) and uses the game log as the ground truth base rate.
+For hits / totalBases / walks, the vs-hand rate is derived via log-odds
+adjustment using StatSplits rate stats (avg/slg/obp). Props not listed in
+SPLIT_RATIO_STAT get coverage_vs_hand=None.
 
-## Stat mappings for split ratio
-  hits        → avg  (batting average)
-  totalBases  → slg  (slugging percentage)
-  walks       → obp  (on-base percentage)
-  strikeouts, rbi, homeRuns, stolenBases, runsScored → overall only
+Minimum 10 games vs that handedness required; otherwise coverage_vs_hand=None.
 
-## Blueprint Section 4.2 confidence multipliers
-  ≥50 split games → 1.0
-  30–49           → 0.85
-  20–29           → 0.70
-  10–19           → 0.60
-  <10             → fall back to overall coverage rate at 0.65
+## Innings pitched
+
+The MLB API stores inningsPitched as "6.1" meaning 6⅓ innings (6 full + 1 out).
+_count_ip_coverage() handles this conversion separately.
 """
 import datetime
 import math
 import requests
 
-from src.apis.mlb_stats import get_batter_game_log, get_pitcher_hand
+from src.apis.mlb_stats import get_batter_game_log, get_pitcher_game_log, get_pitcher_hand
 from src.utils.db import get_player_handedness
 
-# Position codes that identify a pitcher (used by leg_scorer to route coverage)
+# Position codes that identify a pitcher
 PITCHER_POSITIONS = frozenset({"P", "SP", "RP", "TWP"})
 
 BASE_URL = "https://statsapi.mlb.com/api/v1"
 
-def get_season_minimum(games_played: int) -> int:
-    """
-    Return the minimum games threshold for the current point in the season.
-
-    Ramps up from 8 (first two weeks) to 20 (full season) so early-season
-    players aren't blanket-excluded when sample sizes are still building.
-    """
-    if games_played < 15:
-        return 8
-    if games_played < 30:
-        return 12
-    return 20
-
-# Prop type → stat field in MLB-StatsAPI gameLog splits (all confirmed live)
+# Prop type → stat field in batter game log
 PROP_STAT_MAP: dict[str, str] = {
     "hits":        "hits",
     "totalBases":  "totalBases",
@@ -72,48 +65,85 @@ PROP_STAT_MAP: dict[str, str] = {
     "strikeouts":  "strikeOuts",
 }
 
-# Prop types that support split ratio adjustment, mapped to the rate stat used
-# for computing the ratio from statSplits vs the overall season stat.
-# Props not listed here always use overall game-log coverage (no split adjustment).
+# Prop type → stat field in pitcher game log
+PITCHER_PROP_STAT_MAP: dict[str, str] = {
+    "strikeouts":     "strikeOuts",
+    "inningsPitched": "inningsPitched",
+    "hitsAllowed":    "hits",
+    "earnedRuns":     "earnedRuns",
+    "walks":          "baseOnBalls",
+}
+
+# Props that support log-odds split adjustment, mapped to their rate stat
 SPLIT_RATIO_STAT: dict[str, str] = {
-    "hits":       "avg",   # batting average
-    "totalBases": "slg",   # slugging percentage
-    "walks":      "obp",   # on-base percentage
+    "hits":       "avg",
+    "totalBases": "slg",
+    "walks":      "obp",
 }
 
 
-# ── helpers ──────────────────────────────────────────────────────────────────
+def get_season_minimum(games_played: int) -> int:
+    """Minimum games threshold that ramps up as the season deepens."""
+    if games_played < 15:
+        return 8
+    if games_played < 30:
+        return 12
+    return 20
 
-def _poisson_coverage(mu: float, line: float) -> float:
-    """
-    Estimate P(stat >= line) where stat ~ Poisson(mu).
 
-    Used only by calculate_pitcher_k_coverage() — NOT used for batter props,
-    which use the split ratio method instead.
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+def _count_coverage(game_log: list[dict], stat_field: str, line: float) -> tuple[int, int]:
     """
-    if mu <= 0:
-        return 0.0
-    k = int(line)
-    e_neg_mu = math.exp(-mu)
-    cdf = 0.0
-    term = e_neg_mu
-    for i in range(k + 1):
-        cdf += term
-        term *= mu / (i + 1)
-    return max(0.0, min(1.0, 1.0 - cdf))
+    Count games in game_log where stat_field met or exceeded line.
+
+    Returns (games_over_line, total_valid_games).
+    Entries missing the field or with non-numeric values are skipped.
+    """
+    over = 0
+    total = 0
+    for entry in game_log:
+        raw = entry.get("stat", {}).get(stat_field)
+        if raw is None:
+            continue
+        try:
+            val = float(raw)
+        except (ValueError, TypeError):
+            continue
+        total += 1
+        if val >= line:
+            over += 1
+    return over, total
+
+
+def _count_ip_coverage(game_log: list[dict], line: float) -> tuple[int, int]:
+    """
+    Count starts where inningsPitched met or exceeded line.
+
+    Parses the MLB API "6.1" format: integer part = full innings,
+    decimal part = outs (so "6.1" = 6⅓, "6.2" = 6⅔).
+    """
+    over = 0
+    total = 0
+    for entry in game_log:
+        raw = entry.get("stat", {}).get("inningsPitched")
+        if raw is None:
+            continue
+        try:
+            parts = str(raw).split(".")
+            full = int(parts[0])
+            thirds = int(parts[1]) if len(parts) > 1 else 0
+            val = full + thirds / 3.0
+        except (ValueError, TypeError, IndexError):
+            continue
+        total += 1
+        if val >= line:
+            over += 1
+    return over, total
 
 
 def _get_stat_splits(player_id: int, season: int, pitcher_hand: str) -> dict | None:
-    """
-    Return statSplits stat dict for a batter vs one pitcher handedness.
-
-    Calls the statSplits&sitCodes=vl/vr endpoint. Returns the full stat dict
-    (including avg, slg, obp, gamesPlayed), or None on network error / no data.
-
-    Note: gamesPlayed counts games where the batter had at least one PA against
-    a pitcher of that type (including relievers). It is an overcount relative to
-    "starter hand only" but is the best available signal.
-    """
+    """Return statSplits stat dict for a batter vs one pitcher handedness."""
     sit_code = "vl" if pitcher_hand == "L" else "vr"
     try:
         r = requests.get(
@@ -137,11 +167,7 @@ def _get_stat_splits(player_id: int, season: int, pitcher_hand: str) -> dict | N
 
 
 def _get_overall_season_stats(player_id: int, season: int) -> dict | None:
-    """
-    Return overall season hitting stats (avg, slg, obp, etc.) for a batter.
-
-    Used as the denominator when computing the split ratio.
-    """
+    """Return overall season hitting stats for a batter (avg, slg, obp, etc.)."""
     try:
         r = requests.get(
             f"{BASE_URL}/people/{player_id}/stats",
@@ -162,184 +188,148 @@ def _get_overall_season_stats(player_id: int, season: int) -> dict | None:
         return None
 
 
-def _count_coverage(game_log: list[dict], stat_field: str, line: float) -> tuple[int, int]:
-    """
-    Exact count of games in *game_log* where stat_field met or exceeded line.
-
-    Returns (games_over_line, total_valid_games).  Entries missing the field
-    or with non-numeric values are skipped from both counts.
-    """
-    over = 0
-    total = 0
-    for entry in game_log:
-        raw = entry.get("stat", {}).get(stat_field)
-        if raw is None:
-            continue
-        try:
-            val = float(raw)
-        except (ValueError, TypeError):
-            continue
-        total += 1
-        if val >= line:
-            over += 1
-    return over, total
-
-
-def _confidence_multiplier(n_games: int) -> float:
-    """
-    Return confidence multiplier per blueprint Section 4.2.
-
-    Called only when n_games >= 10 (the <10 fallback is handled by caller).
-    """
-    if n_games >= 50:
-        return 1.0
-    if n_games >= 30:
-        return 0.85
-    if n_games >= 20:
-        return 0.70
-    return 0.60  # 10–19
-
-
 # ── public API ────────────────────────────────────────────────────────────────
 
 def calculate_coverage(
     player_id: int,
     prop_type: str,
     line: float,
-    opposing_pitcher_id: int,
+    opposing_pitcher_id: int | None,
     season: int = None,
+    position: str = "",
 ) -> dict | None:
     """
-    Calculate handedness-split coverage rate for a batter prop.
+    Calculate multi-signal coverage for a single prop leg.
 
-    Args:
-        player_id:            MLB person ID for the batter.
-        prop_type:            One of: hits, totalBases, rbi, homeRuns,
-                              stolenBases, runsScored, walks, strikeouts.
-        line:                 The prop line (e.g. 0.5 for HR, 1.5 for hits).
-        opposing_pitcher_id:  MLB person ID for today's opposing starter.
-        season:               Season year; defaults to current calendar year.
+    Detects pitcher props by position (SP/RP/P/TWP) or prop_type
+    (inningsPitched, hitsAllowed, earnedRuns). Pitcher strikeouts are treated
+    as pitcher props only when position is a pitcher position.
 
     Returns:
-        Dict with keys:
-          coverage_rate         float   0.0–1.0
-          games_used            int     sample size behind coverage_rate
-          split_used            str     'handedness' or 'overall_fallback'
-          confidence_multiplier float   per blueprint Section 4.2
-          pitcher_hand          str|None  'L' or 'R'
-          batter_hand           str|None  'L', 'R', or 'S'
-
-        Returns None when the player has fewer than get_season_minimum()
-        overall games (8/12/20 depending on season depth per blueprint §4.2).
-
-    ## Split ratio path (hits, totalBases, walks)
-    When pitcher_hand is known AND the prop type has a SPLIT_RATIO_STAT mapping
-    AND split games >= 10 AND the overall rate stat is non-zero:
-      - Fetches rate stat (avg/slg/obp) from statSplits vs that handedness
-      - Fetches the same rate stat from overall season stats
-      - Split ratio = rate_vs_hand / rate_overall
-      - Adjusted coverage = exact_overall_coverage × split_ratio (capped 0–1)
-      - Applies confidence multiplier from split game count
-
-    ## Fallback path
-    When pitcher_hand is unknown, prop type lacks a split ratio mapping, or
-    split games < 10:
-      - Uses exact game-log coverage rate (proportion of games >= line)
-      - Applies fixed multiplier 0.65
-
-    ## Switch hitters (bats='S')
-    No special handling — the split stats already reflect their actual
-    matchup-based splits across the season.
+        Dict with coverage signals (see module docstring), or None when there
+        are too few games to compute a reliable estimate.
     """
     if season is None:
         season = datetime.datetime.now().year
 
+    is_pitcher = (
+        position in PITCHER_POSITIONS
+        or prop_type in {"inningsPitched", "hitsAllowed", "earnedRuns"}
+    )
+
+    if is_pitcher:
+        return _pitcher_coverage(player_id, prop_type, line, season)
+    else:
+        return _hitter_coverage(player_id, prop_type, line, opposing_pitcher_id, season)
+
+
+def _hitter_coverage(
+    player_id: int,
+    prop_type: str,
+    line: float,
+    opposing_pitcher_id: int | None,
+    season: int,
+) -> dict | None:
+    """Calculate overall, vs-hand, and recent-10 coverage for a batter prop."""
     stat_field = PROP_STAT_MAP.get(prop_type)
     if not stat_field:
-        print(f"  [coverage] Unknown prop_type '{prop_type}'. "
-              f"Valid: {list(PROP_STAT_MAP)}")
+        print(f"  [coverage] Unknown prop_type '{prop_type}'. Valid: {list(PROP_STAT_MAP)}")
         return None
 
-    # 1. Pitcher handedness — from mlb_stats in-memory cache (7-day TTL)
-    # opposing_pitcher_id is None for pitcher props (they have no opposing pitcher)
-    pitcher_hand = get_pitcher_hand(opposing_pitcher_id) if opposing_pitcher_id is not None else None
-
-    # 2. Batter handedness — from DB position cache; None if not populated yet
-    try:
-        batter_hand = get_player_handedness(str(player_id))
-    except Exception:
-        batter_hand = None
-
-    # 3. Full-season game log — drives the minimum-games gate and base rate
     full_log = get_batter_game_log(player_id, season)
     overall_over, overall_games = _count_coverage(full_log, stat_field, line)
 
-    # Seasonal ramp-up minimum — return None below threshold (blueprint §4.2)
     if overall_games < get_season_minimum(overall_games):
         return None
 
+    coverage_overall = round(100.0 * overall_over / overall_games, 1)
     overall_rate = overall_over / overall_games
 
-    # 4. Split ratio adjustment
-    #
-    # Conditions for split path:
-    #   a) pitcher_hand is known
-    #   b) prop type has a rate stat mapped in SPLIT_RATIO_STAT
-    #   c) split has >= 10 game appearances vs that hand
-    #   d) overall rate stat > 0 (avoids division by zero)
-    use_split = False
+    # Recent 10 games
+    recent_log = full_log[-10:]
+    recent_over, recent_games = _count_coverage(recent_log, stat_field, line)
+    coverage_recent_10 = round(100.0 * recent_over / recent_games, 1) if recent_games > 0 else None
+
+    # Handedness split
+    coverage_vs_hand = None
+    games_vs_hand = None
+    pitcher_hand = get_pitcher_hand(opposing_pitcher_id) if opposing_pitcher_id else None
     rate_stat = SPLIT_RATIO_STAT.get(prop_type)
 
     if pitcher_hand and rate_stat:
         split_stats = _get_stat_splits(player_id, season, pitcher_hand)
         overall_stats = _get_overall_season_stats(player_id, season)
 
-        if split_stats is not None and overall_stats is not None:
-            split_games = int(split_stats.get("gamesPlayed") or 0)
-            rate_vs_hand = float(split_stats.get(rate_stat) or 0)
-            rate_overall = float(overall_stats.get(rate_stat) or 0)
+        if split_stats and overall_stats:
+            n_vs_hand = int(split_stats.get("gamesPlayed") or 0)
+            games_vs_hand = n_vs_hand if n_vs_hand > 0 else None
 
-            if split_games >= 10 and rate_overall > 0 and rate_vs_hand > 0:
-                # Log-odds adjustment: apply the split ratio in log-odds space
-                # so the result stays in (0, 1) even for extreme handedness splits.
-                #
-                # Linear multiplication breaks when overall_rate × ratio > 1.0 —
-                # a player hitting .471 vs LHP but .293 overall (ratio 1.61)
-                # with 65% overall coverage gives 104.8%, capped to 100% (wrong).
-                #
-                # Log-odds transform:
-                #   adjusted_log_odds = logit(overall_rate) + log(rate_vs_hand / rate_overall)
-                #   coverage_rate = sigmoid(adjusted_log_odds)
-                #
-                # Example — Jeremiah Jackson vs LHP:
-                #   logit(0.652) = 0.628
-                #   log(.471/.293) = 0.476
-                #   sigmoid(1.104) = 0.751  →  75.1% (vs the broken 100%)
-                if 0 < overall_rate < 1:
-                    log_odds_base = math.log(overall_rate / (1 - overall_rate))
-                    log_odds_adj  = math.log(rate_vs_hand / rate_overall)
-                    coverage_rate = 1.0 / (1.0 + math.exp(-(log_odds_base + log_odds_adj)))
-                else:
-                    # overall_rate is exactly 0 or 1 — adjustment has no meaning, keep as-is
-                    coverage_rate = overall_rate
-                games_used = split_games
-                split_used = "handedness"
-                multiplier = _confidence_multiplier(split_games)
-                use_split = True
+            if n_vs_hand >= 10:
+                rate_vs_hand = float(split_stats.get(rate_stat) or 0)
+                rate_overall_stat = float(overall_stats.get(rate_stat) or 0)
 
-    if not use_split:
-        coverage_rate = overall_rate
-        games_used = overall_games
-        split_used = "overall_fallback"
-        multiplier = 0.65
+                if rate_overall_stat > 0 and rate_vs_hand > 0:
+                    if 0 < overall_rate < 1:
+                        log_odds_base = math.log(overall_rate / (1 - overall_rate))
+                        log_odds_adj = math.log(rate_vs_hand / rate_overall_stat)
+                        adjusted_rate = 1.0 / (1.0 + math.exp(-(log_odds_base + log_odds_adj)))
+                        coverage_vs_hand = round(adjusted_rate * 100, 1)
+                    else:
+                        coverage_vs_hand = round(overall_rate * 100, 1)
+
+    batter_hand = None
+    try:
+        batter_hand = get_player_handedness(str(player_id))
+    except Exception:
+        pass
 
     return {
-        "coverage_rate":          coverage_rate,
-        "games_used":             games_used,
-        "split_used":             split_used,
-        "confidence_multiplier":  multiplier,
-        "pitcher_hand":           pitcher_hand,
-        "batter_hand":            batter_hand,
+        "coverage_overall":   coverage_overall,
+        "coverage_vs_hand":   coverage_vs_hand,
+        "coverage_recent_10": coverage_recent_10,
+        "games_total":        overall_games,
+        "games_vs_hand":      games_vs_hand,
+        "games_recent":       recent_games,
+        "pitcher_hand":       pitcher_hand,
+        "batter_hand":        batter_hand,
+    }
+
+
+def _pitcher_coverage(
+    player_id: int,
+    prop_type: str,
+    line: float,
+    season: int,
+) -> dict | None:
+    """Calculate overall and recent-4 coverage for a pitcher prop."""
+    if prop_type not in PITCHER_PROP_STAT_MAP:
+        print(f"  [coverage] Unknown pitcher prop_type '{prop_type}'.")
+        return None
+
+    game_log = get_pitcher_game_log(player_id, season)
+
+    if prop_type == "inningsPitched":
+        overall_over, overall_games = _count_ip_coverage(game_log, line)
+        recent_log = game_log[-4:]
+        recent_over, recent_games = _count_ip_coverage(recent_log, line)
+    else:
+        stat_field = PITCHER_PROP_STAT_MAP[prop_type]
+        overall_over, overall_games = _count_coverage(game_log, stat_field, line)
+        recent_log = game_log[-4:]
+        recent_over, recent_games = _count_coverage(recent_log, stat_field, line)
+
+    if overall_games < 3:
+        return None
+
+    return {
+        "coverage_overall":  round(100.0 * overall_over / overall_games, 1),
+        "coverage_vs_hand":  None,
+        "coverage_recent_4": round(100.0 * recent_over / recent_games, 1) if recent_games > 0 else None,
+        "games_total":       overall_games,
+        "games_vs_hand":     None,
+        "games_recent":      recent_games,
+        "pitcher_hand":      None,
+        "batter_hand":       None,
     }
 
 
@@ -349,56 +339,18 @@ def calculate_pitcher_k_coverage(
     season: int = None,
 ) -> dict | None:
     """
-    Calculate Poisson coverage rate for a pitcher strikeout prop.
+    Backward-compatible wrapper — delegates to calculate_coverage() with
+    position='SP' so pitcher strikeout props use game-log coverage.
 
-    Fetches the pitcher's season strikeout total and games started (falling
-    back to games pitched when starts < 3), computes K/start average, then
-    applies the same Poisson approximation used for batter props.
-
-    Args:
-        pitcher_id: MLB person ID for the starting pitcher.
-        line:       The prop line (e.g. 4.5 for over 4.5 Ks).
-        season:     Season year; defaults to current calendar year.
-
-    Returns:
-        Dict matching calculate_coverage() output shape, or None if season
-        stats are unavailable or the pitcher has fewer than 3 appearances.
+    Retained so existing callers don't break during the Phase 1 migration.
     """
     if season is None:
         season = datetime.datetime.now().year
-
-    try:
-        import statsapi as _statsapi
-        data = _statsapi.player_stat_data(
-            pitcher_id, group="pitching", type="season", sportId=1
-        )
-        stat_entries = data.get("stats", [])
-        if not stat_entries:
-            return None
-        # player_stat_data returns a list of {type, group, season, stats: {...}}
-        st = stat_entries[0].get("stats", {})
-        total_k       = float(st.get("strikeOuts", 0) or 0)
-        games_started = int(st.get("gamesStarted", 0) or 0)
-        games_pitched = int(st.get("gamesPitched", 0) or 0)
-    except Exception as e:
-        print(f"  [coverage] calculate_pitcher_k_coverage({pitcher_id}) error: {e}")
-        return None
-
-    # Prefer starts as denominator (K/start is the meaningful rate for props);
-    # fall back to appearances for relievers with enough outings.
-    denom = games_started if games_started >= 3 else games_pitched
-    if denom < 3:
-        return None  # too small a sample to estimate reliably
-
-    k_per_game   = total_k / denom
-    coverage_rate = _poisson_coverage(k_per_game, line)
-    multiplier   = _confidence_multiplier(denom) if denom >= 10 else 0.60
-
-    return {
-        "coverage_rate":         coverage_rate,
-        "games_used":            denom,
-        "split_used":            "pitcher_season_k_rate",
-        "confidence_multiplier": multiplier,
-        "pitcher_hand":          None,
-        "batter_hand":           None,
-    }
+    return calculate_coverage(
+        player_id=pitcher_id,
+        prop_type="strikeouts",
+        line=line,
+        opposing_pitcher_id=None,
+        season=season,
+        position="SP",
+    )
