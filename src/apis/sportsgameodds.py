@@ -1,6 +1,7 @@
 import time
 import requests
 import os
+import statsapi
 from dotenv import load_dotenv
 from datetime import datetime, timezone, date as date_type
 
@@ -370,6 +371,7 @@ def get_player_props(game, include_unders=True):
     """
     odds = game.get('odds', {})
     props = []
+    _mlb_id_cache: dict[str, int | None] = {}  # player_name → MLB numeric ID
     directions = [("over", "game-ou-over"), ("under", "game-ou-under")] if include_unders else [("over", "game-ou-over")]
     for stat in PROP_STATS:
         # Derive the API key prefixes for this internal stat from _SGO_STAT_ID_MAP.
@@ -420,9 +422,19 @@ def get_player_props(game, include_unders=True):
                 _suffix = _STAT_NAME_SUFFIX.get(normalized_stat, '')
                 if _suffix and _raw_name.endswith(_suffix):
                     _raw_name = _raw_name[:-len(_suffix)].strip()
+                sgo_player_id = prop.get('playerID')
+                if _raw_name not in _mlb_id_cache:
+                    try:
+                        results = statsapi.lookup_player(_raw_name)
+                        _mlb_id_cache[_raw_name] = results[0]['id'] if results else None
+                    except Exception as e:
+                        print(f"  [SGO] MLB ID lookup failed for {_raw_name!r}: {e}")
+                        _mlb_id_cache[_raw_name] = None
+                mlb_player_id = _mlb_id_cache[_raw_name]
                 leg_dict = {
                     'stat': normalized_stat,
-                    'player_id': prop.get('playerID'),
+                    'player_id': mlb_player_id,
+                    'sgo_player_id': sgo_player_id,
                     'player_name': _raw_name,
                     'standard_line': dk.get('overUnder'),
                     'standard_odds': book_odds,
