@@ -15,6 +15,7 @@ Constraints:
 
 Public API unchanged: build_hybrid_parlays(...) and _tier_params(...).
 """
+import os
 import time
 from src.utils.odds_math import american_to_decimal
 from src.engine.leg_scorer import score_legs_composite
@@ -130,8 +131,8 @@ def build_hybrid_parlays(
     MIN_LEGS        = params["min_legs"]
     MAX_LEGS        = params["max_legs"]
     TIER            = params["tier"]
-    MIN_COV         = 60.0
-    MIN_PARLAY_ODDS = 600
+    MIN_COV         = 55.0
+    MIN_PARLAY_ODDS = 1000
     MAX_PARLAY_ODDS = 1500
     MAX_LEGS_PER_GAME = 3
     POOL_SIZE       = 20
@@ -148,7 +149,12 @@ def build_hybrid_parlays(
 
     # Only score if composite_score is missing (avoid re-scoring during regeneration)
     if not all(leg.get("composite_score") for leg in eligible):
-        score_legs_composite(eligible, team_to_blocked=team_to_blocked, role="swing")
+        use_ml = os.getenv("USE_ML_SCORING", "false").lower() == "true"
+        if use_ml:
+            from src.engine.ml_leg_scorer import score_legs_ml
+            score_legs_ml(eligible)
+        else:
+            score_legs_composite(eligible, team_to_blocked=team_to_blocked, role="swing")
 
     # Filter poison/non-qualifying overs; tag risky overs for B&B constraint.
     eligible = filter_and_tag_legs(eligible)
