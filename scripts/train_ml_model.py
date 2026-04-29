@@ -36,6 +36,26 @@ import numpy as np
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "../models/leg_scorer_v2.pkl")
 
+
+class CalibratedModel:
+    """
+    Platt-scaled wrapper around a pre-trained GradientBoostingClassifier.
+
+    Defined at module level (not inside train()) so pickle can locate the
+    class when loading the saved model in ml_leg_scorer.py.
+    """
+    def __init__(self, base_model, calibrator):
+        self.base_model  = base_model
+        self.calibrator  = calibrator
+
+    def predict_proba(self, X):
+        base_probs      = self.base_model.predict_proba(X)[:, 1].reshape(-1, 1)
+        calibrated      = self.calibrator.predict_proba(base_probs)[:, 1]
+        return np.column_stack([1 - calibrated, calibrated])
+
+    def predict(self, X):
+        return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
+
 _PITCHER_STATS = frozenset({"inningsPitched", "hitsAllowed", "earnedRuns"})
 
 _STAT_CATEGORIES = [
@@ -119,7 +139,7 @@ def train(retrain: bool = False) -> None:
         print("  Pass --retrain to force retraining.")
         return
 
-    from sklearn.calibration import CalibratedClassifierCV, calibration_curve
+    from sklearn.calibration import calibration_curve
     from sklearn.ensemble import GradientBoostingClassifier
     from sklearn.model_selection import train_test_split
     from sklearn.metrics import classification_report, roc_auc_score
@@ -180,10 +200,13 @@ def train(retrain: bool = False) -> None:
     )
     gbc.fit(X_train_final, y_train_final)
 
-    # ── Platt Scaling calibration ─────────────────────────────────────────────
+    # ── Manual Platt Scaling (compatible with all sklearn versions) ───────────
     print("\n[train_ml_model] Calibrating with Platt Scaling...")
-    calibrated_model = CalibratedClassifierCV(estimator=gbc, method="sigmoid", cv="prefit")
-    calibrated_model.fit(X_cal, y_cal)
+    from sklearn.linear_model import LogisticRegression
+    uncal_cal_probs = gbc.predict_proba(X_cal)[:, 1]
+    platt_model = LogisticRegression()
+    platt_model.fit(uncal_cal_probs.reshape(-1, 1), y_cal)
+    calibrated_model = CalibratedModel(gbc, platt_model)
 
     # ── Evaluation: compare uncalibrated vs calibrated ────────────────────────
     uncal_probs = gbc.predict_proba(X_test)[:, 1]
