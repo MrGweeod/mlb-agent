@@ -182,7 +182,7 @@ def train(retrain: bool = False) -> None:
 
     # ── Platt Scaling calibration ─────────────────────────────────────────────
     print("\n[train_ml_model] Calibrating with Platt Scaling...")
-    calibrated_model = CalibratedClassifierCV(gbc, method="sigmoid", cv="prefit")
+    calibrated_model = CalibratedClassifierCV(estimator=gbc, method="sigmoid", cv="prefit")
     calibrated_model.fit(X_cal, y_cal)
 
     # ── Evaluation: compare uncalibrated vs calibrated ────────────────────────
