@@ -1,238 +1,303 @@
 # MLB Parlay Agent — Session Handoff
-**Last Updated:** April 27, 2026
+**Last Updated:** April 29, 2026
 
 ## Current Status
-✅ **Training data gap filled** — April 23-27 backfilled (2,053 new rows)
-✅ **Prospective collection deployed** — Daily pipeline logs ~150-200 props automatically
-✅ **Training analytics dashboard live** — SQL views + web app tab + health check script
-✅ **All bugs fixed** — Pitcher hand null check, coverage threshold raised to 60%, API date type issues
+✅ **System completely rebuilt** — Data pipeline fixed, coverage refactored, new scoring deployed
+✅ **Recommendations system live** — Backend + frontend complete, Claude analysis integrated
+✅ **Discord bot removed** — Web app is now single source of truth
+⚠️ **Deployment blocker** — Railway needs PYTHONPATH=/app (user fixing manually)
 
 ---
 
-## What Was Built This Session (April 27, 2026)
+## What Was Built This Session (April 29, 2026)
 
-### 1. Training Data Gap Fill (April 23-27)
+### PHASE 1: Fix Broken Data Pipeline (COMPLETE)
 
-**Backfill completed:**
-- **2,053 new training rows** inserted
-- **4,428 hits** + **5,335 misses** = 9,763 resolved outcomes
-- **2,027 NULL outcomes** (April 27 games still in progress)
+**Two blocking bugs crushed:**
 
-**Date coverage:**
-- ✅ March 28 - April 27 continuous (no gaps)
-- Total dataset: **76,000+ props** across 31 days
+**Bug 1 - Database Constraint Rejection**
+- **Issue:** `mlb_training_data` table CHECK constraint only allowed 'hit'/'miss', rejected 'void'
+- **Impact:** 10,216 unresolved props, every void write crashed transaction
+- **Fix:** `ALTER TABLE mlb_training_data DROP CONSTRAINT mlb_training_data_result_check; ALTER TABLE mlb_training_data ADD CONSTRAINT mlb_training_data_result_check CHECK (result IN ('hit', 'miss', 'void', NULL));`
+- **Applied:** Via `python3 -c` execution in Claude Code
 
----
+**Bug 2 - Player ID Lookup Failure**
+- **Issue:** SGO API returns string IDs ("CEDRIC_MULLINS_1_MLB"), not numeric MLB IDs needed for box score matching
+- **Impact:** Props logged with `player_id=NULL`, resolver failed name matching → 10K backlog
+- **Fix:** Added MLB-StatsAPI lookup in `src/apis/sportsgameodds.py` (lines 426-433)
+  - Fetches numeric MLB ID via `statsapi.lookup_player(player_name)`
+  - Stores both: `player_id` (numeric for resolver), `sgo_player_id` (string for reference)
+  - Per-call cache prevents duplicate lookups
+- **Result:** Manually resolved 5-day backlog (April 23-27) → 11,879 props, 43-46% hit rates
 
-### 2. Prospective Training Data Collection (Automated)
-
-**Three components deployed:**
-
-**A) Database Function** (`src/utils/db.py`)
-- `log_training_data_legs(legs, run_date)` — Bulk-inserts all scored legs
-- Populates: coverage_pct, composite_score, opponent_adjustment, trend_score
-- Uses `{date}|{odd_id}` key format (compatible with backfill)
-
-**B) Pipeline Integration** (`main.py`)
-- New step after parlay building: logs all qualifying legs to training_data
-- Output: `Logged X prop(s) to training data (prospective collection)`
-- Runs every 12PM pipeline = ~150-200 new samples daily
-
-**C) Outcome Resolver Extension** (`src/tracker/outcome_resolver.py`)
-- `resolve_training_data(game_date)` — Resolves mlb_training_data using box scores
-- Tries MLB player_id first (prospective), falls back to name (backfill)
-- CLI extended: `python -m src.tracker.outcome_resolver 2026-04-27` resolves both tables
-
-**Daily flow:**
-- 12PM: Log props with outcome=NULL
-- 9AM next day: Resolve yesterday's props (fill hit/miss)
-- **Result:** Training dataset grows by ~150-200 samples daily automatically
+**Training data now flowing automatically:**
+- All pending=0
+- Resolver working at 9AM daily
+- Prospective collection adding ~150-200 samples/day
 
 ---
 
-### 3. Training Data Analytics Dashboard
+### PHASE 2: Coverage Calculation Refactor (COMPLETE)
 
-**Four-part implementation:**
+**Problem identified via validation queries:**
+- Coverage 70%+ predicted → 46.7% actual (28pp error)
+- All buckets hit 46-49% regardless of prediction
+- Opponent adjustment: no correlation (46.5% across all buckets)
+- Trend score: inverted signal (COLD 67%, HOT 46%)
 
-#### Part A: SQL Views (`sql/training_data_views.sql`)
+**Root cause:** Formula smooshed all signals into one overconfident number with arbitrary penalties
 
-Four views for ad-hoc analysis in Supabase:
+**User directive:** "I want coverage % on RAW stat line" — three separate signals needed
 
-| View | Purpose |
-|------|---------|
-| `training_data_daily_health` | Last 14 days: total/hits/misses/pending/hit_rate/high_coverage |
-| `training_data_feature_health` | Feature completeness % by date (coverage, score, opponent, trend) |
-| `training_data_direction_analysis` | Hit rates by stat+direction (last 30d, ≥20 samples) |
-| `training_data_calibration` | Predicted coverage vs actual hit rate, bucketed |
+**Solution:** Complete rewrite of `src/engine/coverage.py`
 
-**To activate:** Run `sql/training_data_views.sql` in Supabase SQL Editor
+**Removed:**
+- Recency weighting (0.6 × recent + 0.4 × career)
+- Penalty multipliers (sample size, trend, opponent)
+- Smooshed single coverage number
 
-#### Part B: Automated Health Check Script (`scripts/training_health_check.py`)
+**New architecture:**
 
-**Checks performed:**
-1. Daily collection volume (flags missing days, low volume)
-2. Resolver failures (>40% unresolved = broken resolver)
-3. Feature completeness (prospective rows only)
-4. Hit rate validation (40-58% range)
+**Hitters** return 3 values:
+- `coverage_overall` — Season hit rate (raw %)
+- `coverage_vs_hand` — Hit rate vs opposing pitcher handedness (RHP/LHP split)
+- `coverage_recent_10` — Hit rate last 10 games (raw %)
 
-**Current health status:**
-Status: 1 ISSUE(S) DETECTED
-Hit rate (7d): 45.2%
-RESOLVER FAILURE: 254 props unresolved (>40%) —
-resolver likely did not run for: 2026-04-02
+**Pitchers** return 2 values:
+- `coverage_overall` — Season hit rate (raw %)
+- `coverage_recent_5` — Hit rate last 5 starts (user specified 5 not 4)
 
-**Runs automatically:** After every 12PM pipeline (appears in Railway logs)
+**Key decisions:**
+- Pitcher props: no handedness split (can't predict lineup composition)
+- Handedness adjustment: log-odds for hits/totalBases/walks only (most predictive)
+- Minimum 10 games vs hand required, else NULL (fall back to overall)
+- Separate `_hitter_coverage()` and `_pitcher_coverage()` functions
 
-**Manual run:** `python scripts/training_health_check.py`
-
-#### Part C: Web App "Training Data" Tab
-
-**URL:** https://mlb-agent.up.railway.app/ → Training tab
-
-**Five sections:**
-
-1. **Summary Cards**
-   - Total Props, Days Covered, Hit Rate, Unresolved count
-
-2. **Daily Collection Health** (table, last 14 days)
-   - Color-coded status dots: 🟢 resolved, 🟡 pending, 🔴 missing
-   - Shows total/resolved/pending/hit rate/high coverage
-
-3. **Direction Bias Heatmap** (table)
-   - Rows: Stats (hits, walks, strikeouts, etc.)
-   - Columns: Over % | Under % | Delta (U−O)
-   - Color coded: 🟢 >55%, 🟡 40-55%, 🔴 <40%
-
-4. **Coverage Calibration** (table)
-   - Buckets: <55%, 55-60%, 60-65%, 65-70%, 70%+
-   - Shows: Predicted vs Actual + Error
-   - Color coded: 🔴 overconfident, 🟢 underconfident
-
-5. **Feature Health Timeline** (table, last 7 days)
-   - Mini progress bars for coverage/score/opponent/trend completeness
-   - Color coded: 🟢 >90%, 🟡 70-90%, 🔴 <70%
-
-**Auto-refreshes:** Every 60 seconds when tab is visible
-
-#### Part D: Pipeline Integration
-
-**Modified:** `main.py` to run health check after prospective logging
-
-**Railway logs now show:**
-Logged 170 prop(s) to training data (prospective collection)
-[health] Training data OK
-[health] Hit rate (7d): 45.2%
-
-Or if issues detected:
-[health] TRAINING DATA ISSUES DETECTED:
-RESOLVER FAILURE: 254 props unresolved...
+**Files modified:** `src/engine/coverage.py` (complete rewrite), `src/engine/leg_scorer.py`, `main.py`
 
 ---
 
-### 4. Bug Fixes Deployed Today
+### PHASE 3: New Composite Scoring (COMPLETE)
 
-**Bug 1: Pitcher Hand Null Check** (`src/engine/coverage.py`)
-- **Issue:** `get_pitcher_hand(None)` errors when opposing_pitcher_id=None (pitcher props)
-- **Fix:** Added null guard: `pitcher_hand = get_pitcher_hand(opposing_pitcher_id) if opposing_pitcher_id is not None else None`
-- **Impact:** Fixed 10% of props failing enrichment
+**Decision:** Remove all non-predictive factors, pure coverage-based scoring
 
-**Bug 2: Coverage Threshold Too Low** (`src/engine/parlay_builder.py`)
-- **Issue:** Weak 55-56% legs dominating parlays (Trout 55%, Caratini 56.2%)
-- **Fix:** Raised MIN_COV from 55.0 to 60.0
-- **Impact:** Forces system to only build parlays with 60%+ legs
+**Hitter formula (3 factors):**
+```pythoncomposite_score = (
+coverage_overall × 0.40 +
+coverage_vs_hand × 0.30 +
+coverage_recent_10 × 0.30
+)
+Weight redistribution when signals missing (vs_hand=NULL → overall gets 0.70, recent=NULL → overall gets 0.70)
 
-**Bug 3: Training Analytics API Crashes** (`src/utils/db.py`)
-- **Issue:** HTTP 500 error on `/api/training-analytics` endpoint
-- **Root cause:** Date type mismatch + PostgreSQL ROUND function syntax
-- **Fix 1:** Removed `::text` casts on date comparisons (lines 1391, 1412, 1459)
-- **Fix 2:** Added `::numeric` cast before ROUND on error_pp calculation (line 1438)
-- **Impact:** Training tab now loads correctly
+**Pitcher formula (4 factors):**
+```pythoncomposite_score = (
+coverage_overall × 0.35 +
+coverage_recent_5 × 0.25 +
+pitcher_quality × 0.20 +
+opponent_offense × 0.20
+)
+
+**File:** `src/engine/leg_scorer.py` completely rewritten
+- Removed: `_PROP_COVERAGE_PENALTY`, all weight constants, EV/trend/opponent/PA factors
+- New: `_score_hitter_leg()`, `_score_pitcher_leg()`, `_normalize_rank()`
+- Router: `score_leg()` detects pitcher vs hitter by position/stat
+- All 7 tests passing
+
+---
+
+### PHASE 4: Pitcher Quality + Opponent Factors (COMPLETE)
+
+**Two new modules created:**
+
+**`src/apis/pitcher_stats.py`:**
+- `get_pitcher_ranks(season)` - ranks all qualified starters (min 50 IP) by ERA/K9/WHIP
+- 24-hour cache
+- Returns `{pitcher_id: {"era_rank": N, "k9_rank": N, "whip_rank": N}}`
+- Rank 1 = best, 30 = worst
+
+**`src/apis/team_stats.py`:**
+- `get_team_offensive_ranks(season)` - ranks all 30 teams by K%/BA/runs per game
+- 24-hour cache
+- For ranking: lower K% = better (rank 1), higher BA = better (rank 1)
+
+**Pitcher scoring routes by stat:**
+- Strikeouts → K9 rank + opponent K% (inverted - high K% team favorable)
+- Hits Allowed → WHIP rank + opponent BA (inverted)
+- Earned Runs → ERA rank + opponent RPG (inverted)
+
+**Integration:** `main.py` fetches ranks once per pipeline, `_attach_pitcher_rank_signals()` adds 6 rank fields to pitcher legs before scoring
+
+**Result:** Web app showed 36 legs (was 18), mix of hits/strikeouts, 62-73% coverage, no more poison-stat monopoly
+
+---
+
+### PHASE 5: Recommendations Backend (COMPLETE)
+
+**Decision:** Build 5 pre-built parlays per pipeline run, stored persistent, served via API
+
+**User chose:** Persistent storage (tracks won/lost) with on-demand Claude analysis (saves API costs)
+
+**Database table:** `sql/create_recommendations_table.sql`
+```sqlCREATE TABLE mlb_parlay_recommendations (
+id SERIAL PRIMARY KEY,
+recommendation_date DATE NOT NULL,
+pipeline_run_time TIMESTAMP NOT NULL,
+rank INT NOT NULL CHECK (rank BETWEEN 1 AND 5),
+leg_odd_ids TEXT[] NOT NULL,
+combined_odds INT NOT NULL,
+win_probability FLOAT NOT NULL,
+edge_pct FLOAT NOT NULL,
+analysis TEXT,
+bet_status TEXT DEFAULT 'pending' CHECK (bet_status IN ('pending', 'won', 'lost', 'void')),
+UNIQUE (recommendation_date, rank)
+);
+**⚠️ USER MUST RUN THIS IN SUPABASE SQL EDITOR** (pending action)
+
+**Database functions** (`src/utils/db.py` - 3 new functions, 121 lines):
+- `save_parlay_recommendation(rec)` → inserts row, returns id
+- `get_todays_recommendations()` → fetches today's rows, batch-hydrates legs from mlb_scored_legs
+- `update_recommendation_analysis(id, text)` → updates analysis field
+
+**Pipeline integration** (`main.py` - Step 9, 126 lines):
+- `generate_recommendations(qualifying_legs)` - Branch-and-Bound finds top 20 combinations (4-8 legs, +600 to +1500 odds)
+- Calculates: `win_probability = product(composite_score/100)`, `edge_pct = win_prob × odds/100 - 100`
+- Diversity filter: each leg max 2 appearances across 5 parlays
+- Ranks by edge_pct descending
+- Saves after parlay building
+
+**API endpoints** (`src/web/server.py` - 147 lines added):
+- `GET /api/recommendations` → returns `{"recommendations": [...]}` with hydrated legs
+- `POST /api/analyze-recommendation` → calls Claude (claude-sonnet-4-6, 300 tokens), persists analysis
+- Uses Anthropic client: `_ANTHROPIC_CLIENT = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))`
+
+---
+
+### PHASE 6: Frontend + Discord Bot Removal (COMPLETE)
+
+**Discord bot completely removed:**
+- **Deleted:** `bot.py`, `src/bot/runner.py`, `src/bot/formatter.py`, `src/bot/__init__.py`
+- **Removed from requirements.txt:** discord.py==2.7.1, audioop-lts==0.2.2
+- **Updated railway.toml:** startCommand = "python src/web/server.py"
+
+**Pipeline scheduler moved to web server:**
+
+**`src/web/server.py` additions (69 lines):**
+- `_pipeline_scheduler()` - async background task runs `run_pipeline()` at 9AM/12PM/5:30PM ET
+- Uses `ZoneInfo("America/New_York")` for timezone
+- Launched via `asyncio.ensure_future()` in `start_server()`
+- Added `if __name__ == "__main__"` block for direct execution
+
+**Recommendations tab ("Picks"):**
+
+**`src/web/static/index.html` - 6 targeted edits (257 lines added):**
+
+1. **Tab button:** `<button class="tab-btn" id="tab-recommendations">Picks</button>`
+
+2. **CSS:** `.rec-card`, `.rec-leg-row`, `.rec-analysis`, button styles (93 lines)
+
+3. **HTML section:** `<div id="recommendations">` with container (17 lines)
+
+4. **Updated hideAll()** to include recommendations
+
+5. **Added recsView()** + event listener
+
+6. **JS functions (139 lines):**
+   - `loadRecommendations()` - fetches `/api/recommendations`, renders or shows "wait for next run"
+   - `renderRecommendations(recs)` - builds HTML cards, highlights rank 1 as "BEST BET"
+   - `analyzeRecommendation(recId)` - POST to `/api/analyze-recommendation`, displays Claude analysis
+   - `viewLegsInBuilder(recId)` - stub showing "Coming soon" toast
+   - Auto-refresh every 5 minutes when tab visible
+
+**Display features:**
+- Each parlay shows: combined odds, win probability, edge %, all legs with coverage
+- "BEST BET" prominently highlighted (rank 1)
+- "Analyze Parlay" button → Claude generates 2-3 sentence explanation
+- "View in Builder" button → Coming soon (would load legs into Parlay Builder tab)
+
+---
+
+## Current Blocker (PENDING USER FIX)
+
+**Railway deployment crashed** - `ModuleNotFoundError: No module named 'src'`
+
+**Root cause:** Railway runs `python src/web/server.py` from `/app/`, but PYTHONPATH not set
+
+**Fix (user doing manually):**
+1. Railway UI → Variables tab
+2. Add new variable: `PYTHONPATH` = `/app`
+3. Railway auto-redeploys
+
+**Expected logs after fix:**[web] Server started on port XXXX
+[web] Pipeline scheduler started (9:00 AM / 12:00 PM / 5:30 PM ET)
+[scheduler] next pipeline run at 2026-04-29 17:30 ET (in X.Xh)
 
 ---
 
 ## Next Session Priorities
 
+### IMMEDIATE (After deployment fix)
+1. **Test Recommendations tab** - Wait for next pipeline run, verify 5 parlays appear
+2. **Test Claude analysis** - Click "Analyze Parlay", verify explanation generates
+3. **Create SQL table** - Run `sql/create_recommendations_table.sql` in Supabase SQL Editor
+
 ### HIGH PRIORITY
-
-1. **Run validation queries on training data** (8 queries created)
-   - Query 2: Direction bias analysis (validates unders >> overs)
-   - Query 3: Coverage calibration (shows overconfidence level)
-   - Query 4: Golden vs poison props (exact stat+direction win rates)
-   - Query 5: Composite score validation (does higher score = higher win rate?)
-
-2. **Interpret results and adjust strategy**
-   - If coverage >15pp overconfident → add global deflation (multiply by 0.85)
-   - If composite score validates → keep 60% threshold
-   - If direction bias extreme → consider all-unders parlays
-
-3. **Monitor production performance with 60% threshold** (next 3-5 days)
-   - Track win rate improvement from 47.7% baseline
-   - Expected: 52-58% with 60% threshold + smart filter
-   - Verify no weak anchor legs in Discord recommendations
+4. **Build "View in Builder"** - Load selected parlay legs into Parlay Builder tab for editing
+5. **Outcome resolver for recommendations** - Track which parlays won/lost, display in Dashboard
+6. **Handle batter strikeouts overs** - User wants penalty or max-1-per-parlay rule (44.6% hit rate)
 
 ### MEDIUM PRIORITY
-
-4. **A/B test ML vs heuristic scoring**
-   - ML model trained (86.5% AUC) and ready
-   - After 60% threshold proves out, enable ML scoring
-   - Compare parlay quality over 5-7 days
-
-5. **Add SQL views to regular monitoring routine**
-   - Create views in Supabase (run sql/training_data_views.sql)
-   - Query weekly to track direction bias stability
-   - Check coverage calibration monthly
+7. **Monitor production performance** - Track win rates with new coverage calculation
+8. **Validate new scoring** - Does raw coverage + pitcher quality improve results?
+9. **A/B test ML vs heuristic** - ML model ready (86.5% AUC), compare to new heuristic
 
 ### LOW PRIORITY
-
-6. **Enhance web app analytics**
-   - Add charts/visualizations (currently tables only)
-   - Export functionality for analysis in Excel/Python
-
-7. **Build Smart Builder Mode 2**
-   - Live P(win) calculator
-   - Suggested replacements for weak legs
+10. **Add charts to web app** - Visualizations for analytics tabs
+11. **Export functionality** - Download training data / recommendations as CSV
 
 ---
 
-## Key Files Modified Today
+## Key Files Modified This Session
 
-| File | Changes |
-|------|---------|
-| `sql/training_data_views.sql` | NEW — 4 views for Supabase analytics |
-| `scripts/training_health_check.py` | NEW — 285 lines, automated health monitoring |
-| `scripts/backfill_training_data.py` | RAN — filled April 23-27 gap |
-| `src/utils/db.py` | ADDED `log_training_data_legs()`, `get_training_analytics_data()` — 205 new lines |
-| `src/tracker/outcome_resolver.py` | ADDED `resolve_training_data()` — 163 new lines |
-| `src/engine/coverage.py` | FIXED pitcher hand null check |
-| `src/engine/parlay_builder.py` | RAISED MIN_COV from 55% to 60% |
-| `src/web/server.py` | ADDED `/api/training-analytics` endpoint |
-| `src/web/static/index.html` | ADDED Training tab — 245 new lines (5 sections) |
-| `main.py` | ADDED prospective logging + health check integration |
+| File | Changes | Lines |
+|------|---------|-------|
+| `sql/create_recommendations_table.sql` | NEW — table schema for parlay storage | 13 |
+| `src/apis/sportsgameodds.py` | ADDED MLB-StatsAPI player ID lookup | +8 |
+| `src/apis/pitcher_stats.py` | NEW — pitcher ERA/K9/WHIP rankings | 142 |
+| `src/apis/team_stats.py` | NEW — team offensive rankings | 128 |
+| `src/engine/coverage.py` | COMPLETE REWRITE — 3 signals for hitters, 2 for pitchers | -266, +218 |
+| `src/engine/leg_scorer.py` | COMPLETE REWRITE — pure coverage-based scoring | -237, +158 |
+| `src/utils/db.py` | ADDED 3 recommendation functions | +121 |
+| `src/web/server.py` | ADDED scheduler + 2 endpoints | +147 |
+| `src/web/static/index.html` | ADDED Picks tab (6 edits) | +257 |
+| `main.py` | ADDED generate_recommendations (Step 9) | +126 |
+| `railway.toml` | UPDATED startCommand | modified |
+| `requirements.txt` | REMOVED Discord packages | -2 |
+| **Deleted:** | `bot.py`, `src/bot/*` | -906 |
+
+**Total additions:** ~1,200 lines  
+**Total deletions:** ~1,400 lines  
+**Net change:** -200 lines (cleaner codebase!)
 
 ---
 
 ## Database Changes
 
-| Table | Action |
-|-------|--------|
-| `mlb_training_data` | ADDED 2,053 rows (April 23-27 backfill) |
-| `mlb_scored_legs` | ADDED columns: game_start_time, pitcher_hand (from previous session) |
-
-**Views created (run sql file to activate):**
-- `training_data_daily_health`
-- `training_data_feature_health`
-- `training_data_direction_analysis`
-- `training_data_calibration`
+| Table | Action | Status |
+|-------|--------|--------|
+| `mlb_training_data` | FIXED CHECK constraint (allow 'void') | ✅ Complete |
+| `mlb_parlay_recommendations` | CREATE TABLE | ⚠️ User must run SQL file |
+| `mlb_scored_legs` | No changes | — |
 
 ---
 
-## Git Status
+## Git Commits This Session
 
-**Commits pushed today:**
-1. `fix: pitcher hand null check + raise coverage threshold to 60%`
-2. `feat: prospective training data collection + training data outcome resolver`
-3. `feat: training data analytics — SQL views, health check, web tab, pipeline integration`
-4. `fix: training analytics API - date type and ROUND cast issues`
+1. `feat: add MLB-StatsAPI player ID lookup to sportsgameodds.py`
+2. `refactor: complete rewrite of coverage calculation - 3 signals for hitters, 2 for pitchers`
+3. `refactor: pure coverage-based composite scoring - remove all non-predictive factors`
+4. `feat: add pitcher quality and team offensive rankings modules`
+5. `feat: recommendations backend - generation, storage, API endpoints`
+6. `feat: add Recommendations tab to web app; remove Discord bot`
 
 **Branch:** master  
 **Remote:** origin/master (up to date)
@@ -241,39 +306,51 @@ RESOLVER FAILURE: 254 props unresolved...
 
 ## Environment
 - Repository: github.com/MrGweeod/mlb-agent
-- Deployment: Railway (mlb-agent project) — all changes auto-deployed
-- Web app: https://mlb-agent.up.railway.app/
+- Deployment: Railway (mlb-agent project) — **NEEDS PYTHONPATH FIX**
+- Web app: https://mlb-agent.up.railway.app/ (currently crashing)
 - Database: Supabase PostgreSQL
   - mlb_training_data: **76,000+ rows** (March 28 - April 27)
   - mlb_scored_legs: 614+ rows (production legs)
+  - mlb_parlay_recommendations: **NOT CREATED YET** (user action required)
 - Python: 3.10 in venv (WSL2 Ubuntu)
 
 ---
 
 ## Key Learnings & Principles
 
-**Training data collection is now fully automated:**
-- Historical backfill: ✅ Complete (66,174 samples March 28 - April 22)
-- Gap fill: ✅ Complete (2,053 samples April 23-27)
-- Prospective collection: ✅ Live (adds ~150-200 samples daily automatically)
-- Outcome resolution: ✅ Automated (runs daily at 9AM)
+**System was completely broken, now completely rebuilt:**
+- Data pipeline: ✅ Fixed (void constraint, player IDs)
+- Coverage calculation: ✅ Refactored (raw signals, no penalties)
+- Composite scoring: ✅ Simplified (coverage-based, removed junk)
+- Recommendations: ✅ Built (backend + frontend + Claude analysis)
+- Discord bot: ✅ Removed (web app single source of truth)
 
-**Three complementary monitoring systems:**
-1. **SQL views** → Ad-hoc analysis in Supabase
-2. **Health check script** → Automated alerts in Railway logs
-3. **Web app Training tab** → Visual analytics accessible anytime
+**Raw coverage signals > smooshed formulas:**
+- Separate signals (overall, vs hand, recent) allow flexible weighting
+- No arbitrary penalties or multipliers
+- Each signal can be validated independently against training data
 
-**Coverage threshold matters:**
-- 55% threshold allowed weak anchors (Trout 55%, Caratini 56.2%)
-- 60% threshold should eliminate these weak legs
-- Monitor next 3-5 days for win rate improvement
+**Pitcher quality matters for pitcher props:**
+- ERA/K9/WHIP rankings add 20% of composite score
+- Team offensive rankings add another 20%
+- Pitchers now have 4-factor scoring vs hitters' 3-factor
 
-**Database type handling is critical:**
-- PostgreSQL date columns don't need `::text` casts
-- `ROUND()` requires `::numeric` cast on double precision values
-- Always test SQL queries locally before deploying to web API
+**Single source of truth is simpler:**
+- Discord bot added complexity with no benefit
+- Web app scheduler handles same timing (9AM/12PM/5:30PM)
+- Recommendations tab is the new delivery mechanism
 
-**Validation queries are essential:**
-- 8 queries created to analyze 76K training samples
-- Direction bias, coverage calibration, golden/poison props
-- Run these weekly to validate strategy is still working
+**Database constraints bite hard:**
+- CHECK constraint rejection aborted entire transaction
+- 10K unresolved props accumulated silently
+- Always test void/edge cases when defining constraints
+
+**Player ID mapping is critical:**
+- SGO uses string IDs, MLB-StatsAPI uses numeric IDs
+- Resolver needs numeric IDs for box score matching
+- Solution: store both, lookup at prop fetch time
+
+**Web app is now complete:**
+- 4 tabs: Legs, Dashboard, Training, Picks
+- All data flows through web UI
+- Claude analysis on-demand (saves API costs)
