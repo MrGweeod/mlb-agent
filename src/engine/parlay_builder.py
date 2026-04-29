@@ -146,7 +146,9 @@ def build_hybrid_parlays(
     if not eligible:
         return []
 
-    score_legs_composite(eligible, team_to_blocked=team_to_blocked, role="swing")
+    # Only score if composite_score is missing (avoid re-scoring during regeneration)
+    if not all(leg.get("composite_score") for leg in eligible):
+        score_legs_composite(eligible, team_to_blocked=team_to_blocked, role="swing")
 
     # Filter poison/non-qualifying overs; tag risky overs for B&B constraint.
     eligible = filter_and_tag_legs(eligible)
