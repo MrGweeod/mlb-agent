@@ -1,27 +1,56 @@
 # MLB Parlay Agent — Build Status
 
-**Last Updated:** 2026-04-27
-**Blueprint Version:** v1.0
+**Last Updated:** 2026-04-29
+**Blueprint Version:** v1.0 (OUTDATED - needs v2.0)
 **Repo:** github.com/MrGweeod/mlb-agent
 
 ## Infrastructure Status
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Railway Deployment | ✅ Running | Production pipeline 3×/day + web app |
-| Discord Bot | ✅ Connected | Scheduled runs: 9AM/12PM/5:30PM ET |
-| Web App | ✅ Fully Functional | https://mlb-agent.up.railway.app/ |
-| Supabase PostgreSQL | ✅ Live | mlb_scored_legs, mlb_training_data tables |
+| Railway Deployment | ⚠️ Needs Fix | ModuleNotFoundError - add PYTHONPATH=/app |
+| Discord Bot | ❌ Removed | Deleted entirely - web app is single source |
+| Web App | ✅ Built | 4 tabs complete, pending deployment fix |
+| Supabase PostgreSQL | ⚠️ Partial | mlb_parlay_recommendations table not created yet |
 
 ## Build Progress
 
 ### ✅ Phase 1 — Direct NBA Agent Copies (Complete)
 All modules copied and working.
 
-### ✅ Phase 2 — MLB Adaptations (Complete)
-All modules adapted for MLB including pitcher K props (Poisson model).
+### ✅ Phase 2 — MLB Adaptations (Complete - REBUILT)
+**Coverage calculation completely rewritten (April 29):**
+- Old system: smooshed coverage with penalties → REMOVED
+- New system: 3 separate signals for hitters, 2 for pitchers
+- Hitter signals: coverage_overall, coverage_vs_hand, coverage_recent_10
+- Pitcher signals: coverage_overall, coverage_recent_5
 
-### ✅ Phase 3 — New Modules (Complete)
-All modules built and deployed.
+**Composite scoring completely rewritten (April 29):**
+- Removed: EV factor, trend factor, opponent factor (for hitters), PA stability
+- New hitter formula: 40% overall + 30% vs_hand + 30% recent_10
+- New pitcher formula: 35% overall + 25% recent_5 + 20% pitcher_quality + 20% opponent_offense
+
+**Pitcher quality module added (April 29):**
+- `src/apis/pitcher_stats.py` - ERA/K9/WHIP rankings
+- `src/apis/team_stats.py` - Team K%/BA/RPG rankings
+- 24-hour cache, rank-based normalization
+
+### ✅ Phase 3 — New Modules (Complete - ENHANCED)
+**Data pipeline fixes (April 29):**
+- Database CHECK constraint fixed (now allows 'void')
+- Player ID lookup added to SGO fetcher (MLB-StatsAPI integration)
+- 10K backlog resolved
+
+**Recommendations system built (April 29):**
+- Backend: `generate_recommendations()` in `main.py` (Step 9)
+- Database: `mlb_parlay_recommendations` table schema created ⚠️ not run yet
+- API: `/api/recommendations` (GET), `/api/analyze-recommendation` (POST)
+- Frontend: Picks tab in web app with Claude analysis integration
+
+**Discord bot removed (April 29):**
+- `bot.py` deleted
+- `src/bot/*` deleted
+- Pipeline scheduler moved to `src/web/server.py`
+- Runs 9AM/12PM/5:30PM ET via asyncio background task
 
 ### ✅ Phase 4 — ML Training Data Collection (Complete - April 27)
 - **Historical backfill:** 66,174 resolved samples (March 28 - April 22)
@@ -36,6 +65,7 @@ All modules built and deployed.
 - ROC AUC: 0.8648 (target was 0.60+)
 - Model saved: models/leg_scorer_v1.pkl
 - Ready for A/B testing vs heuristic scoring
+- **NOTE:** Heuristic scoring was completely rebuilt April 29 - ML may need retraining
 
 ### ✅ Phase 5.5 — Training Data Analytics (Complete - April 27)
 - **SQL views:** 4 views for ad-hoc analysis in Supabase
@@ -43,44 +73,60 @@ All modules built and deployed.
 - **Web app tab:** Live analytics dashboard with 5 sections
 - **Pipeline integration:** Health check runs after every 12PM pipeline
 
+### ⚠️ Phase 6 — Recommendations System (NEEDS TABLE CREATION)
+- Backend complete
+- Frontend complete
+- Claude analysis integration complete
+- **BLOCKER:** User must run `sql/create_recommendations_table.sql` in Supabase
+
 ## Production Pipeline Status
 
-### ✅ Core Pipeline (Enhanced - April 27)
-- 8-step daily pipeline (9AM/12PM/5:30PM ET)
-- SGO props fetch (MLB-specific)
-- Coverage calculation with handedness splits
-- Pitcher K props via Poisson model
-- Composite leg scoring (coverage 70%, opponent 20%, stability 10%)
-- **Smart parlay filter (April 24):** Blocks poison overs, max 1 risky over
-- **Coverage threshold raised (April 27):** 60% minimum (was 55%)
-- Branch-and-Bound parlay builder
-- Automated outcome resolution
-- **Prospective training data logging (April 27):** All scored legs logged automatically
-- **Health check monitoring (April 27):** Runs after 12PM pipeline
+### ✅ Core Pipeline (REBUILT - April 29)
+- 8-step daily pipeline (9AM/12PM/5:30PM ET) - now runs from web server, not Discord bot
+- SGO props fetch (MLB-specific) - enhanced with player ID lookup
+- **Coverage calculation with 3/2 signals (NEW)** - complete rewrite
+- **Pitcher quality + opponent offense (NEW)** - 2 new modules
+- **Pure coverage-based scoring (NEW)** - composite formula rebuilt
+- Branch-and-Bound parlay builder - unchanged
+- **Recommendations generation (NEW)** - Step 9 added
+- Automated outcome resolution - working
+- **Prospective training data logging** - working
+- **Health check monitoring** - working
 
-### ✅ Web App (Enhanced - April 27)
-- Interactive parlay builder with real-time odds
+### ✅ Web App (4 TABS COMPLETE)
+- **Legs tab:** Interactive parlay builder with real-time odds
+- **Dashboard tab:** Performance analytics (6 sections, 66K training samples)
+- **Training tab:** 5 analytical sections for ML data quality
+- **Picks tab (NEW):** 5 daily parlay recommendations with Claude analysis
+
+**Common features:**
 - Team abbreviations (BAL, NYY, LAD, etc.)
 - Pitcher handedness display (RHP, LHP)
 - Game time sorting (earliest games first)
 - Auto-filter started games (60-second refresh)
-- Performance analytics dashboard (6 sections, 66K training samples)
-- **NEW: Training Data tab (April 27):** 5 analytical sections
 - Position filters (All / Hitters / Pitchers)
 - Stat filters
-- Analyze button → Claude API
+- Password protection
 
-**URL:** https://mlb-agent.up.railway.app/
+**Picks tab features:**
+- "BEST BET" highlighting (rank 1 parlay)
+- Combined odds, win probability, edge % display
+- All legs with coverage % shown
+- "Analyze Parlay" button → Claude generates 2-3 sentence explanation
+- "View in Builder" button → Coming soon
+
+**URL:** https://mlb-agent.up.railway.app/ (currently crashing - needs PYTHONPATH fix)
 
 ### ✅ Database & Resolution
 - mlb_scored_legs: 614+ production legs (growing daily)
 - mlb_training_data: **76,000+ props** (March 28 - April 27, growing ~150-200/day)
+- mlb_parlay_recommendations: **NOT CREATED YET** ⚠️ User must run SQL file
 - Daily automated resolution at 9AM ET
-- **NEW: Training data resolution (April 27):** mlb_training_data resolved alongside mlb_scored_legs
+- **Training data resolution** - mlb_training_data resolved alongside mlb_scored_legs
 - Calibration tracking
-- **NEW: SQL analytics views (April 27):** 4 views for instant metrics
+- **SQL analytics views** - 4 views for instant metrics
 
-## Training Data Analytics Dashboard (NEW - April 27)
+## Training Data Analytics Dashboard (April 27)
 
 ### SQL Views (Supabase)
 Created in `sql/training_data_views.sql`:
@@ -103,12 +149,6 @@ File: `scripts/training_health_check.py`
 3. Feature completeness (prospective rows only)
 4. Hit rate validation (40-58% range)
 
-**Current status:**
-Status: 1 ISSUE(S) DETECTED
-Hit rate (7d): 45.2%
-RESOLVER FAILURE: 254 props unresolved (>40%) —
-resolver likely did not run for: 2026-04-02
-
 **Runs:** Automatically after every 12PM pipeline (appears in Railway logs)
 
 ### Web App Training Tab
@@ -122,23 +162,62 @@ resolver likely did not run for: 2026-04-02
 
 **Access:** https://mlb-agent.up.railway.app/ → Training tab
 
+## Current Blockers
+
+### IMMEDIATE
+1. **Railway deployment** - Add PYTHONPATH=/app environment variable (user doing manually)
+2. **Database table** - Run `sql/create_recommendations_table.sql` in Supabase SQL Editor (user action required)
+
+### After Deployment
+3. **Test Recommendations tab** - Wait for next pipeline run (9AM/12PM/5:30PM)
+4. **Test Claude analysis** - Click "Analyze Parlay" button, verify it works
+
 ## Next Milestones
 
-### Immediate (Next Session)
-1. Run validation queries on training data
-2. Interpret results (direction bias, coverage accuracy)
-3. Adjust strategy if needed (deflation, all-unders, etc.)
+### Immediate (After deployment fix)
+1. Test full recommendations flow
+2. Verify pipeline scheduler works in production
+3. Monitor new coverage calculation performance
 
 ### Short-term (Next 3-5 Days)
-4. Monitor 60% threshold performance
-5. Verify win rate improvement from 47.7% baseline
-6. Create SQL views in Supabase
+4. Build "View in Builder" functionality
+5. Add outcome resolver for recommendations
+6. Track win rates with new scoring system
 
 ### Medium-term (Next 1-2 Weeks)
-7. A/B test ML vs heuristic scoring
-8. Roll out ML to production if superior
-9. Add charts to web app analytics
+7. A/B test ML vs new heuristic scoring
+8. Retrain ML model with new feature set
+9. Handle batter strikeouts overs (penalty or max-1 rule)
 
 ### Long-term (Future)
-10. Parlay-level ML optimizer
-11. Advanced features (ballpark, weather, line movement)
+10. Create Blueprint v2.0 (current one is outdated)
+11. Parlay-level ML optimizer
+12. Advanced features (ballpark, weather, line movement)
+
+## Architecture Changes This Session
+
+### Major Rewrites
+1. **Coverage calculation** - from smooshed single value to 3/2 separate signals
+2. **Composite scoring** - from 5-factor weighted to pure coverage-based
+3. **Pipeline delivery** - from Discord bot to web server scheduler
+4. **Recommendations** - from nothing to full backend + frontend system
+
+### New Modules
+1. `src/apis/pitcher_stats.py` - Pitcher ERA/K9/WHIP rankings
+2. `src/apis/team_stats.py` - Team offensive rankings
+3. `sql/create_recommendations_table.sql` - Parlay storage schema
+
+### Deleted Modules
+1. `bot.py` - Discord bot entry point
+2. `src/bot/runner.py` - Discord pipeline wrapper
+3. `src/bot/formatter.py` - Discord message formatting
+4. `src/bot/__init__.py` - Discord bot package
+
+### Modified Modules (Major Changes)
+1. `src/engine/coverage.py` - Complete rewrite (218 lines added, 266 removed)
+2. `src/engine/leg_scorer.py` - Complete rewrite (158 lines added, 237 removed)
+3. `src/web/server.py` - Pipeline scheduler + recommendation endpoints (+147 lines)
+4. `src/web/static/index.html` - Picks tab (+257 lines)
+5. `main.py` - Recommendations generation Step 9 (+126 lines)
+
+**Total:** ~1,200 lines added, ~1,400 lines deleted, net -200 lines
