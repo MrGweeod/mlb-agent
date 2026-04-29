@@ -1,4 +1,4 @@
-# MLB Parlay Agent — Architecture Decisions
+markdown# MLB Parlay Agent — Architecture Decisions
 
 **Last Updated:** April 29, 2026
 
@@ -268,3 +268,184 @@ CREATE TABLE mlb_parlay_recommendations (
 - "View in Builder" button → Coming soon (load legs into builder)
 
 **Claude analysis prompt:**
+Analyze this MLB parlay briefly (2-3 sentences max):
+{list of legs with coverage, odds, pitcher matchups}
+Focus on: strongest edge, biggest risk, why this combination makes sense.
+
+**Rationale:**
+- Persistent storage enables outcome tracking
+- On-demand analysis saves API credits (only when user clicks)
+- 5 parlays gives user choice (best bet + 4 alternatives)
+- Edge % ranking surfaces most +EV combinations
+
+**Alternative considered:** Generate analysis for all 5 upfront, store in database
+**Rejected because:** Wastes 4 API calls if user only clicks 1-2 buttons
+
+---
+
+## Remove Discord Bot (April 29, 2026)
+
+**Decision:** Delete Discord bot entirely, move all functionality to web app.
+
+**Context:**
+- Two environments (Discord + web) created confusion
+- User said: "Discord bot and web app feel disconnected"
+- Web app can do everything Discord bot did
+- Discord bot required separate auth, channels, permissions setup
+
+**What was removed:**
+- `bot.py` - Discord bot entry point (423 lines)
+- `src/bot/runner.py` - Pipeline wrapper for Discord context
+- `src/bot/formatter.py` - Discord message formatting
+- `src/bot/__init__.py` - Package init
+- `requirements.txt` - discord.py==2.7.1, audioop-lts==0.2.2
+
+**What was moved to web server:**
+- Pipeline scheduler - now runs in `src/web/server.py` as async background task
+- Same timing: 9AM/12PM/5:30PM ET
+- Uses `ZoneInfo("America/New_York")` for timezone
+- Runs `run_pipeline()` in thread executor (it's synchronous)
+
+**Scheduler implementation:**
+```python
+async def _pipeline_scheduler():
+    while True:
+        # Find next scheduled time (9AM, 12PM, or 5:30PM)
+        next_run = calculate_next_run()
+        sleep_secs = (next_run - now()).total_seconds()
+        await asyncio.sleep(sleep_secs)
+        
+        # Run pipeline in thread executor (blocking operation)
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, run_pipeline)
+```
+
+**Started in server:**
+```python
+async def start_server():
+    # ... start aiohttp server ...
+    asyncio.ensure_future(_pipeline_scheduler())
+    return runner
+```
+
+**Benefits:**
+- Single source of truth (web app only)
+- One codebase to maintain
+- No Discord permissions/channels to configure
+- Simpler deployment (one service not two)
+
+**Result:**
+- Railway config updated: `startCommand = "python src/web/server.py"`
+- Web app now handles everything
+- Recommendations tab replaces Discord posts
+
+**Alternative considered:** Keep Discord bot, sync with web app
+**Rejected because:** Adds complexity for zero benefit - web app does same job better
+
+---
+
+## Data Pipeline Fixes (April 29, 2026)
+
+**Decision:** Fix two blocking bugs preventing training data resolution.
+
+### Bug 1: Database CHECK Constraint
+
+**Problem:**
+- `mlb_training_data` table CHECK constraint: `result IN ('hit', 'miss')`
+- Outcome resolver tried to write 'void' for scratched players
+- Database rejected transaction → ENTIRE batch rolled back
+- 10,216 unresolved props accumulated silently
+
+**Fix:**
+```sql
+ALTER TABLE mlb_training_data 
+DROP CONSTRAINT mlb_training_data_result_check;
+
+ALTER TABLE mlb_training_data 
+ADD CONSTRAINT mlb_training_data_result_check 
+CHECK (result IN ('hit', 'miss', 'void', NULL));
+```
+
+**Applied:** Via Python subprocess in Claude Code
+```python
+subprocess.run([
+    "python3", "-c",
+    "import psycopg2; conn = psycopg2.connect(...); ..."
+])
+```
+
+**Lesson:** Always include edge cases in CHECK constraints (void, NULL)
+
+### Bug 2: Player ID Lookup
+
+**Problem:**
+- SGO API returns string IDs: `"CEDRIC_MULLINS_1_MLB"`
+- Outcome resolver needs numeric MLB IDs to match box scores
+- Props logged with `player_id=NULL`
+- Resolver fell back to name matching → failed on common names
+
+**Fix:**
+Added lookup in `src/apis/sportsgameodds.py` (lines 426-433):
+```python
+# Fetch numeric MLB ID for outcome resolution
+try:
+    player_id = statsapi.lookup_player(player_name)[0]['id']
+except:
+    player_id = None
+
+leg_data = {
+    'player_id': player_id,  # Numeric (for resolver)
+    'sgo_player_id': sgo_id,  # String (for reference)
+    # ...
+}
+```
+
+**Per-call cache:** Prevents duplicate lookups within same pipeline run
+
+**Result:**
+- Manually resolved 5-day backlog (April 23-27)
+- 11,879 props resolved
+- Hit rates: 43-46% across all days (healthy)
+- Void counts: 75-341/day (legitimate DNPs, pinch runners)
+
+**Lesson:** Always store BOTH external ID (for reference) and internal ID (for matching)
+
+---
+
+## Key Principles
+
+### Validate Before Building
+- Validation queries showed formula was completely broken
+- 28pp error (70% predicted → 46.7% actual) would never be found without data
+- Always test scoring against historical outcomes before production
+
+### Raw Signals > Smooshed Formulas
+- Separate signals (overall, vs_hand, recent) allow independent validation
+- No hidden penalties or arbitrary multipliers
+- User can see exactly what coverage means (raw %)
+
+### Single Source of Truth
+- Discord bot + web app = confusion
+- Web app does everything Discord did, better
+- One codebase, one deployment, one UI
+
+### Database Constraints Are Unforgiving
+- CHECK constraint rejection aborts entire transaction
+- 10K backlog accumulated silently
+- Always test edge cases (void, NULL, empty strings)
+
+### Player ID Mapping Is Critical
+- External APIs use different ID schemes
+- Always store both external and internal IDs
+- Lookup at fetch time, not resolution time
+
+### Coverage Is King
+- Only factor with proven predictive power
+- Trend/opponent/PA stability showed zero correlation
+- Don't use factors just because NBA agent did
+
+### Pitcher Props Need Different Logic
+- Pitchers face different dynamics than hitters
+- Pitcher quality (ERA/K9/WHIP) adds real signal
+- Opponent offense (team K%/BA/RPG) adds real signal
+- Different formula (4 factors) vs hitters (3 factors)
