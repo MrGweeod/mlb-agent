@@ -28,8 +28,18 @@ from datetime import date, datetime
 
 from aiohttp import web
 
-from src.utils.db import get_scored_legs, get_training_dashboard_data, get_training_analytics_data
+from anthropic import Anthropic
+
+from src.utils.db import (
+    get_scored_legs,
+    get_todays_recommendations,
+    get_training_analytics_data,
+    get_training_dashboard_data,
+    update_recommendation_analysis,
+)
 from src.engine.claude_agent import analyze_parlays
+
+_ANTHROPIC_CLIENT = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), timeout=60.0)
 
 _PASSWORD = os.getenv("WEB_APP_PASSWORD", "")
 _STATIC_DIR = pathlib.Path(__file__).parent / "static"
@@ -224,6 +234,141 @@ async def handle_analyze(request: web.Request) -> web.Response:
     )
 
 
+async def handle_recommendations(request: web.Request) -> web.Response:
+    """Return today's pre-built parlay recommendations with hydrated leg details."""
+    if not _check_auth(request):
+        return web.Response(
+            text=json.dumps({"error": "Unauthorized"}),
+            content_type="application/json",
+            status=401,
+        )
+    try:
+        recommendations = get_todays_recommendations()
+        return web.Response(
+            text=json.dumps({"recommendations": recommendations}, default=str),
+            content_type="application/json",
+        )
+    except Exception as exc:
+        return web.Response(
+            text=json.dumps({"error": str(exc)}),
+            content_type="application/json",
+            status=500,
+        )
+
+
+async def handle_analyze_recommendation(request: web.Request) -> web.Response:
+    """
+    Generate and persist Claude analysis for a specific recommendation.
+
+    Request body: {"recommendation_id": 123}
+
+    Fetches the recommendation's hydrated legs from today's recommendations,
+    calls Claude for a 2-3 sentence parlay analysis, saves it, and returns it.
+
+    Returns: {"analysis": "..."}
+    """
+    if not _check_auth(request):
+        return web.Response(
+            text=json.dumps({"error": "Unauthorized"}),
+            content_type="application/json",
+            status=401,
+        )
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.Response(
+            text=json.dumps({"error": "Invalid JSON body"}),
+            content_type="application/json",
+            status=400,
+        )
+
+    recommendation_id = body.get("recommendation_id")
+    if not recommendation_id:
+        return web.Response(
+            text=json.dumps({"error": "recommendation_id required"}),
+            content_type="application/json",
+            status=400,
+        )
+
+    # Find the recommendation in today's list
+    try:
+        all_recs = get_todays_recommendations()
+        rec = next((r for r in all_recs if r["id"] == int(recommendation_id)), None)
+    except Exception as exc:
+        return web.Response(
+            text=json.dumps({"error": str(exc)}),
+            content_type="application/json",
+            status=500,
+        )
+
+    if not rec:
+        return web.Response(
+            text=json.dumps({"error": "Recommendation not found"}),
+            content_type="application/json",
+            status=404,
+        )
+
+    # If analysis was already generated, return it immediately
+    if rec.get("analysis"):
+        return web.Response(
+            text=json.dumps({"analysis": rec["analysis"]}),
+            content_type="application/json",
+        )
+
+    # Build the prompt
+    legs = rec.get("legs", [])
+    legs_text = "\n".join(
+        f"- {leg.get('player_name', 'Unknown')} ({leg.get('team', '?')}) "
+        f"{leg.get('stat', '')} {leg.get('direction', 'over')} {leg.get('line', '?')} "
+        f"@ {leg.get('odds', '?')} | coverage: {leg.get('coverage_pct', 'N/A')}%"
+        for leg in legs
+    )
+    win_prob = rec.get("win_probability", 0.0)
+    combined_odds = rec.get("combined_odds", 0)
+
+    prompt = (
+        "Analyze this MLB parlay recommendation. Explain why these legs work together, "
+        "any correlation considerations, and overall strength.\n\n"
+        f"Legs:\n{legs_text}\n\n"
+        f"Combined odds: +{combined_odds}\n"
+        f"Projected win probability: {win_prob:.1f}%\n\n"
+        "Provide 2-3 sentences explaining why this is a good bet."
+    )
+
+    # Call Claude
+    try:
+        import asyncio
+
+        def _claude_call() -> str:
+            response = _ANTHROPIC_CLIENT.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=300,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return response.content[0].text
+
+        loop = asyncio.get_event_loop()
+        analysis = await loop.run_in_executor(None, _claude_call)
+    except Exception as exc:
+        return web.Response(
+            text=json.dumps({"error": f"Claude error: {exc}"}),
+            content_type="application/json",
+            status=500,
+        )
+
+    # Persist and return
+    try:
+        update_recommendation_analysis(int(recommendation_id), analysis)
+    except Exception as exc:
+        print(f"  [server] failed to save analysis for rec {recommendation_id}: {exc}")
+
+    return web.Response(
+        text=json.dumps({"analysis": analysis}),
+        content_type="application/json",
+    )
+
+
 def create_app() -> web.Application:
     """Build and return the aiohttp Application object."""
     app = web.Application()
@@ -233,6 +378,8 @@ def create_app() -> web.Application:
     app.router.add_get("/api/dashboard", handle_dashboard)
     app.router.add_get("/api/training-analytics", handle_training_analytics)
     app.router.add_post("/api/analyze", handle_analyze)
+    app.router.add_get("/api/recommendations", handle_recommendations)
+    app.router.add_post("/api/analyze-recommendation", handle_analyze_recommendation)
     return app
 
 

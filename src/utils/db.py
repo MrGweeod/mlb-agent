@@ -1499,4 +1499,125 @@ def get_training_analytics_data() -> dict:
     }
 
 
+def save_parlay_recommendation(recommendation: dict) -> int:
+    """
+    Insert one row into mlb_parlay_recommendations and return its id.
+
+    Args:
+        recommendation: dict with keys:
+            recommendation_date, pipeline_run_time, rank, leg_odd_ids (list),
+            combined_odds, win_probability, edge_pct
+    Returns:
+        The new row's serial id.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO mlb_parlay_recommendations
+            (recommendation_date, pipeline_run_time, rank, leg_odd_ids,
+             combined_odds, win_probability, edge_pct)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """,
+        (
+            recommendation["recommendation_date"],
+            recommendation["pipeline_run_time"],
+            recommendation["rank"],
+            recommendation["leg_odd_ids"],
+            recommendation["combined_odds"],
+            recommendation["win_probability"],
+            recommendation["edge_pct"],
+        ),
+    )
+    row_id = cur.fetchone()["id"]
+    conn.commit()
+    cur.close()
+    conn.close()
+    return row_id
+
+
+def get_todays_recommendations() -> list[dict]:
+    """
+    Fetch all recommendations for today, ordered by rank ASC.
+
+    Hydrates full leg details from mlb_scored_legs for each odd_id in
+    leg_odd_ids. Returns an empty list when none exist yet.
+
+    Returns:
+        [
+            {
+                "id": int,
+                "rank": int,
+                "legs": [leg_dicts...],
+                "combined_odds": int,
+                "win_probability": float,
+                "edge_pct": float,
+                "analysis": str | None,
+                "generated_at": str,
+            },
+            ...
+        ]
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT id, rank, leg_odd_ids, combined_odds, win_probability,
+               edge_pct, analysis, pipeline_run_time AS generated_at
+        FROM mlb_parlay_recommendations
+        WHERE recommendation_date = CURRENT_DATE
+        ORDER BY rank ASC
+        """,
+    )
+    recs = [dict(r) for r in cur.fetchall()]
+
+    if not recs:
+        cur.close()
+        conn.close()
+        return []
+
+    # Collect all odd_ids across all recommendations in one batch
+    all_odd_ids = list({oid for r in recs for oid in r["leg_odd_ids"]})
+    cur.execute(
+        """
+        SELECT odd_id, player_name, team, opponent, stat, line, direction,
+               odds, coverage_pct, p_over, ev_per_unit, trend_score,
+               opponent_adjustment, position
+        FROM mlb_scored_legs
+        WHERE odd_id = ANY(%s)
+        """,
+        (all_odd_ids,),
+    )
+    legs_by_oid = {row["odd_id"]: dict(row) for row in cur.fetchall()}
+
+    cur.close()
+    conn.close()
+
+    # Populate each recommendation's legs in insertion order
+    for rec in recs:
+        rec["legs"] = [
+            legs_by_oid[oid]
+            for oid in rec["leg_odd_ids"]
+            if oid in legs_by_oid
+        ]
+        rec.pop("leg_odd_ids")  # not needed in API response
+
+    return recs
+
+
+def update_recommendation_analysis(recommendation_id: int, analysis: str) -> None:
+    """Set the analysis text on an existing recommendation row."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE mlb_parlay_recommendations SET analysis = %s WHERE id = %s",
+        (analysis, recommendation_id),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
 init_db()

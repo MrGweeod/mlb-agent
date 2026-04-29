@@ -16,7 +16,7 @@ Called by:
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 import statsapi
 
@@ -36,7 +36,7 @@ from src.engine.parlay_builder import build_hybrid_parlays, _tier_params
 from src.pipelines.enrich_legs import enrich_legs
 from src.pipelines.trend_analysis import get_trend_signal
 from src.tracker.recommendation_logger import log_recommendations
-from src.utils.db import log_scored_legs, log_training_data_legs
+from src.utils.db import log_scored_legs, log_training_data_legs, save_parlay_recommendation
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -387,6 +387,87 @@ def _attach_trend_signals(legs: list[dict], season: int) -> None:
         leg.update(signals)
 
 
+# ── Recommendation generation ─────────────────────────────────────────────────
+
+def generate_recommendations(
+    qualifying_legs: list[dict],
+    max_recommendations: int = 5,
+) -> list[dict]:
+    """
+    Generate up to max_recommendations ranked parlays for daily storage.
+
+    Uses the same B&B search as build_hybrid_parlays (4–8 legs, +600–+1500),
+    then adds win_probability and edge_pct metrics and applies a diversity
+    filter so no single leg appears in more than 2 of the returned parlays.
+
+    Args:
+        qualifying_legs:    All scored legs from the pipeline (already have
+                            composite_score set from Step 8).
+        max_recommendations: Max parlays to return (default 5).
+
+    Returns:
+        List of dicts: [{legs, combined_odds, win_probability, edge_pct}]
+        ranked by edge_pct descending.
+    """
+    # Get up to 3× candidates to give the diversity filter room to work
+    candidates = build_hybrid_parlays(qualifying_legs, top_n=15)
+    if not candidates:
+        return []
+
+    # Enrich each candidate with win_probability and edge_pct
+    enriched = []
+    for p in candidates:
+        legs = p["legs"]
+
+        # win_probability: product of (composite_score / 100) × 100 → percentage
+        win_prob = 1.0
+        for leg in legs:
+            score = leg.get("composite_score") or 50.0
+            win_prob *= score / 100.0
+        win_prob_pct = round(win_prob * 100, 2)
+
+        # combined_odds: parse "+1200" → 1200
+        combined_odds = int(p["parlay_odds"].lstrip("+"))
+
+        # edge_pct = win_probability_pct × (combined_odds / 100) - 100
+        edge_pct = round(win_prob_pct * (combined_odds / 100) - 100, 2)
+
+        enriched.append({
+            "legs":            legs,
+            "combined_odds":   combined_odds,
+            "win_probability": win_prob_pct,
+            "edge_pct":        edge_pct,
+        })
+
+    # Rank by edge_pct descending
+    enriched.sort(key=lambda x: x["edge_pct"], reverse=True)
+
+    # Diversity filter: each leg may appear in at most 2 of the final parlays
+    leg_appearance: dict[str, int] = {}
+    result: list[dict] = []
+
+    for candidate in enriched:
+        odd_ids = [leg["odd_id"] for leg in candidate["legs"]]
+
+        # Tentatively count appearances
+        temp = dict(leg_appearance)
+        valid = True
+        for oid in odd_ids:
+            temp[oid] = temp.get(oid, 0) + 1
+            if temp[oid] > 2:
+                valid = False
+                break
+
+        if valid:
+            leg_appearance = temp
+            result.append(candidate)
+
+        if len(result) >= max_recommendations:
+            break
+
+    return result
+
+
 # ── Public pipeline function ──────────────────────────────────────────────────
 
 def run_pipeline() -> tuple[list[dict], str]:
@@ -563,6 +644,33 @@ def run_pipeline() -> tuple[list[dict], str]:
     except Exception as _hc_err:
         print(f"  [health] Health check failed: {_hc_err}")
 
+    # ── Step 9: Generate and save recommendations ─────────────────────────────
+    print("\n[9/9] Generating parlay recommendations...")
+    recommendations = generate_recommendations(qualifying_legs)
+
+    run_time = datetime.now()
+    for rank, rec in enumerate(recommendations, start=1):
+        try:
+            save_parlay_recommendation({
+                "recommendation_date": date.today(),
+                "pipeline_run_time":   run_time,
+                "rank":                rank,
+                "leg_odd_ids":         [leg["odd_id"] for leg in rec["legs"]],
+                "combined_odds":       rec["combined_odds"],
+                "win_probability":     rec["win_probability"],
+                "edge_pct":            rec["edge_pct"],
+            })
+        except Exception as _rec_err:
+            print(f"  [recommendations] failed to save rank {rank}: {_rec_err}")
+
+    if recommendations:
+        print(
+            f"  Saved {len(recommendations)} recommendation(s) "
+            f"(rank 1 edge: {recommendations[0]['edge_pct']:.1f}%)"
+        )
+    else:
+        print("  No recommendations generated")
+
     if not parlays:
         print("  No valid parlays found. Exiting.")
         return [], ""
@@ -604,6 +712,20 @@ def run_pipeline() -> tuple[list[dict], str]:
 def run():
     """CLI entry point — calls run_pipeline() and prints output."""
     run_pipeline()
+
+
+# ── Testing notes ─────────────────────────────────────────────────────────────
+# To test the recommendations system:
+#   1. Run the SQL migration:  sql/create_recommendations_table.sql
+#      (paste into Supabase SQL Editor and execute)
+#   2. Run the pipeline:       python main.py
+#      Recommendations are saved at Step 9 — check the Railway logs for:
+#      "Saved N recommendation(s) (rank 1 edge: X.X%)"
+#   3. Verify DB rows:         SELECT * FROM mlb_parlay_recommendations ORDER BY rank;
+#   4. Hit the API:            GET http://localhost:PORT/api/recommendations
+#      Should return {"recommendations": [...]} with hydrated leg details.
+#   5. Test on-demand analysis: POST http://localhost:PORT/api/analyze-recommendation
+#      Body: {"recommendation_id": <id from step 3>}
 
 
 if __name__ == "__main__":
