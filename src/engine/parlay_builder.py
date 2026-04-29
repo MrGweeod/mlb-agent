@@ -36,7 +36,7 @@ def filter_and_tag_legs(scored_legs: list) -> list:
 
     Risky overs (allowed but capped at 1 per parlay via B&B constraint):
       hits over 0.5 with composite_score >= 65
-      pitcher strikeouts over 4.5+ with composite_score >= 65
+      strikeouts over 0.5 with composite_score >= 65
 
     All other overs are also blocked — only unders and the two risky-over
     categories pass, reflecting the 79.2% under vs 21.9% over hit split.
@@ -65,7 +65,7 @@ def filter_and_tag_legs(scored_legs: list) -> list:
             # Qualify risky overs
             is_risky = (
                 (stat == "hits" and line == 0.5 and score >= 65)
-                or (stat == "strikeouts" and line is not None and line >= 4.5 and score >= 65)
+                or (stat == "strikeouts" and line == 0.5 and score >= 65)
             )
             leg["is_risky_over"] = is_risky
 
