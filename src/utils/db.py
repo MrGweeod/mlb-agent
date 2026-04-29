@@ -1501,14 +1501,19 @@ def get_training_analytics_data() -> dict:
 
 def save_parlay_recommendation(recommendation: dict) -> int:
     """
-    Insert one row into mlb_parlay_recommendations and return its id.
+    Upsert one row into mlb_parlay_recommendations and return its id.
+
+    Uses ON CONFLICT (recommendation_date, rank) so re-running the pipeline
+    or triggering a manual regeneration overwrites the existing row rather than
+    inserting a duplicate.  Requires a UNIQUE constraint on those two columns
+    (see sql/add_recommendations_unique_constraint.sql).
 
     Args:
         recommendation: dict with keys:
             recommendation_date, pipeline_run_time, rank, leg_odd_ids (list),
             combined_odds, win_probability, edge_pct
     Returns:
-        The new row's serial id.
+        The row's serial id.
     """
     conn = get_conn()
     cur = conn.cursor()
@@ -1518,6 +1523,13 @@ def save_parlay_recommendation(recommendation: dict) -> int:
             (recommendation_date, pipeline_run_time, rank, leg_odd_ids,
              combined_odds, win_probability, edge_pct)
         VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (recommendation_date, rank)
+        DO UPDATE SET
+            leg_odd_ids      = EXCLUDED.leg_odd_ids,
+            combined_odds    = EXCLUDED.combined_odds,
+            win_probability  = EXCLUDED.win_probability,
+            edge_pct         = EXCLUDED.edge_pct,
+            pipeline_run_time = EXCLUDED.pipeline_run_time
         RETURNING id
         """,
         (

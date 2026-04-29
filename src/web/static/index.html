@@ -761,6 +761,27 @@
     color: var(--green);
   }
 
+  /* ── Regenerate button + timestamp ── */
+  .regenerate-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 12px;
+    padding: 5px 11px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-family: inherit;
+    display: block;
+    margin-bottom: 5px;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .regenerate-btn:hover:not(:disabled) { border-color: var(--green); color: var(--green); }
+  .regenerate-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .rec-timestamp { font-size: 11px; color: var(--muted); text-align: right; }
+  .rec-timestamp.fresh { color: var(--green); }
+  .rec-timestamp.stale { color: var(--yellow); }
+  .rec-timestamp.old   { color: var(--red); }
+
   /* ── Prompt modal ── */
   #overlay {
     display: none;
@@ -1022,12 +1043,15 @@
 
 <!-- ── Recommendations view ── -->
 <div id="recommendations">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;padding-top:4px">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;padding-top:4px">
     <div>
       <div style="font-size:17px;font-weight:700">Daily Parlay Picks</div>
       <div style="font-size:12px;color:var(--muted);margin-top:2px">Engine-selected parlays ranked by edge</div>
     </div>
-    <div id="rec-timestamp" style="font-size:11px;color:var(--muted);text-align:right"></div>
+    <div style="text-align:right">
+      <button id="regenerate-btn" class="regenerate-btn">Regenerate Now</button>
+      <div id="rec-timestamp" class="rec-timestamp"></div>
+    </div>
   </div>
   <div id="recommendations-container">
     <div class="center-msg">
@@ -1714,6 +1738,7 @@ document.getElementById('tab-legs').addEventListener('click', legsView);
 document.getElementById('tab-dashboard').addEventListener('click', dashView);
 document.getElementById('tab-training').addEventListener('click', trainingView);
 document.getElementById('tab-recommendations').addEventListener('click', recsView);
+document.getElementById('regenerate-btn').addEventListener('click', regenerateRecommendations);
 
 // ── Dashboard data fetching ───────────────────────────────────────────────────
 let dashData = null;
@@ -2194,22 +2219,65 @@ async function loadRecommendations() {
       container.innerHTML =
         '<div class="center-msg" style="padding:60px 24px">' +
         '<div>No picks yet — wait for the next pipeline run (9 AM / 12 PM / 5:30 PM ET)</div></div>';
-      document.getElementById('rec-timestamp').textContent = '';
+      updateTimestamp(null);
       return;
     }
 
     renderRecommendations(data.recommendations);
-
-    const first = data.recommendations[0];
-    if (first && first.generated_at) {
-      const ts = new Date(first.generated_at);
-      document.getElementById('rec-timestamp').textContent =
-        'Generated ' + ts.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
-    }
+    updateTimestamp(data.recommendations[0]?.generated_at);
   } catch (err) {
     console.error('loadRecommendations error:', err);
     container.innerHTML =
       '<div class="center-msg"><div style="color:var(--red)">Error loading picks: ' + esc(err.message) + '</div></div>';
+  }
+}
+
+function updateTimestamp(isoStr) {
+  const el = document.getElementById('rec-timestamp');
+  if (!isoStr) { el.textContent = ''; el.className = 'rec-timestamp'; return; }
+  const ts = new Date(isoStr);
+  const diffMs = Date.now() - ts.getTime();
+  const diffMin = Math.floor(diffMs / 60000);
+  let relStr;
+  if (diffMin < 1) relStr = 'just now';
+  else if (diffMin < 60) relStr = diffMin + 'm ago';
+  else {
+    const h = Math.floor(diffMin / 60);
+    const m = diffMin % 60;
+    relStr = m > 0 ? `${h}h ${m}m ago` : `${h}h ago`;
+  }
+  const timeStr = ts.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', timeZone: 'America/New_York'}) + ' ET';
+  el.textContent = 'Updated: ' + timeStr + ' (' + relStr + ')';
+  const diffHours = diffMs / 3600000;
+  el.className = 'rec-timestamp' + (diffHours < 1 ? ' fresh' : diffHours < 3 ? ' stale' : ' old');
+}
+
+async function regenerateRecommendations() {
+  const btn = document.getElementById('regenerate-btn');
+  btn.disabled = true;
+  btn.textContent = 'Generating…';
+  try {
+    const res = await fetch(
+      `/api/recommendations/regenerate?password=${encodeURIComponent(password)}`,
+      {method: 'POST'}
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    if (data.recommendations && data.recommendations.length > 0) {
+      renderRecommendations(data.recommendations);
+      updateTimestamp(data.recommendations[0].generated_at);
+    } else {
+      document.getElementById('recommendations-container').innerHTML =
+        '<div class="center-msg" style="padding:60px 24px">' +
+        '<div>No qualifying legs found for today.</div></div>';
+      updateTimestamp(null);
+    }
+  } catch (err) {
+    showToast('Regeneration failed: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Regenerate Now';
   }
 }
 

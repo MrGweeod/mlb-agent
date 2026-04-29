@@ -258,6 +258,67 @@ async def handle_recommendations(request: web.Request) -> web.Response:
         )
 
 
+async def handle_regenerate_recommendations(request: web.Request) -> web.Response:
+    """
+    Re-run recommendation generation using today's already-scored legs.
+
+    Fetches mlb_scored_legs for today (ET), filters to coverage >= 55%,
+    calls generate_recommendations(), UPSERTs the results, then returns
+    the freshly hydrated list from get_todays_recommendations().
+
+    Returns: {"success": true, "recommendations": [...]}
+    """
+    if not _check_auth(request):
+        return web.Response(
+            text=json.dumps({"error": "Unauthorized"}),
+            content_type="application/json",
+            status=401,
+        )
+
+    try:
+        from main import generate_recommendations
+        from src.utils.db import save_parlay_recommendation
+
+        today = datetime.now(_ET).date()
+        legs = get_scored_legs(str(today))
+
+        # Bridge DB field names → generate_recommendations() format
+        qualifying_legs = [
+            {**leg, "best_odds": leg.get("odds"), "best_line": leg.get("line")}
+            for leg in legs
+            if (leg.get("coverage_pct") or 0) >= 55
+        ]
+
+        loop = asyncio.get_event_loop()
+        recommendations = await loop.run_in_executor(
+            None, generate_recommendations, qualifying_legs
+        )
+
+        run_time = datetime.now()
+        for rank, rec in enumerate(recommendations, start=1):
+            save_parlay_recommendation({
+                "recommendation_date": today,
+                "pipeline_run_time":   run_time,
+                "rank":                rank,
+                "leg_odd_ids":         [leg["odd_id"] for leg in rec["legs"]],
+                "combined_odds":       rec["combined_odds"],
+                "win_probability":     rec["win_probability"],
+                "edge_pct":            rec["edge_pct"],
+            })
+
+        fresh = get_todays_recommendations()
+        return web.Response(
+            text=json.dumps({"success": True, "recommendations": fresh}, default=str),
+            content_type="application/json",
+        )
+    except Exception as exc:
+        return web.Response(
+            text=json.dumps({"error": str(exc)}),
+            content_type="application/json",
+            status=500,
+        )
+
+
 async def handle_analyze_recommendation(request: web.Request) -> web.Response:
     """
     Generate and persist Claude analysis for a specific recommendation.
@@ -381,6 +442,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/training-analytics", handle_training_analytics)
     app.router.add_post("/api/analyze", handle_analyze)
     app.router.add_get("/api/recommendations", handle_recommendations)
+    app.router.add_post("/api/recommendations/regenerate", handle_regenerate_recommendations)
     app.router.add_post("/api/analyze-recommendation", handle_analyze_recommendation)
     return app
 
