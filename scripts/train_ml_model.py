@@ -119,6 +119,7 @@ def train(retrain: bool = False) -> None:
         print("  Pass --retrain to force retraining.")
         return
 
+    from sklearn.calibration import CalibratedClassifierCV, calibration_curve
     from sklearn.ensemble import GradientBoostingClassifier
     from sklearn.model_selection import train_test_split
     from sklearn.metrics import classification_report, roc_auc_score
@@ -158,8 +159,17 @@ def train(retrain: bool = False) -> None:
         X, y, test_size=0.2, random_state=42, stratify=y
     )
 
+    # Further split training data: 80% to train GBC, 20% to fit Platt scaling
+    X_train_final, X_cal, y_train_final, y_cal = train_test_split(
+        X_train, y_train, test_size=0.2, random_state=42, stratify=y_train
+    )
+    print(
+        f"[train_ml_model] Split: train={len(X_train_final):,}  "
+        f"cal={len(X_cal):,}  test={len(X_test):,}"
+    )
+
     print("\n[train_ml_model] Training GradientBoostingClassifier...")
-    model = GradientBoostingClassifier(
+    gbc = GradientBoostingClassifier(
         n_estimators=200,
         max_depth=5,
         learning_rate=0.1,
@@ -168,17 +178,34 @@ def train(retrain: bool = False) -> None:
         random_state=42,
         verbose=1,
     )
-    model.fit(X_train, y_train)
+    gbc.fit(X_train_final, y_train_final)
 
-    y_pred = model.predict(X_test)
-    y_prob = model.predict_proba(X_test)[:, 1]
-    auc    = roc_auc_score(y_test, y_prob)
+    # ── Platt Scaling calibration ─────────────────────────────────────────────
+    print("\n[train_ml_model] Calibrating with Platt Scaling...")
+    calibrated_model = CalibratedClassifierCV(gbc, method="sigmoid", cv="prefit")
+    calibrated_model.fit(X_cal, y_cal)
 
-    print("\n=== Model Evaluation ===")
+    # ── Evaluation: compare uncalibrated vs calibrated ────────────────────────
+    uncal_probs = gbc.predict_proba(X_test)[:, 1]
+    uncal_auc   = roc_auc_score(y_test, uncal_probs)
+
+    cal_probs = calibrated_model.predict_proba(X_test)[:, 1]
+    cal_auc   = roc_auc_score(y_test, cal_probs)
+
+    print("\n=== Calibration Comparison ===")
+    print(f"Uncalibrated AUC: {uncal_auc:.4f}")
+    print(f"Calibrated AUC:   {cal_auc:.4f}")
+
+    print("\n=== Model Evaluation (calibrated) ===")
+    y_pred = calibrated_model.predict(X_test)
     print(classification_report(y_test, y_pred, target_names=["miss", "hit"]))
-    print(f"ROC AUC: {auc:.4f}")
 
-    importances = model.feature_importances_
+    prob_true, prob_pred = calibration_curve(y_test, cal_probs, n_bins=10)
+    print("\nCalibration Curve (Predicted → Actual):")
+    for pt, pp in zip(prob_true, prob_pred):
+        print(f"  ML predicts {pp:.1%} → Actually hits {pt:.1%}")
+
+    importances = gbc.feature_importances_
     print("\nFeature importances (top 10):")
     ranked = sorted(zip(_FEATURE_NAMES, importances), key=lambda x: x[1], reverse=True)
     for name, imp in ranked[:10]:
@@ -186,19 +213,19 @@ def train(retrain: bool = False) -> None:
 
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
     payload = {
-        "model":           model,
+        "model":           calibrated_model,
         "feature_names":   _FEATURE_NAMES,
         "stat_categories": _STAT_CATEGORIES,
-        "auc":             round(auc, 4),
-        "n_train":         len(X_train),
+        "auc":             round(cal_auc, 4),
+        "n_train":         len(X_train_final),
         "hit_rate":        round(float(hit_pct), 2),
     }
     with open(model_path, "wb") as f:
         pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
 
     size_kb = os.path.getsize(model_path) / 1024
-    print(f"\n[train_ml_model] Model saved → {model_path}  ({size_kb:.0f} KB)")
-    print(f"  AUC={auc:.4f}  n_train={len(X_train):,}  hit_rate={hit_pct:.1f}%")
+    print(f"\n[train_ml_model] Calibrated model saved → {model_path}  ({size_kb:.0f} KB)")
+    print(f"  AUC={cal_auc:.4f}  n_train={len(X_train_final):,}  hit_rate={hit_pct:.1f}%")
 
 
 if __name__ == "__main__":
