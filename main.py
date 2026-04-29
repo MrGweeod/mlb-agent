@@ -27,7 +27,9 @@ from src.apis.mlb_stats import (
     get_transactions,
     is_il_placement,
 )
+from src.apis.pitcher_stats import get_pitcher_ranks
 from src.apis.sportsgameodds import get_todays_games, get_player_props
+from src.apis.team_stats import get_team_offensive_ranks
 from src.engine.claude_agent import analyze_parlays
 from src.engine.coverage import calculate_coverage, PROP_STAT_MAP
 from src.engine.parlay_builder import build_hybrid_parlays, _tier_params
@@ -295,7 +297,7 @@ def _find_qualifying_legs(
             "coverage_overall":    coverage.get("coverage_overall"),
             "coverage_vs_hand":    coverage.get("coverage_vs_hand"),
             "coverage_recent_10":  coverage.get("coverage_recent_10"),
-            "coverage_recent_4":   coverage.get("coverage_recent_4"),
+            "coverage_recent_5":   coverage.get("coverage_recent_5"),
             "games_total":         coverage.get("games_total"),
             "games_vs_hand":       coverage.get("games_vs_hand"),
             "games_recent":        coverage.get("games_recent"),
@@ -307,6 +309,50 @@ def _find_qualifying_legs(
         })
 
     return qualifying
+
+
+def _attach_pitcher_rank_signals(
+    legs: list[dict],
+    pitcher_ranks: dict,
+    team_offensive_ranks: dict,
+    opponent_map: dict[str, str],
+    abbr_to_team_id: dict[str, int],
+) -> None:
+    """
+    Attach pitcher quality and opponent offense rank fields to pitcher legs.
+
+    For each pitcher leg, looks up:
+      - pitcher_era_rank, pitcher_k9_rank, pitcher_whip_rank  (from pitcher_ranks)
+      - opponent_k_pct_rank, opponent_ba_rank, opponent_rpg_rank (from team_offensive_ranks)
+    and merges them into the leg dict in-place.
+
+    Non-pitcher legs are left unchanged.
+    """
+    for leg in legs:
+        position = leg.get("position", "")
+        stat     = leg.get("stat", "")
+        is_pitcher = (
+            position in _PITCHER_POSITIONS
+            or stat in {"inningsPitched", "hitsAllowed", "earnedRuns"}
+        )
+        if not is_pitcher:
+            continue
+
+        # Pitcher quality ranks
+        player_id = leg.get("player_id")
+        p_ranks = pitcher_ranks.get(player_id, {})
+        leg["pitcher_era_rank"]  = p_ranks.get("era_rank")
+        leg["pitcher_k9_rank"]   = p_ranks.get("k9_rank")
+        leg["pitcher_whip_rank"] = p_ranks.get("whip_rank")
+
+        # Opponent offense ranks
+        team_abbr    = leg.get("team", "")
+        opp_abbr     = opponent_map.get(team_abbr, "")
+        opp_team_id  = abbr_to_team_id.get(opp_abbr)
+        opp_ranks    = team_offensive_ranks.get(opp_team_id, {}) if opp_team_id else {}
+        leg["opponent_k_pct_rank"] = opp_ranks.get("k_pct_rank")
+        leg["opponent_ba_rank"]    = opp_ranks.get("ba_rank")
+        leg["opponent_rpg_rank"]   = opp_ranks.get("rpg_rank")
 
 
 def _attach_trend_signals(legs: list[dict], season: int) -> None:
@@ -464,6 +510,19 @@ def run_pipeline() -> tuple[list[dict], str]:
     print(
         f"  {len(qualifying_legs)} legs | "
         + " | ".join(f"{k}:{v}" for k, v in sorted(form_counts.items()))
+    )
+
+    # ── Pitcher quality + opponent offense ranks (pitcher legs only) ─────────
+    print("\n  Fetching pitcher quality and opponent offense ranks...")
+    pitcher_ranks       = get_pitcher_ranks(season)
+    team_offensive_ranks = get_team_offensive_ranks(season)
+    abbr_to_team_id = {v: k for k, v in team_id_to_abbr.items()}
+    _attach_pitcher_rank_signals(
+        qualifying_legs,
+        pitcher_ranks,
+        team_offensive_ranks,
+        opponent_map,
+        abbr_to_team_id,
     )
 
     # ── Step 8: Build Hybrid Parlays ──────────────────────────────────────────

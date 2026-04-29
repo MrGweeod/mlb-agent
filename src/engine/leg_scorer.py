@@ -13,12 +13,16 @@ HITTER scoring (3 signals):
     recent_10=None          → overall 0.55 / vs_hand 0.45
     both None               → overall 1.00
 
-PITCHER scoring (2 signals):
-  coverage_overall  × 0.60
-  coverage_recent_4 × 0.40
+PITCHER scoring (4 signals):
+  coverage_overall   × 0.35
+  coverage_recent_5  × 0.25
+  pitcher_quality    × 0.20
+  opponent_offense   × 0.20
 
-  Weight redistribution:
-    recent_4=None           → overall 1.00
+  Weight redistribution when a signal is missing:
+    pitcher_quality=None    → overall +0.10 / recent +0.10
+    opponent_offense=None   → overall +0.10 / recent +0.10
+    recent_5=None           → overall 1.00 (after other redistribution)
 
 All coverage values arrive as percentages (0–100) from calculate_coverage()
 in main.py, so composite_score is already in [0, 100] without an extra ×100.
@@ -81,22 +85,97 @@ def _score_hitter_leg(leg: dict) -> float:
     return round(score, 2)
 
 
+def _normalize_rank(rank: int, inverted: bool = False) -> float:
+    """
+    Convert a 1–30 rank to a [-1.0, 1.0] score.
+
+    rank=1 (best) → +1.0, rank=15 (avg) → 0.0, rank=30 (worst) → -1.0.
+    If inverted=True, flip the scale (rank=1 worst → -1.0, rank=30 best → +1.0).
+    """
+    # Linear interpolation: rank 1 → +1.0, rank 30 → -1.0
+    score = 1.0 - (rank - 1) * (2.0 / 29.0)
+    return -score if inverted else score
+
+
 def _score_pitcher_leg(leg: dict) -> float:
     """
-    Composite score for a pitcher prop using 2 coverage signals.
+    Composite score for a pitcher prop using 4 signals:
+      coverage_overall × 0.35, coverage_recent_5 × 0.25,
+      pitcher_quality  × 0.20, opponent_offense  × 0.20.
 
-    Falls back to coverage_pct if the Phase 2 fields are missing.
+    Falls back to coverage_pct if coverage_overall is missing.
+    Missing rank signals redistribute weight to coverage signals.
     """
     overall = leg.get("coverage_overall")
-    recent  = leg.get("coverage_recent_4")
+    recent  = leg.get("coverage_recent_5")
 
     if overall is None:
         return round(leg.get("coverage_pct") or 0.0, 2)
 
-    if recent is not None:
-        score = overall * 0.60 + recent * 0.40
+    stat = leg.get("stat", "")
+
+    # ── Pitcher quality signal ────────────────────────────────────────────────
+    pitcher_quality: float | None = None
+    if stat == "strikeouts":
+        rank = leg.get("pitcher_k9_rank")
+    elif stat == "hitsAllowed":
+        rank = leg.get("pitcher_whip_rank")
+    elif stat == "earnedRuns":
+        rank = leg.get("pitcher_era_rank")
     else:
+        rank = None
+
+    if rank is not None:
+        # Normalize rank to [-1, 1] then scale to [0, 100] around 50
+        pitcher_quality = 50.0 + _normalize_rank(rank) * 50.0
+
+    # ── Opponent offense signal ───────────────────────────────────────────────
+    opponent_offense: float | None = None
+    if stat == "strikeouts":
+        opp_rank = leg.get("opponent_k_pct_rank")
+        # High K% team = more Ks for pitcher → inverted (rank 30 = high K% = good)
+        inverted = True
+    elif stat == "hitsAllowed":
+        opp_rank = leg.get("opponent_ba_rank")
+        # Low BA = good for pitcher → inverted (rank 30 = low BA = good)
+        inverted = True
+    elif stat == "earnedRuns":
+        opp_rank = leg.get("opponent_rpg_rank")
+        # Low RPG = good for pitcher → inverted
+        inverted = True
+    else:
+        opp_rank = None
+        inverted = False
+
+    if opp_rank is not None:
+        opponent_offense = 50.0 + _normalize_rank(opp_rank, inverted=inverted) * 50.0
+
+    # ── Weight redistribution ─────────────────────────────────────────────────
+    w_overall  = 0.35
+    w_recent   = 0.25
+    w_pitcher  = 0.20
+    w_opponent = 0.20
+
+    if pitcher_quality is None:
+        w_overall  += 0.10
+        w_recent   += 0.10
+        w_pitcher   = 0.0
+
+    if opponent_offense is None:
+        w_overall  += 0.10
+        w_recent   += 0.10
+        w_opponent  = 0.0
+
+    # ── Compute score ─────────────────────────────────────────────────────────
+    if recent is None:
+        # Collapse remaining weight onto overall
         score = overall
+    else:
+        score = overall * w_overall + recent * w_recent
+        if pitcher_quality is not None:
+            score += pitcher_quality * w_pitcher
+        if opponent_offense is not None:
+            score += opponent_offense * w_opponent
 
     return round(score, 2)
 
