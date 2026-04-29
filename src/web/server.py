@@ -282,6 +282,11 @@ async def handle_regenerate_recommendations(request: web.Request) -> web.Respons
         today = datetime.now(_ET).date()
         legs = get_scored_legs(str(today))
 
+        # Provide composite_score from coverage_pct so the parlay builder can
+        # rank and filter legs without a full pipeline run.
+        for leg in legs:
+            leg["composite_score"] = leg.get("coverage_pct") or 50.0
+
         # Bridge DB field names → generate_recommendations() format
         qualifying_legs = [
             {**leg, "best_odds": leg.get("odds"), "best_line": leg.get("line")}
