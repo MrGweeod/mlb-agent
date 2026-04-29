@@ -301,15 +301,21 @@ async def handle_regenerate_recommendations(request: web.Request) -> web.Respons
 
         run_time = datetime.now()
         for rank, rec in enumerate(recommendations, start=1):
-            save_parlay_recommendation({
-                "recommendation_date": today,
-                "pipeline_run_time":   run_time,
-                "rank":                rank,
-                "leg_odd_ids":         [leg["odd_id"] for leg in rec["legs"]],
-                "combined_odds":       rec["combined_odds"],
-                "win_probability":     rec["win_probability"],
-                "edge_pct":            rec["edge_pct"],
-            })
+            try:
+                save_parlay_recommendation({
+                    "recommendation_date": today,
+                    "pipeline_run_time":   run_time,
+                    "rank":                rank,
+                    "leg_odd_ids":         [leg["odd_id"] for leg in rec["legs"]],
+                    "combined_odds":       rec["combined_odds"],
+                    "win_probability":     rec["win_probability"],
+                    "edge_pct":            rec["edge_pct"],
+                })
+                print(f"[regenerate] Saved recommendation rank {rank}")
+            except Exception as e:
+                import traceback
+                print(f"[regenerate] Failed to save rank {rank}: {e}")
+                traceback.print_exc()
 
         fresh = get_todays_recommendations()
         return web.Response(
