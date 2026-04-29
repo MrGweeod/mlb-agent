@@ -668,6 +668,99 @@
     transition: opacity 0.2s;
   }
 
+  /* ── Recommendations page ── */
+  #recommendations {
+    display: none;
+    padding: 12px 12px 60px;
+    max-width: 900px;
+    margin: 0 auto;
+  }
+  .rec-card {
+    border-radius: 10px;
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+  .rec-card.best-bet {
+    border: 2px solid var(--green);
+    background: rgba(34, 197, 94, 0.04);
+  }
+  .rec-card.alternate {
+    border: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .rec-best-label {
+    color: var(--green);
+    font-weight: 700;
+    font-size: 12px;
+    margin-bottom: 10px;
+  }
+  .rec-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 14px;
+  }
+  .rec-title { font-size: 17px; font-weight: 700; }
+  .rec-leg-count { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .rec-odds { font-size: 22px; font-weight: 800; color: var(--green); }
+  .rec-meta { font-size: 11px; color: var(--muted); text-align: right; margin-top: 2px; }
+  .rec-legs { margin-bottom: 14px; }
+  .rec-leg-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 7px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+    gap: 8px;
+  }
+  .rec-leg-row:last-child { border-bottom: none; }
+  .rec-leg-left { flex: 1; min-width: 0; }
+  .rec-leg-player { font-weight: 600; }
+  .rec-leg-team { color: var(--muted); font-size: 11px; margin-left: 6px; }
+  .rec-leg-prop { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .rec-leg-right { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+  .rec-leg-odds { color: var(--muted); font-size: 12px; }
+  .rec-leg-cov { color: var(--green); font-size: 12px; font-weight: 600; }
+  .rec-analysis {
+    padding: 12px 14px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 12px;
+    font-size: 13px;
+    line-height: 1.6;
+    display: none;
+  }
+  .rec-analysis-label {
+    color: var(--green);
+    font-weight: 700;
+    font-size: 11px;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+  .rec-actions { display: flex; gap: 8px; }
+  .rec-btn {
+    flex: 1;
+    padding: 10px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  .rec-btn:active { opacity: 0.7; }
+  .rec-btn-secondary {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+  }
+  .rec-btn-primary {
+    background: var(--bg);
+    border: 1px solid var(--green);
+    color: var(--green);
+  }
+
   /* ── Prompt modal ── */
   #overlay {
     display: none;
@@ -748,6 +841,7 @@
     <button class="tab-btn active" id="tab-legs">Legs</button>
     <button class="tab-btn" id="tab-dashboard">Dashboard</button>
     <button class="tab-btn" id="tab-training">Training</button>
+    <button class="tab-btn" id="tab-recommendations">Picks</button>
   </div>
 
   <div class="filters" id="position-filters">
@@ -922,6 +1016,23 @@
         <span class="dash-section-sub">ML feature completeness % · last 7 days</span>
       </div>
       <div id="train-features"><div class="dash-empty">Loading…</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Recommendations view ── -->
+<div id="recommendations">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;padding-top:4px">
+    <div>
+      <div style="font-size:17px;font-weight:700">Daily Parlay Picks</div>
+      <div style="font-size:12px;color:var(--muted);margin-top:2px">Engine-selected parlays ranked by edge</div>
+    </div>
+    <div id="rec-timestamp" style="font-size:11px;color:var(--muted);text-align:right"></div>
+  </div>
+  <div id="recommendations-container">
+    <div class="center-msg">
+      <div class="spinner"></div>
+      <div>Loading picks…</div>
     </div>
   </div>
 </div>
@@ -1567,6 +1678,7 @@ function hideAll() {
   document.querySelector('.main-layout').style.display = 'none';
   document.getElementById('dashboard').style.display = 'none';
   document.getElementById('training').style.display = 'none';
+  document.getElementById('recommendations').style.display = 'none';
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
 }
 
@@ -1591,10 +1703,17 @@ const trainingView = () => {
   document.getElementById('tab-training').classList.add('active');
   if (password) fetchTrainingAnalytics();
 };
+const recsView = () => {
+  hideAll();
+  document.getElementById('recommendations').style.display = 'block';
+  document.getElementById('tab-recommendations').classList.add('active');
+  if (password) loadRecommendations();
+};
 
 document.getElementById('tab-legs').addEventListener('click', legsView);
 document.getElementById('tab-dashboard').addEventListener('click', dashView);
 document.getElementById('tab-training').addEventListener('click', trainingView);
+document.getElementById('tab-recommendations').addEventListener('click', recsView);
 
 // ── Dashboard data fetching ───────────────────────────────────────────────────
 let dashData = null;
@@ -2058,6 +2177,145 @@ function renderTrainFeatures(rows) {
     </tr>`).join('')}</tbody>
   </table></div>`;
 }
+
+// ── Recommendations ──────────────────────────────────────────────────────────
+let _recsRefreshTimer = null;
+
+async function loadRecommendations() {
+  const container = document.getElementById('recommendations-container');
+  container.innerHTML = '<div class="center-msg"><div class="spinner"></div><div>Loading picks…</div></div>';
+
+  try {
+    const res = await fetch(`/api/recommendations?password=${encodeURIComponent(password)}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    if (!data.recommendations || data.recommendations.length === 0) {
+      container.innerHTML =
+        '<div class="center-msg" style="padding:60px 24px">' +
+        '<div>No picks yet — wait for the next pipeline run (9 AM / 12 PM / 5:30 PM ET)</div></div>';
+      document.getElementById('rec-timestamp').textContent = '';
+      return;
+    }
+
+    renderRecommendations(data.recommendations);
+
+    const first = data.recommendations[0];
+    if (first && first.generated_at) {
+      const ts = new Date(first.generated_at);
+      document.getElementById('rec-timestamp').textContent =
+        'Generated ' + ts.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+    }
+  } catch (err) {
+    console.error('loadRecommendations error:', err);
+    container.innerHTML =
+      '<div class="center-msg"><div style="color:var(--red)">Error loading picks: ' + esc(err.message) + '</div></div>';
+  }
+}
+
+function renderRecommendations(recs) {
+  const container = document.getElementById('recommendations-container');
+
+  container.innerHTML = recs.map(rec => {
+    const isBest = rec.rank === 1;
+    const cardCls = isBest ? 'rec-card best-bet' : 'rec-card alternate';
+    const edgeStr = (rec.edge_pct >= 0 ? '+' : '') + rec.edge_pct.toFixed(1) + '%';
+    const edgeCls = rec.edge_pct >= 0 ? 'color:var(--green)' : 'color:var(--red)';
+
+    const legsHtml = (rec.legs || []).map(leg => {
+      const dir = (leg.direction === 'under') ? 'U' : 'O';
+      const propStr = statLabel(leg.stat) + ' ' + dir + ' ' + (leg.line != null ? leg.line : '?');
+      const cov = leg.coverage_pct != null ? leg.coverage_pct.toFixed(1) + '%' : '—';
+      return `
+        <div class="rec-leg-row">
+          <div class="rec-leg-left">
+            <div>
+              <span class="rec-leg-player">${esc(leg.player_name || '—')}</span>
+              <span class="rec-leg-team">${esc(leg.team || '')}</span>
+            </div>
+            <div class="rec-leg-prop">${esc(propStr)}</div>
+          </div>
+          <div class="rec-leg-right">
+            <span class="rec-leg-odds">${esc(String(leg.odds || '—'))}</span>
+            <span class="rec-leg-cov">${esc(cov)}</span>
+          </div>
+        </div>`;
+    }).join('');
+
+    return `
+      <div class="${cardCls}" data-rec-id="${rec.id}">
+        ${isBest ? '<div class="rec-best-label">BEST BET</div>' : ''}
+        <div class="rec-header">
+          <div>
+            <div class="rec-title">Parlay #${rec.rank}</div>
+            <div class="rec-leg-count">${(rec.legs || []).length} legs</div>
+          </div>
+          <div style="text-align:right">
+            <div class="rec-odds">+${rec.combined_odds}</div>
+            <div class="rec-meta">
+              ${rec.win_probability.toFixed(1)}% win
+              &nbsp;·&nbsp;
+              <span style="${edgeCls};font-weight:700">${edgeStr} edge</span>
+            </div>
+          </div>
+        </div>
+        <div class="rec-legs">${legsHtml}</div>
+        <div class="rec-analysis" id="rec-analysis-${rec.id}">
+          <div class="rec-analysis-label">Analysis</div>
+          <div id="rec-analysis-text-${rec.id}"></div>
+        </div>
+        <div class="rec-actions">
+          <button class="rec-btn rec-btn-secondary" onclick="viewLegsInBuilder(${rec.id})">
+            View in Builder
+          </button>
+          <button class="rec-btn rec-btn-primary" onclick="analyzeRecommendation(${rec.id})">
+            Analyze Parlay
+          </button>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+async function analyzeRecommendation(recId) {
+  const analysisDiv  = document.getElementById(`rec-analysis-${recId}`);
+  const analysisText = document.getElementById(`rec-analysis-text-${recId}`);
+  analysisDiv.style.display = 'block';
+  analysisText.innerHTML = '<span style="color:var(--muted)">Generating analysis…</span>';
+
+  try {
+    const res = await fetch('/api/analyze-recommendation', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${password}`,
+      },
+      body: JSON.stringify({ recommendation_id: recId }),
+    });
+    const data = await res.json();
+
+    if (data.analysis) {
+      analysisText.textContent = data.analysis;
+    } else {
+      analysisText.innerHTML = '<span style="color:var(--red)">Failed to generate analysis.</span>';
+    }
+  } catch (err) {
+    console.error('analyzeRecommendation error:', err);
+    analysisText.innerHTML = '<span style="color:var(--red)">Error: ' + esc(err.message) + '</span>';
+  }
+}
+
+function viewLegsInBuilder(recId) {
+  legsView();
+  showToast('Coming soon: load these legs into the builder');
+}
+
+// Auto-refresh recommendations every 5 minutes when the tab is visible
+setInterval(() => {
+  const recEl = document.getElementById('recommendations');
+  if (password && recEl && recEl.style.display !== 'none') {
+    loadRecommendations();
+  }
+}, 5 * 60 * 1000);
 
 // Init
 updatePanel();

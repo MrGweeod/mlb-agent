@@ -12,7 +12,7 @@ Pipeline:
   8. Parlay Builder    — hybrid anchor+swing construction
 
 Called by:
-  bot.py via src/bot/runner.py (async, background thread).
+  src/web/server.py scheduler (async, thread executor).
 """
 from __future__ import annotations
 
@@ -474,8 +474,8 @@ def run_pipeline() -> tuple[list[dict], str]:
     """
     Execute the full MLB parlay pipeline and return (parlays, analysis).
 
-    Called by src/bot/runner.py in a background thread. All console output
-    is visible in Railway logs.
+    Called by the web server scheduler in a background thread. All console
+    output is visible in Railway logs.
 
     Returns:
         (parlays, analysis) — parlays is a list of hybrid parlay dicts;

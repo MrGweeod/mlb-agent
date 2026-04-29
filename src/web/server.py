@@ -20,11 +20,13 @@ Environment variables:
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import json
 import pathlib
 import pytz
-from datetime import date, datetime
+from datetime import date, datetime, time as dtime
+from zoneinfo import ZoneInfo
 
 from aiohttp import web
 
@@ -383,17 +385,62 @@ def create_app() -> web.Application:
     return app
 
 
+_ET = ZoneInfo("America/New_York")
+_PIPELINE_SCHEDULE = [
+    dtime(9, 0),    # 9:00 AM ET
+    dtime(12, 0),   # 12:00 PM ET
+    dtime(17, 30),  # 5:30 PM ET
+]
+
+
+async def _pipeline_scheduler() -> None:
+    """
+    Background task that runs run_pipeline() at 9 AM, 12 PM, and 5:30 PM ET.
+
+    Computes the next scheduled time on each iteration, sleeps until then,
+    then runs the pipeline in a thread executor (it's synchronous/blocking).
+    """
+    from main import run_pipeline
+
+    while True:
+        now = datetime.now(_ET)
+        today = now.date()
+
+        # Find the next scheduled time today that hasn't passed yet
+        next_run = None
+        for t in _PIPELINE_SCHEDULE:
+            candidate = datetime.combine(today, t, tzinfo=_ET)
+            if candidate > now:
+                next_run = candidate
+                break
+
+        # All today's slots passed — schedule first slot tomorrow
+        if next_run is None:
+            import datetime as _dt
+            tomorrow = today + _dt.timedelta(days=1)
+            next_run = datetime.combine(tomorrow, _PIPELINE_SCHEDULE[0], tzinfo=_ET)
+
+        sleep_secs = (next_run - datetime.now(_ET)).total_seconds()
+        print(
+            f"[scheduler] next pipeline run at "
+            f"{next_run.strftime('%Y-%m-%d %H:%M ET')} "
+            f"(in {sleep_secs / 3600:.1f}h)"
+        )
+        await asyncio.sleep(max(sleep_secs, 1))
+
+        print(f"[scheduler] running pipeline at {datetime.now(_ET).strftime('%H:%M ET')}")
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, run_pipeline)
+        except Exception as exc:
+            print(f"[scheduler] pipeline error: {exc}")
+
+
 async def start_server() -> web.AppRunner:
     """
-    Start the aiohttp server and return the runner so the caller can clean it up.
+    Start the aiohttp server and pipeline scheduler.
 
-    The runner is attached to the existing asyncio event loop — call this from
-    an async context (e.g. bot's setup_hook or on_ready) so it shares the loop
-    with discord.py.
-
-    Usage in bot.py:
-        runner = await start_server()
-        # runner.cleanup() on shutdown if needed
+    Returns the AppRunner so the caller can clean it up on shutdown.
     """
     app = create_app()
     runner = web.AppRunner(app)
@@ -401,4 +448,20 @@ async def start_server() -> web.AppRunner:
     site = web.TCPSite(runner, "0.0.0.0", _PORT)
     await site.start()
     print(f"[web] Server started on port {_PORT}")
+
+    # Start the background pipeline scheduler
+    asyncio.ensure_future(_pipeline_scheduler())
+    print("[web] Pipeline scheduler started (9:00 AM / 12:00 PM / 5:30 PM ET)")
+
     return runner
+
+
+if __name__ == "__main__":
+    async def _main() -> None:
+        runner = await start_server()
+        try:
+            await asyncio.Event().wait()  # run until interrupted
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(_main())
