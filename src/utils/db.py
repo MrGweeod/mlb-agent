@@ -970,10 +970,7 @@ def get_scored_legs(run_date: str) -> list[dict]:
     cur.execute(
         """
         WITH ranked_legs AS (
-            SELECT id, player_name, team, opponent, stat, line, direction, odds,
-                   coverage_pct, p_over, ev_per_unit, trend_pass, trend_score,
-                   opponent_adjustment, position, in_parlay, result, actual_value,
-                   lineup_confirmed, last_updated, logged_at,
+            SELECT *,
                    ROW_NUMBER() OVER (
                        PARTITION BY player_name, stat
                        ORDER BY ev_per_unit DESC NULLS LAST,
@@ -982,10 +979,7 @@ def get_scored_legs(run_date: str) -> list[dict]:
             FROM mlb_scored_legs
             WHERE run_date = %s
         )
-        SELECT id, player_name, team, opponent, stat, line, direction, odds,
-               coverage_pct, p_over, ev_per_unit, trend_pass, trend_score,
-               opponent_adjustment, position, in_parlay, result, actual_value,
-               lineup_confirmed, last_updated, logged_at
+        SELECT *
         FROM ranked_legs
         WHERE rn = 1
         ORDER BY stat, ev_per_unit DESC NULLS LAST
