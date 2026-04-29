@@ -39,6 +39,80 @@ Discord Commands
 
 
 Current Status (Updated: April 23, 2026)
+
+## Major Architecture Changes (April 29, 2026)
+
+**⚠️ CRITICAL: The system was completely rebuilt April 29. The blueprint is now outdated.**
+
+### What Changed
+
+**1. Coverage Calculation - COMPLETE REWRITE**
+- **Old:** Single smooshed coverage value with penalties
+- **New:** 3 separate signals for hitters, 2 for pitchers
+- **File:** `src/engine/coverage.py` (218 lines added, 266 removed)
+
+**2. Composite Scoring - COMPLETE REWRITE**
+- **Old:** 5 factors (coverage 70%, EV 25%, trend 15%, opponent 15%, PA stability 5%)
+- **New:** Pure coverage-based (hitters: 3 signals, pitchers: 4 signals including pitcher quality)
+- **File:** `src/engine/leg_scorer.py` (158 lines added, 237 removed)
+
+**3. Pitcher Quality Signals - NEW**
+- **Added:** ERA/K9/WHIP rankings for pitchers
+- **Added:** Team K%/BA/RPG rankings for opponent offense
+- **Files:** `src/apis/pitcher_stats.py` (142 lines), `src/apis/team_stats.py` (128 lines)
+
+**4. Recommendations System - NEW**
+- **Added:** Backend generation (Step 9 in `main.py`)
+- **Added:** Database table `mlb_parlay_recommendations` (schema created, not run yet)
+- **Added:** API endpoints (`/api/recommendations`, `/api/analyze-recommendation`)
+- **Added:** Frontend "Picks" tab with Claude analysis
+- **Files:** `main.py` (+126 lines), `src/web/server.py` (+147 lines), `src/web/static/index.html` (+257 lines)
+
+**5. Discord Bot - REMOVED**
+- **Deleted:** `bot.py`, `src/bot/*`
+- **Moved:** Pipeline scheduler to `src/web/server.py`
+- **Impact:** Web app is now single source of truth
+
+**6. Data Pipeline - FIXED**
+- **Fixed:** Database CHECK constraint (now allows 'void')
+- **Fixed:** Player ID lookup (SGO string IDs → MLB numeric IDs)
+- **Impact:** 10K unresolved backlog cleared
+
+### Current Scoring Formulas
+
+**Hitters:**
+```python
+composite_score = (
+    coverage_overall × 0.40 +
+    coverage_vs_hand × 0.30 +
+    coverage_recent_10 × 0.30
+)
+```
+
+**Pitchers:**
+```python
+composite_score = (
+    coverage_overall × 0.35 +
+    coverage_recent_5 × 0.25 +
+    pitcher_quality × 0.20 +
+    opponent_offense × 0.20
+)
+```
+
+**Note:** These are NEW formulas as of April 29. Training data collected before this date used the old formula.
+
+### Web App Structure (4 Tabs)
+
+1. **Legs** - Interactive parlay builder
+2. **Dashboard** - Performance analytics (6 sections)
+3. **Training** - ML data quality monitoring (5 sections)
+4. **Picks** - Daily recommendations with Claude analysis (NEW)
+
+### Deployment Status
+
+**Railway:** ⚠️ Needs PYTHONPATH=/app environment variable (user fixing manually)
+**Database:** ⚠️ Run `sql/create_recommendations_table.sql` in Supabase SQL Editor
+
 ✅ Infrastructure Running
 
 Railway deployment: Live (mlb-agent project, 3 daily scheduled runs)
