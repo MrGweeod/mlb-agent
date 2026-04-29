@@ -25,7 +25,7 @@ import os
 import json
 import pathlib
 import pytz
-from datetime import date, datetime, time as dtime
+from datetime import date, datetime, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 
 from aiohttp import web
@@ -282,15 +282,44 @@ async def handle_regenerate_recommendations(request: web.Request) -> web.Respons
         today = datetime.now(_ET).date()
         legs = get_scored_legs(str(today))
 
+        # Filter out games that have already started (5-min grace window)
+        et_tz = pytz.timezone("America/New_York")
+        now_et = datetime.now(et_tz)
+        cutoff = now_et - timedelta(minutes=5)
+        active_legs = []
+        for leg in legs:
+            gst = leg.get("game_start_time")
+            if not gst:
+                active_legs.append(leg)
+                continue
+            try:
+                gt = datetime.strptime(gst, "%Y-%m-%d %H:%M:%S")
+                if et_tz.localize(gt) > cutoff:
+                    active_legs.append(leg)
+            except Exception:
+                active_legs.append(leg)
+
+        print(f"[regenerate] {len(legs)} legs → {len(active_legs)} upcoming after filtering started games")
+
+        if len(active_legs) < 4:
+            return web.Response(
+                text=json.dumps({
+                    "success": True,
+                    "recommendations": [],
+                    "message": f"Not enough legs with upcoming games (need 4+, found {len(active_legs)})",
+                }),
+                content_type="application/json",
+            )
+
         # Provide composite_score from coverage_pct so the parlay builder can
         # rank and filter legs without a full pipeline run.
-        for leg in legs:
+        for leg in active_legs:
             leg["composite_score"] = leg.get("coverage_pct") or 50.0
 
         # Bridge DB field names → generate_recommendations() format
         qualifying_legs = [
             {**leg, "best_odds": leg.get("odds"), "best_line": leg.get("line")}
-            for leg in legs
+            for leg in active_legs
             if (leg.get("coverage_pct") or 0) >= 55
         ]
 

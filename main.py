@@ -16,8 +16,9 @@ Called by:
 """
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
+import pytz
 import statsapi
 
 from src.apis.mlb_stats import (
@@ -580,6 +581,28 @@ def run_pipeline() -> tuple[list[dict], str]:
     # ── Step 6: Opponent Enrichment (pitcher profiles) ────────────────────────
     print("\n[6/8] Enriching legs with pitcher matchup profiles...")
     qualifying_legs = enrich_legs(qualifying_legs, pitcher_id_map, opponent_map, season)
+
+    # ── Filter: remove legs whose games have already started ─────────────────
+    _et_tz = pytz.timezone("America/New_York")
+    _now_et = datetime.now(_et_tz)
+    _cutoff = _now_et - timedelta(minutes=5)
+    upcoming_legs = []
+    for _leg in qualifying_legs:
+        _gst = _leg.get("game_start_time")
+        if not _gst:
+            upcoming_legs.append(_leg)  # keep legs with no time data
+            continue
+        try:
+            _gt = datetime.strptime(_gst, "%Y-%m-%d %H:%M:%S")
+            if _et_tz.localize(_gt) > _cutoff:
+                upcoming_legs.append(_leg)
+        except Exception:
+            upcoming_legs.append(_leg)
+    print(
+        f"  [filter_started] {len(qualifying_legs)} legs → "
+        f"{len(upcoming_legs)} upcoming (filtered {len(qualifying_legs) - len(upcoming_legs)} started)"
+    )
+    qualifying_legs = upcoming_legs
 
     # ── Step 7: Trend Signals ─────────────────────────────────────────────────
     print("\n[7/8] Computing trend signals...")
