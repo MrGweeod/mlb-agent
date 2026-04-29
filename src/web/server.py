@@ -330,6 +330,43 @@ async def handle_regenerate_recommendations(request: web.Request) -> web.Respons
         )
 
 
+async def handle_train_model(request: web.Request) -> web.Response:
+    """Trigger ML model training (admin only — requires ADMIN_SECRET)."""
+    secret          = request.rel_url.query.get("secret", "")
+    expected_secret = os.getenv("ADMIN_SECRET", "change_me_in_railway")
+
+    if secret != expected_secret:
+        return web.Response(
+            text=json.dumps({"error": "Invalid secret"}),
+            content_type="application/json",
+            status=403,
+        )
+
+    try:
+        from scripts.train_ml_model import train
+
+        def run_training():
+            train(retrain=True)
+
+        loop = asyncio.get_event_loop()
+        asyncio.ensure_future(loop.run_in_executor(None, run_training))
+
+        return web.Response(
+            text=json.dumps({
+                "status":     "Training started",
+                "message":    "Check Railway logs for progress. Training takes 2-5 minutes.",
+                "model_path": "models/leg_scorer_v2.pkl",
+            }),
+            content_type="application/json",
+        )
+    except Exception as exc:
+        return web.Response(
+            text=json.dumps({"error": str(exc)}),
+            content_type="application/json",
+            status=500,
+        )
+
+
 async def handle_analyze_recommendation(request: web.Request) -> web.Response:
     """
     Generate and persist Claude analysis for a specific recommendation.
@@ -455,6 +492,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/recommendations", handle_recommendations)
     app.router.add_post("/api/recommendations/regenerate", handle_regenerate_recommendations)
     app.router.add_post("/api/analyze-recommendation", handle_analyze_recommendation)
+    app.router.add_get("/api/train-model", handle_train_model)
     return app
 
 
