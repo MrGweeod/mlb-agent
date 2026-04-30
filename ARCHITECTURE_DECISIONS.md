@@ -1,10 +1,427 @@
-markdown# MLB Parlay Agent — Architecture Decisions
+# MLB Parlay Agent — Architecture Decisions
 
-**Last Updated:** April 29, 2026
+**Last Updated:** April 29, 2026 (Evening)
 
 ---
 
-## Complete System Rebuild (April 29, 2026)
+## ML Model Replaces Heuristic Scoring (April 29, 2026 - Evening)
+
+**Decision:** Migrate from hand-coded composite scoring to machine learning-based predictions.
+
+**Context:**
+- Heuristic scoring used arbitrary weights (40% overall + 30% vs_hand + 30% recent for hitters)
+- No way to validate if these weights were optimal
+- 77K training samples sitting unused while heuristics guessed at patterns
+- Claude's analysis critiqued ML-generated parlays as "weak" - suggested model wasn't using data
+
+**The Shift:**
+
+**Old System (Heuristic):**
+```python
+# For hitters
+composite_score = (
+    coverage_overall × 0.40 +
+    coverage_vs_hand × 0.30 +
+    coverage_recent_10 × 0.30
+)
+
+# For pitchers  
+composite_score = (
+    coverage_overall × 0.35 +
+    coverage_recent_5 × 0.25 +
+    pitcher_quality × 0.20 +
+    opponent_offense × 0.20
+)
+```
+
+**New System (ML):**
+```python
+# Load trained model
+model = pickle.load(open('models/leg_scorer_v2.pkl'))
+
+# Extract 19 features per leg
+features = extract_features(leg)
+
+# Predict P(hit) using learned patterns from 77K outcomes
+prob_hit = model.predict_proba([features])[0][1]
+
+# Set composite score
+composite_score = prob_hit × 100
+```
+
+**Why ML is Better:**
+
+1. **Data-Driven:** Learns from 77K actual outcomes, not assumptions
+2. **Adaptive:** Weights adjust automatically as data changes
+3. **Feature Discovery:** Model learned direction (over/under) is 78% of signal - we didn't know that!
+4. **No Bias:** Doesn't assume which stats are "poison" - learns from outcomes
+5. **Measurable:** AUC of 0.8532 means 85% discrimination ability
+
+**Implementation:**
+
+**Created:**
+- `scripts/train_ml_model.py` - Training pipeline
+- `src/engine/ml_leg_scorer.py` - Inference module
+- `/api/train-model` endpoint - Browser-triggered training
+- `USE_ML_SCORING` environment variable - Feature flag
+
+**Modified:**
+- `src/engine/parlay_builder.py` - Routes to ML scorer when flag is true
+
+**Feature Set (19 features):**
+- **Numeric (7):** coverage_overall, coverage_vs_hand, coverage_recent_10, coverage_recent_5, pitcher_quality, opponent_offense, line
+- **Categorical (12):** direction (over/under), stat one-hots (hits, strikeouts, rbi, etc.)
+
+**Model Details:**
+- **Algorithm:** GradientBoostingClassifier
+- **Hyperparameters:** 200 trees, max depth 5, learning rate 0.1
+- **Training:** 49,296 samples (64% of 77K total)
+- **Calibration:** 12,324 samples (16%)
+- **Test:** 15,405 samples (20%)
+
+**Result:** Production now uses ML predictions. Heuristic scoring preserved in code but unused.
+
+**Alternative considered:** Hybrid approach (ML + heuristic ensemble)
+**Rejected because:** Pure ML performed better and is simpler to maintain
+
+---
+
+## Platt Scaling for Probability Calibration (April 29, 2026 - Evening)
+
+**Decision:** Add Platt Scaling to calibrate ML probability predictions.
+
+**Context:**
+- Initial ML model had ROC AUC 0.8538 (excellent discrimination)
+- But probabilities were **overconfident**
+- Predictions of 70% actually hit ~60% of the time (10pp error)
+- This made edge calculations unreliable
+- Claude's analysis said "weak parlay" despite ML saying "+105% edge"
+
+**The Problem: Discrimination vs Calibration**
+
+**ROC AUC measures discrimination:** Can the model separate hits from misses?
+- AUC 0.8538 = model is very good at ranking legs by likelihood of hitting
+
+**But this doesn't mean probabilities are accurate:**
+- Model might say 70% for legs that actually hit 60%
+- Or say 50% for legs that actually hit 45%
+- Probabilities need **calibration**
+
+**The Solution: Platt Scaling**
+
+Platt Scaling fits a logistic regression on top of model predictions to map them to true probabilities.
+
+**How it works:**
+
+1. Split training data: 64% train / 16% calibration / 20% test
+2. Train GradientBoostingClassifier on 64% split
+3. Get predictions on 16% calibration set
+4. Fit LogisticRegression: `calibrated_prob = sigmoid(a × raw_prob + b)`
+5. Wrap both models in `CalibratedModel` class
+6. Use calibrated probabilities in production
+
+**Implementation:**
+
+```python
+# In scripts/train_ml_model.py
+
+# Train base model
+gbc = GradientBoostingClassifier(...)
+gbc.fit(X_train_final, y_train_final)
+
+# Get predictions on calibration set
+uncal_probs = gbc.predict_proba(X_cal)[:, 1]
+
+# Fit Platt scaler
+from sklearn.linear_model import LogisticRegression
+platt_model = LogisticRegression()
+platt_model.fit(uncal_probs.reshape(-1, 1), y_cal)
+
+# Wrap in calibrated model
+class CalibratedModel:
+    def __init__(self, base_model, calibrator):
+        self.base_model = base_model
+        self.calibrator = calibrator
+    
+    def predict_proba(self, X):
+        base_probs = self.base_model.predict_proba(X)[:, 1].reshape(-1, 1)
+        cal_probs = self.calibrator.predict_proba(base_probs)[:, 1]
+        return np.column_stack([1 - cal_probs, cal_probs])
+
+calibrated_model = CalibratedModel(gbc, platt_model)
+```
+
+**Why Manual Implementation?**
+
+Initially tried `sklearn.calibration.CalibratedClassifierCV` with `cv='prefit'`, but:
+- Newer sklearn versions don't support `cv='prefit'` parameter
+- API changed between versions
+- Manual implementation works across all sklearn versions
+- Also gives us full control over the calibration process
+
+**Critical Detail: Module-Level Class**
+
+`CalibratedModel` must be defined at **module level**, not inside `train()` function:
+- Pickle saves class reference: `scripts.train_ml_model.CalibratedModel`
+- If defined inside function: `train.<locals>.CalibratedModel` (unpicklable)
+- `ml_leg_scorer.py` loads model → needs to find the class
+
+**Results:**
+
+**Before Calibration:**
+ML predicts 70% → Actually hits 60% (10pp error)
+ML predicts 55% → Actually hits 50% (5pp error)
+
+**After Calibration:**
+ML predicts 76.1% → Actually hits 72.1% (4pp error)
+ML predicts 15.6% → Actually hits 17.6% (2pp error)
+
+**Calibration Curve (10 bins):**
+- Low probs (15-20%): Slightly underconfident (+2pp)
+- Mid probs (40-60%): Well calibrated (±1pp)
+- High probs (70-80%): Slightly overconfident (-4pp)
+
+**Trade-off:**
+- Uncalibrated AUC: 0.8538
+- Calibrated AUC: 0.8532 (tiny drop expected)
+- **Worth it:** Accurate probabilities > raw discrimination for betting
+
+**Alternative considered:** Isotonic regression (non-parametric calibration)
+**Rejected because:** Platt Scaling is simpler and works well for tree-based models
+
+---
+
+## Game Time Filtering is Critical (April 29, 2026 - Evening)
+
+**Decision:** Filter out started/finished games in both regenerate endpoint and scheduled pipeline.
+
+**Context:**
+- User reported: "Recommendations include players from games that already started"
+- Critical bug: betting on finished games is nonsensical
+- Previous sessions supposedly addressed this, but implementation was missing
+
+**Root Cause:**
+- `get_scored_legs()` fetches all legs for today's date
+- No filter on `game_start_time` field
+- Parlay builder was including legs from 1PM games at 5PM
+
+**Implementation:**
+
+**Two filter points needed:**
+
+**1. Regenerate Endpoint (`src/web/server.py`):**
+```python
+# After fetching legs
+et_tz = pytz.timezone("America/New_York")
+now_et = datetime.now(et_tz)
+cutoff = now_et - timedelta(minutes=5)
+
+active_legs = []
+for leg in legs:
+    gst = leg.get("game_start_time")
+    if not gst:
+        active_legs.append(leg)  # Keep if no time
+        continue
+    
+    try:
+        gt = datetime.strptime(gst, "%Y-%m-%d %H:%M:%S")
+        if et_tz.localize(gt) > cutoff:
+            active_legs.append(leg)
+    except Exception:
+        active_legs.append(leg)  # Keep if parse fails
+
+# Use active_legs for parlay building
+```
+
+**2. Scheduled Pipeline (`main.py`):**
+```python
+# After Step 6 (enrich legs), before Step 7 (trend signals)
+et_tz = pytz.timezone("America/New_York")
+now_et = datetime.now(et_tz)
+cutoff = now_et - timedelta(minutes=5)
+
+upcoming_legs = []
+for leg in enriched_legs:
+    gst = leg.get("game_start_time")
+    if not gst:
+        upcoming_legs.append(leg)
+        continue
+    
+    try:
+        gt = datetime.strptime(gst, "%Y-%m-%d %H:%M:%S")
+        if et_tz.localize(gt) > cutoff:
+            upcoming_legs.append(leg)
+    except Exception:
+        upcoming_legs.append(leg)
+
+print(f"[filter_started] {len(enriched_legs)} legs → {len(upcoming_legs)} upcoming")
+enriched_legs = upcoming_legs
+```
+
+**Key Design Decisions:**
+
+**5-minute grace period:**
+- `cutoff = now - 5 minutes`
+- Prevents edge cases where game starts exactly at filter time
+- User has 5 minutes after first pitch to regenerate
+
+**Keep legs with no game_start_time:**
+- Don't silently drop legs if field is missing
+- Safer to include than exclude without certainty
+- Logs will show how many have missing times
+
+**Field name: `game_start_time` (not `game_time`):**
+- Verified via database query
+- Set by enrichment step in pipeline
+- Format: `"YYYY-MM-DD HH:MM:SS"` in ET timezone
+
+**Logging:**
+[regenerate] 61 legs → 43 upcoming after filtering started games
+[filter_started] 87 legs → 61 upcoming (filtered 26 started)
+
+**Why This Wasn't Caught Earlier:**
+- Testing done during morning hours when all games were upcoming
+- Bug only surfaces in afternoon/evening when early games finish
+- Manual testing didn't cover multi-time-slot scenarios
+
+**Alternative considered:** Frontend-only filtering
+**Rejected because:** Backend must enforce this - can't trust frontend alone
+
+---
+
+## "Regenerate Now" On-Demand Parlay Generation (April 29, 2026 - Evening)
+
+**Decision:** Add button to generate fresh parlays without waiting for scheduled pipeline runs.
+
+**Context:**
+- Scheduled pipeline runs at 9AM/12PM/5:30PM only
+- Users want to see parlays at other times (e.g., 3PM before late games)
+- Original Picks tab showed "wait for next pipeline run" message
+
+**Requirements:**
+1. Generate 5 parlays using today's legs from database
+2. Use same parlay builder logic as scheduled pipeline
+3. Filter out started games (critical!)
+4. Update recommendations table (don't duplicate)
+5. Show timestamp of last regeneration
+
+**Implementation:**
+
+**Backend Endpoint (`src/web/server.py`):**
+```python
+@routes.post("/api/recommendations/regenerate")
+async def handle_regenerate_recommendations(request):
+    # Fetch today's scored legs
+    today = datetime.now(_ET).date()
+    legs = get_scored_legs(str(today))
+    
+    # Filter started games
+    active_legs = [leg for leg in legs if game_not_started(leg)]
+    
+    # Calculate composite_score from coverage_pct
+    # (Temp fix until pipeline populates it)
+    for leg in active_legs:
+        leg["composite_score"] = leg.get("coverage_pct") or 50.0
+    
+    # Build parlays using same logic as pipeline
+    qualifying_legs = [
+        {**leg, "best_odds": leg["odds"], "best_line": leg["line"]}
+        for leg in active_legs if leg.get("coverage_pct", 0) >= 55
+    ]
+    
+    recommendations = generate_recommendations(qualifying_legs)
+    
+    # Save to database (UPSERT on date+rank)
+    for rec in recommendations:
+        save_parlay_recommendation(rec)
+    
+    return {"success": True, "recommendations": recommendations}
+```
+
+**Database UPSERT:**
+```sql
+INSERT INTO mlb_parlay_recommendations (...)
+VALUES (...)
+ON CONFLICT (recommendation_date, rank)
+DO UPDATE SET
+    leg_odd_ids = EXCLUDED.leg_odd_ids,
+    combined_odds = EXCLUDED.combined_odds,
+    ...
+```
+
+**Frontend Button (`src/web/static/index.html`):**
+```javascript
+async function regenerateRecommendations() {
+    const btn = document.getElementById('regenerate-btn');
+    btn.disabled = true;
+    btn.textContent = 'Generating...';
+    
+    const resp = await fetch('/api/recommendations/regenerate', {
+        method: 'POST'
+    });
+    
+    const data = await resp.json();
+    
+    if (data.success) {
+        await loadRecommendations();  // Refresh display
+        updateTimestamp();
+    }
+    
+    btn.disabled = false;
+    btn.textContent = 'Regenerate Now';
+}
+```
+
+**Timestamp Display:**
+```javascript
+function updateTimestamp() {
+    const now = new Date();
+    const elem = document.getElementById('rec-timestamp');
+    elem.textContent = `Updated: ${now.toLocaleTimeString()} ET`;
+    
+    // Color-code freshness
+    const age = Date.now() - lastUpdateTime;
+    if (age < 5 * 60 * 1000) {
+        elem.className = 'fresh';  // Green
+    } else if (age < 30 * 60 * 1000) {
+        elem.className = 'stale';  // Yellow
+    } else {
+        elem.className = 'old';    // Red
+    }
+}
+```
+
+**Key Decisions:**
+
+**UPSERT instead of INSERT:**
+- Recommendations table has UNIQUE constraint on (recommendation_date, rank)
+- Multiple regenerations per day overwrite previous recommendations
+- Tracks the "current best 5 parlays" not historical versions
+
+**Composite score from coverage_pct:**
+- Database legs don't have composite_score populated yet
+- Temporary workaround: `composite_score = coverage_pct`
+- **Not ideal but functional** - scheduled pipeline will populate it properly
+- Prevents parlay builder from recalculating scores
+
+**Skip score recalculation in parlay builder:**
+```python
+if not all(leg.get("composite_score") for leg in eligible):
+    # Only score if missing
+    score_legs_composite(eligible, ...)
+```
+
+**Why This Matters:**
+- Without this check, parlay builder overwrites our coverage_pct values
+- Recalculation uses full heuristic formula (pitcher quality, trend, etc.)
+- We want to preserve the simple coverage_pct → composite_score mapping for regeneration
+
+**Alternative considered:** Always run full pipeline for regeneration
+**Rejected because:** Too slow (~2 minutes), overkill for simple refresh
+
+---
+
+## Complete System Rebuild (April 29, 2026 - Morning)
 
 **Decision:** Rebuild coverage calculation, composite scoring, and delivery system from scratch based on validation data showing complete formula failure.
 
@@ -38,7 +455,7 @@ markdown# MLB Parlay Agent — Architecture Decisions
 
 ---
 
-## Raw Coverage Signals (April 29, 2026)
+## Raw Coverage Signals (April 29, 2026 - Morning)
 
 **Decision:** Replace smooshed coverage formula with separate raw signals that can be independently validated and weighted.
 
@@ -60,7 +477,7 @@ coverage = (
 - Validation impossible (can't test individual signals)
 - Result: 28pp error (70% predicted → 46.7% actual)
 
-**New system (CURRENT):**
+**New system (CURRENT - but replaced by ML):**
 
 **For hitters:**
 - `coverage_overall` — Season hit rate (no adjustments)
@@ -90,9 +507,11 @@ coverage = (
 **Alternative considered:** Keep smooshed formula, add more penalties
 **Rejected because:** Validation data showed it was fundamentally broken, not just poorly tuned
 
+**NOTE:** This heuristic system was replaced by ML model (April 29 evening), but the raw coverage signals are still used as ML features.
+
 ---
 
-## Pure Coverage-Based Composite Scoring (April 29, 2026)
+## Pure Coverage-Based Composite Scoring (April 29, 2026 - Morning)
 
 **Decision:** Remove all non-predictive factors from composite scoring and use only coverage signals.
 
@@ -110,7 +529,7 @@ coverage = (
 - Opponent: no correlation (46.5% across all buckets)
 - PA stability: never tested, likely noise
 
-**New system (CURRENT):**
+**New system (CURRENT - but replaced by ML):**
 
 **Hitters (3 factors):**
 ```python
@@ -156,9 +575,11 @@ composite_score = (
 **Alternative considered:** Keep all 5 factors, retune weights
 **Rejected because:** Trend/opponent/PA showed zero or negative correlation - no amount of tuning fixes that
 
+**NOTE:** This heuristic system was entirely replaced by ML model (April 29 evening). The coverage signals are now used as ML features instead of being weighted manually.
+
 ---
 
-## Pitcher Quality Signals (April 29, 2026)
+## Pitcher Quality Signals (April 29, 2026 - Morning)
 
 **Decision:** Add pitcher ERA/K9/WHIP rankings and opponent team offensive rankings as factors for pitcher prop scoring.
 
@@ -207,9 +628,11 @@ composite_score = (
 **Alternative considered:** Use raw ERA/K9/WHIP values instead of ranks
 **Rejected because:** Ranks are more stable across season (ERA 3.50 in April ≠ ERA 3.50 in September)
 
+**NOTE:** These signals are now used as ML features (pitcher_quality, opponent_offense) rather than being manually weighted in heuristic scoring.
+
 ---
 
-## Recommendations System Architecture (April 29, 2026)
+## Recommendations System Architecture (April 29, 2026 - Morning)
 
 **Decision:** Build persistent storage for 5 daily parlay recommendations with on-demand Claude analysis.
 
@@ -250,7 +673,7 @@ CREATE TABLE mlb_parlay_recommendations (
 ```
 
 **Generation algorithm:**
-1. Branch-and-Bound finds top 20 parlay combinations (4-8 legs, +600 to +1500 odds)
+1. Branch-and-Bound finds top 20 parlay combinations (4-8 legs, +1000 to +1500 odds)
 2. Calculate `win_probability = product(coverage/100 for each leg)`
 3. Calculate `edge_pct = (win_prob × decimal_odds - 1) × 100`
 4. Sort by edge_pct descending
@@ -265,187 +688,16 @@ CREATE TABLE mlb_parlay_recommendations (
 - Picks tab shows 5 cards (rank 1 highlighted as "BEST BET")
 - Each card: combined odds, win %, edge %, all legs with coverage
 - "Analyze Parlay" button → Claude generates 2-3 sentence explanation
-- "View in Builder" button → Coming soon (load legs into builder)
+- "Regenerate Now" button → Triggers on-demand generation (added April 29 evening)
 
 **Claude analysis prompt:**
-Analyze this MLB parlay briefly (2-3 sentences max):
-{list of legs with coverage, odds, pitcher matchups}
-Focus on: strongest edge, biggest risk, why this combination makes sense.
+- Kept simple: analyze strengths/weaknesses of leg combination
+- Budget: 300 tokens max
+- Cached in database to avoid repeated API calls
 
-**Rationale:**
-- Persistent storage enables outcome tracking
-- On-demand analysis saves API credits (only when user clicks)
-- 5 parlays gives user choice (best bet + 4 alternatives)
-- Edge % ranking surfaces most +EV combinations
+**Alternative considered:** Live recommendations (no storage)
+**Rejected because:** Can't track performance, loses historical context
 
-**Alternative considered:** Generate analysis for all 5 upfront, store in database
-**Rejected because:** Wastes 4 API calls if user only clicks 1-2 buttons
+**NOTE:** With ML model deployed (April 29 evening), recommendations now use ML predictions instead of heuristic scores. The persistent storage architecture remains unchanged.
 
 ---
-
-## Remove Discord Bot (April 29, 2026)
-
-**Decision:** Delete Discord bot entirely, move all functionality to web app.
-
-**Context:**
-- Two environments (Discord + web) created confusion
-- User said: "Discord bot and web app feel disconnected"
-- Web app can do everything Discord bot did
-- Discord bot required separate auth, channels, permissions setup
-
-**What was removed:**
-- `bot.py` - Discord bot entry point (423 lines)
-- `src/bot/runner.py` - Pipeline wrapper for Discord context
-- `src/bot/formatter.py` - Discord message formatting
-- `src/bot/__init__.py` - Package init
-- `requirements.txt` - discord.py==2.7.1, audioop-lts==0.2.2
-
-**What was moved to web server:**
-- Pipeline scheduler - now runs in `src/web/server.py` as async background task
-- Same timing: 9AM/12PM/5:30PM ET
-- Uses `ZoneInfo("America/New_York")` for timezone
-- Runs `run_pipeline()` in thread executor (it's synchronous)
-
-**Scheduler implementation:**
-```python
-async def _pipeline_scheduler():
-    while True:
-        # Find next scheduled time (9AM, 12PM, or 5:30PM)
-        next_run = calculate_next_run()
-        sleep_secs = (next_run - now()).total_seconds()
-        await asyncio.sleep(sleep_secs)
-        
-        # Run pipeline in thread executor (blocking operation)
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, run_pipeline)
-```
-
-**Started in server:**
-```python
-async def start_server():
-    # ... start aiohttp server ...
-    asyncio.ensure_future(_pipeline_scheduler())
-    return runner
-```
-
-**Benefits:**
-- Single source of truth (web app only)
-- One codebase to maintain
-- No Discord permissions/channels to configure
-- Simpler deployment (one service not two)
-
-**Result:**
-- Railway config updated: `startCommand = "python src/web/server.py"`
-- Web app now handles everything
-- Recommendations tab replaces Discord posts
-
-**Alternative considered:** Keep Discord bot, sync with web app
-**Rejected because:** Adds complexity for zero benefit - web app does same job better
-
----
-
-## Data Pipeline Fixes (April 29, 2026)
-
-**Decision:** Fix two blocking bugs preventing training data resolution.
-
-### Bug 1: Database CHECK Constraint
-
-**Problem:**
-- `mlb_training_data` table CHECK constraint: `result IN ('hit', 'miss')`
-- Outcome resolver tried to write 'void' for scratched players
-- Database rejected transaction → ENTIRE batch rolled back
-- 10,216 unresolved props accumulated silently
-
-**Fix:**
-```sql
-ALTER TABLE mlb_training_data 
-DROP CONSTRAINT mlb_training_data_result_check;
-
-ALTER TABLE mlb_training_data 
-ADD CONSTRAINT mlb_training_data_result_check 
-CHECK (result IN ('hit', 'miss', 'void', NULL));
-```
-
-**Applied:** Via Python subprocess in Claude Code
-```python
-subprocess.run([
-    "python3", "-c",
-    "import psycopg2; conn = psycopg2.connect(...); ..."
-])
-```
-
-**Lesson:** Always include edge cases in CHECK constraints (void, NULL)
-
-### Bug 2: Player ID Lookup
-
-**Problem:**
-- SGO API returns string IDs: `"CEDRIC_MULLINS_1_MLB"`
-- Outcome resolver needs numeric MLB IDs to match box scores
-- Props logged with `player_id=NULL`
-- Resolver fell back to name matching → failed on common names
-
-**Fix:**
-Added lookup in `src/apis/sportsgameodds.py` (lines 426-433):
-```python
-# Fetch numeric MLB ID for outcome resolution
-try:
-    player_id = statsapi.lookup_player(player_name)[0]['id']
-except:
-    player_id = None
-
-leg_data = {
-    'player_id': player_id,  # Numeric (for resolver)
-    'sgo_player_id': sgo_id,  # String (for reference)
-    # ...
-}
-```
-
-**Per-call cache:** Prevents duplicate lookups within same pipeline run
-
-**Result:**
-- Manually resolved 5-day backlog (April 23-27)
-- 11,879 props resolved
-- Hit rates: 43-46% across all days (healthy)
-- Void counts: 75-341/day (legitimate DNPs, pinch runners)
-
-**Lesson:** Always store BOTH external ID (for reference) and internal ID (for matching)
-
----
-
-## Key Principles
-
-### Validate Before Building
-- Validation queries showed formula was completely broken
-- 28pp error (70% predicted → 46.7% actual) would never be found without data
-- Always test scoring against historical outcomes before production
-
-### Raw Signals > Smooshed Formulas
-- Separate signals (overall, vs_hand, recent) allow independent validation
-- No hidden penalties or arbitrary multipliers
-- User can see exactly what coverage means (raw %)
-
-### Single Source of Truth
-- Discord bot + web app = confusion
-- Web app does everything Discord did, better
-- One codebase, one deployment, one UI
-
-### Database Constraints Are Unforgiving
-- CHECK constraint rejection aborts entire transaction
-- 10K backlog accumulated silently
-- Always test edge cases (void, NULL, empty strings)
-
-### Player ID Mapping Is Critical
-- External APIs use different ID schemes
-- Always store both external and internal IDs
-- Lookup at fetch time, not resolution time
-
-### Coverage Is King
-- Only factor with proven predictive power
-- Trend/opponent/PA stability showed zero correlation
-- Don't use factors just because NBA agent did
-
-### Pitcher Props Need Different Logic
-- Pitchers face different dynamics than hitters
-- Pitcher quality (ERA/K9/WHIP) adds real signal
-- Opponent offense (team K%/BA/RPG) adds real signal
-- Different formula (4 factors) vs hitters (3 factors)
