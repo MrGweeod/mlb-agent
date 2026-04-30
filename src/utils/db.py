@@ -1590,7 +1590,7 @@ def get_todays_recommendations() -> list[dict]:
         """
         SELECT odd_id, player_name, team, opponent, stat, line, direction,
                odds, coverage_pct, p_over, ev_per_unit, trend_score,
-               opponent_adjustment, position
+               opponent_adjustment, position, game_start_time
         FROM mlb_scored_legs
         WHERE odd_id = ANY(%s)
         """,

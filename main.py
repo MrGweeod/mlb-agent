@@ -16,7 +16,7 @@ Called by:
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytz
 import statsapi
@@ -695,7 +695,7 @@ def run_pipeline(starts_after_override=None) -> tuple[list[dict], str]:
     print("\n[9/9] Generating parlay recommendations...")
     recommendations = generate_recommendations(qualifying_legs)
 
-    run_time = datetime.now()
+    run_time = datetime.now(timezone.utc)
     for rank, rec in enumerate(recommendations, start=1):
         try:
             save_parlay_recommendation({

@@ -25,7 +25,7 @@ import os
 import json
 import pathlib
 import pytz
-from datetime import date, datetime, time as dtime, timedelta
+from datetime import date, datetime, time as dtime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from aiohttp import web
@@ -237,7 +237,11 @@ async def handle_analyze(request: web.Request) -> web.Response:
 
 
 async def handle_recommendations(request: web.Request) -> web.Response:
-    """Return today's pre-built parlay recommendations with hydrated leg details."""
+    """Return today's pre-built parlay recommendations with hydrated leg details.
+
+    Filters out legs whose games have already started (5-minute grace window)
+    so stale morning pipeline results don't include in-progress games.
+    """
     if not _check_auth(request):
         return web.Response(
             text=json.dumps({"error": "Unauthorized"}),
@@ -245,9 +249,43 @@ async def handle_recommendations(request: web.Request) -> web.Response:
             status=401,
         )
     try:
+        from datetime import datetime, timedelta
+        import pytz
+
         recommendations = get_todays_recommendations()
+
+        et_tz = pytz.timezone("America/New_York")
+        now_et = datetime.now(et_tz)
+        cutoff = now_et - timedelta(minutes=5)
+
+        filtered = []
+        for rec in recommendations:
+            upcoming = []
+            for leg in rec.get("legs", []):
+                gst = leg.get("game_start_time")
+                if not gst:
+                    upcoming.append(leg)
+                    continue
+                try:
+                    gt = datetime.strptime(str(gst), "%Y-%m-%d %H:%M:%S")
+                    if et_tz.localize(gt) > cutoff:
+                        upcoming.append(leg)
+                except Exception:
+                    upcoming.append(leg)
+            if len(upcoming) >= 4:
+                rec["legs"] = upcoming
+                filtered.append(rec)
+
+        total_in = len(recommendations)
+        total_out = len(filtered)
+        legs_out = sum(len(r["legs"]) for r in filtered)
+        print(
+            f"[handle_recommendations] {total_in} recs → {total_out} upcoming "
+            f"({legs_out} legs after started-game filter)"
+        )
+
         return web.Response(
-            text=json.dumps({"recommendations": recommendations}, default=str),
+            text=json.dumps({"recommendations": filtered}, default=str),
             content_type="application/json",
         )
     except Exception as exc:
@@ -328,7 +366,7 @@ async def handle_regenerate_recommendations(request: web.Request) -> web.Respons
             None, generate_recommendations, qualifying_legs
         )
 
-        run_time = datetime.now()
+        run_time = datetime.now(timezone.utc)
         for rank, rec in enumerate(recommendations, start=1):
             try:
                 save_parlay_recommendation({
