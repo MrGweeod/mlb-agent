@@ -35,9 +35,14 @@ def filter_and_tag_legs(scored_legs: list) -> list:
       walks overs    ~19.4% hit rate
       homeRuns overs  ~6.1% hit rate
 
+    Strikeout line rules (both directions):
+      hitter strikeouts: only line 0.5 allowed
+      pitcher strikeouts: only line >= 3.5 allowed
+
     Risky overs (allowed but capped at 1 per parlay via B&B constraint):
       hits over 0.5 with composite_score >= 65
-      strikeouts over 0.5 with composite_score >= 65
+      hitter strikeouts over 0.5 with composite_score >= 65
+      pitcher strikeouts over >= 3.5 with composite_score >= 65
 
     All other overs are also blocked — only unders and the two risky-over
     categories pass, reflecting the 79.2% under vs 21.9% over hit split.
@@ -56,6 +61,18 @@ def filter_and_tag_legs(scored_legs: list) -> list:
         stat      = leg.get("stat", "")
         line      = leg.get("line") or leg.get("best_line")
         score     = leg.get("composite_score", 0.0) or 0.0
+        position  = leg.get("position", "")
+        is_pitcher = position in _PITCHER_POSITIONS
+
+        # Block invalid strikeout lines for both directions.
+        # Hitters: only 0.5 allowed. Pitchers: only ≥ 3.5 allowed.
+        if stat == "strikeouts":
+            if not is_pitcher and line != 0.5:
+                blocked_other += 1
+                continue
+            if is_pitcher and (line is None or line < 3.5):
+                blocked_other += 1
+                continue
 
         if direction == "over":
             # Block poison overs entirely
@@ -66,7 +83,8 @@ def filter_and_tag_legs(scored_legs: list) -> list:
             # Qualify risky overs
             is_risky = (
                 (stat == "hits" and line == 0.5 and score >= 65)
-                or (stat == "strikeouts" and line == 0.5 and score >= 65)
+                or (stat == "strikeouts" and not is_pitcher and line == 0.5 and score >= 65)
+                or (stat == "strikeouts" and is_pitcher and line >= 3.5 and score >= 65)
             )
             leg["is_risky_over"] = is_risky
 
