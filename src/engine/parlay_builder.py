@@ -1,7 +1,7 @@
 """
 parlay_builder.py — Single scored-pool parlay builder for MLB.
 
-All eligible legs (coverage >= 55%) are scored once by composite_score,
+All eligible legs (ML score >= 55%) are scored once by composite_score,
 then the top POOL_SIZE are searched for combinations of MIN_LEGS–MAX_LEGS
 whose combined parlay odds land in +1000 to +1500.
 
@@ -11,9 +11,10 @@ Constraints:
   - Max 1 batter leg per player (pitchers exempt — multiple pitcher props allowed).
   - Max 3 legs per game (keyed by game_pk, fallback to team abbreviation).
   - No duplicate odd_ids within a parlay.
-  - Poison overs (rbi, walks, homeRuns) blocked entirely.
-  - Other overs blocked unless they meet high-confidence risky-over criteria.
-  - Max 1 risky over per parlay.
+  - High-variance overs (homeRuns, stolenBases) require ML score >= 70.
+  - All other legs evaluated uniformly by ML score — no directional bias.
+  - The calibrated ML model (77K samples) already learned direction bias;
+    we do not impose additional directional filters on top of its predictions.
 
 Public API unchanged: build_hybrid_parlays(...) and _tier_params(...).
 """
@@ -24,46 +25,41 @@ from src.engine.leg_scorer import score_legs_composite
 
 _PITCHER_POSITIONS = frozenset({"SP", "RP", "P"})
 
-# Stats whose overs are blocked entirely regardless of score.
-_POISON_OVER_STATS = frozenset({"rbi", "walks", "homeRuns"})
+# Stats whose overs require a higher ML score (>= 70) due to extreme variance.
+# homeRuns ~6.1% hit rate, stolenBases extremely volatile.
+# rbi and walks are no longer blocked — the ML model can score them on merit.
+_HIGH_VARIANCE_OVER_STATS = frozenset({"homeRuns", "stolenBases"})
 
 
 def filter_and_tag_legs(scored_legs: list) -> list:
     """
-    Filter out poison overs and tag high-confidence risky overs.
+    Filter legs by ML score, enforcing strikeout line rules and a higher
+    threshold for genuinely high-variance over stats.
 
-    Poison overs (blocked entirely — too low hit rates to include):
-      rbi overs      ~14.6% hit rate
-      walks overs    ~19.4% hit rate
+    High-variance overs (require composite_score >= 70):
       homeRuns overs  ~6.1% hit rate
+      stolenBases overs extremely volatile
 
     Strikeout line rules (both directions):
       hitter strikeouts: only line 0.5 allowed
       pitcher strikeouts: only line >= 3.5 allowed
 
-    Risky overs (allowed but capped at 1 per parlay via B&B constraint):
-      hits over 0.5 with composite_score >= 65
-      hitter strikeouts over 0.5 with composite_score >= 65
-      pitcher strikeouts over >= 3.5 with composite_score >= 65
-
-    All other overs are also blocked — only unders and the two risky-over
-    categories pass, reflecting the 79.2% under vs 21.9% over hit split.
-
-    Mutates each leg in-place to add ``is_risky_over`` (bool).
-    Returns the filtered list (poison overs and non-qualifying overs removed).
+    All other legs (overs and unders) are evaluated uniformly. The
+    calibrated ML model (77K samples, AUC 0.8532) already learned
+    directional bias — we do not override it with hand-coded filters.
     """
     filtered = []
-    blocked_poison = 0
+    blocked_hv     = 0
     blocked_other  = 0
-    allowed_risky  = 0
+    allowed_over   = 0
     allowed_under  = 0
 
     for leg in scored_legs:
-        direction = leg.get("direction", "")
-        stat      = leg.get("stat", "")
-        line      = leg.get("line") or leg.get("best_line")
-        score     = leg.get("composite_score", 0.0) or 0.0
-        position  = leg.get("position", "")
+        direction  = leg.get("direction", "")
+        stat       = leg.get("stat", "")
+        line       = leg.get("line") or leg.get("best_line")
+        score      = leg.get("composite_score", 0.0) or 0.0
+        position   = leg.get("position", "")
         is_pitcher = position in _PITCHER_POSITIONS
 
         # Block invalid strikeout lines for both directions.
@@ -76,35 +72,22 @@ def filter_and_tag_legs(scored_legs: list) -> list:
                 blocked_other += 1
                 continue
 
+        if direction == "over" and stat in _HIGH_VARIANCE_OVER_STATS:
+            if score < 70:
+                blocked_hv += 1
+                continue
+
         if direction == "over":
-            # Block poison overs entirely
-            if stat in _POISON_OVER_STATS:
-                blocked_poison += 1
-                continue
-
-            # Qualify risky overs
-            is_risky = (
-                (stat == "hits" and line == 0.5 and score >= 65)
-                or (stat == "strikeouts" and not is_pitcher and line == 0.5 and score >= 65)
-                or (stat == "strikeouts" and is_pitcher and line >= 3.5 and score >= 65)
-            )
-            leg["is_risky_over"] = is_risky
-
-            if not is_risky:
-                blocked_other += 1
-                continue
-
-            allowed_risky += 1
+            allowed_over += 1
         else:
-            leg["is_risky_over"] = False
             allowed_under += 1
 
         filtered.append(leg)
 
     print(
-        f"  [filter_legs] blocked {blocked_poison} poison overs, "
-        f"{blocked_other} other overs | "
-        f"kept {allowed_under} unders + {allowed_risky} risky overs "
+        f"  [filter_legs] blocked {blocked_hv} high-variance overs, "
+        f"{blocked_other} invalid lines | "
+        f"kept {allowed_under} unders + {allowed_over} overs "
         f"→ {len(filtered)} legs"
     )
     return filtered
@@ -227,9 +210,7 @@ def build_hybrid_parlays(
         if len(parlays) >= MAX_CANDIDATES:
             _stop[0] = True
 
-    MAX_RISKY_OVERS = 1
-
-    def _bnb(rem, idx, legs, p, by_pid, by_game, in_parlay, risky_overs):
+    def _bnb(rem, idx, legs, p, by_pid, by_game, in_parlay):
         """
         Branch-and-bound over pool_bnb (sorted by _dec DESC).
 
@@ -290,20 +271,14 @@ def build_hybrid_parlays(
             if by_game.get(gk, 0) >= MAX_LEGS_PER_GAME:
                 continue
 
-            # Max 1 risky over per parlay
-            is_risky = leg.get("is_risky_over", False)
-            if is_risky and risky_overs >= MAX_RISKY_OVERS:
-                continue
-
             # ── Add leg ────────────────────────────────────────────────────────
             if not is_pitcher:
                 by_pid[pid] = True
             by_game[gk] = by_game.get(gk, 0) + 1
             legs.append(leg)
             in_parlay.add(odd_id)
-            new_risky = risky_overs + (1 if is_risky else 0)
 
-            _bnb(rem - 1, i + 1, legs, p * leg["_dec"], by_pid, by_game, in_parlay, new_risky)
+            _bnb(rem - 1, i + 1, legs, p * leg["_dec"], by_pid, by_game, in_parlay)
 
             # ── Remove leg ─────────────────────────────────────────────────────
             legs.pop()
@@ -315,7 +290,7 @@ def build_hybrid_parlays(
                 del by_pid[pid]
 
     for n_legs in range(MIN_LEGS, MAX_LEGS + 1):
-        _bnb(n_legs, 0, [], 1.0, {}, {}, set(), 0)
+        _bnb(n_legs, 0, [], 1.0, {}, {}, set())
         if _stop[0]:
             elapsed = time.time() - _start_time
             if elapsed > TIMEOUT_SECS:
