@@ -1,0 +1,38 @@
+name: Weekly ML Model Retraining
+
+on:
+  schedule:
+    # Every Sunday at 2 AM ET (6 AM UTC during DST, 7 AM UTC during standard time)
+    # Using 6 AM UTC as the trigger time
+    - cron: '0 6 * * 0'
+  workflow_dispatch:  # Allow manual triggering from GitHub UI
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger ML model retraining on Railway
+        run: |
+          response=$(curl -s -w "\n%{http_code}" -X GET \
+            "https://mlb-agent.up.railway.app/api/train-model?secret=${{ secrets.ADMIN_SECRET }}")
+          http_code=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | sed '$d')
+
+          echo "HTTP Status: $http_code"
+          echo "Response: $body"
+
+          if [ "$http_code" != "200" ]; then
+            echo "Error: Training endpoint returned status $http_code"
+            exit 1
+          fi
+        timeout-minutes: 5
+
+      - name: Wait for training to complete
+        run: |
+          echo "Waiting 2 minutes for training to complete on Railway..."
+          sleep 120
+
+      - name: Report completion
+        run: |
+          echo "✅ ML model retraining triggered successfully"
+          echo "Check Railway logs for training details"
