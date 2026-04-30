@@ -40,6 +40,27 @@ _STAT_CATEGORIES = [
     "inningsPitched",
 ]
 
+class CalibratedModel:
+    """
+    Platt-scaled wrapper around a pre-trained GradientBoostingClassifier.
+
+    Defined at module level here (not in train_ml_model.py) so pickle can
+    locate the class when loading the saved model — pickle stores the fully-
+    qualified class path, which must resolve at load time.
+    """
+    def __init__(self, base_model, calibrator):
+        self.base_model = base_model
+        self.calibrator = calibrator
+
+    def predict_proba(self, X):
+        base_probs = self.base_model.predict_proba(X)[:, 1].reshape(-1, 1)
+        calibrated = self.calibrator.predict_proba(base_probs)[:, 1]
+        return np.column_stack([1 - calibrated, calibrated])
+
+    def predict(self, X):
+        return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
+
+
 _cached: dict | None = None
 
 

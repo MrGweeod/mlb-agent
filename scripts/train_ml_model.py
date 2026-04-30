@@ -34,27 +34,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import numpy as np
 
+# CalibratedModel is defined in ml_leg_scorer so pickle resolves the class
+# correctly at load time (pickle stores the fully-qualified module path).
+from src.engine.ml_leg_scorer import CalibratedModel  # noqa: F401 — needed for pickle
+
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "../models/leg_scorer_v2.pkl")
-
-
-class CalibratedModel:
-    """
-    Platt-scaled wrapper around a pre-trained GradientBoostingClassifier.
-
-    Defined at module level (not inside train()) so pickle can locate the
-    class when loading the saved model in ml_leg_scorer.py.
-    """
-    def __init__(self, base_model, calibrator):
-        self.base_model  = base_model
-        self.calibrator  = calibrator
-
-    def predict_proba(self, X):
-        base_probs      = self.base_model.predict_proba(X)[:, 1].reshape(-1, 1)
-        calibrated      = self.calibrator.predict_proba(base_probs)[:, 1]
-        return np.column_stack([1 - calibrated, calibrated])
-
-    def predict(self, X):
-        return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
 
 _PITCHER_STATS = frozenset({"inningsPitched", "hitsAllowed", "earnedRuns"})
 
