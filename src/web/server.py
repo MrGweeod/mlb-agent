@@ -359,6 +359,67 @@ async def handle_regenerate_recommendations(request: web.Request) -> web.Respons
         )
 
 
+async def handle_refresh(request: web.Request) -> web.Response:
+    """
+    Trigger a fresh pipeline run: fetches SGO props for games starting >3h from
+    now, rescores with the ML model, rebuilds parlays, and saves everything.
+
+    Runs the full run_pipeline() in a thread executor with a starts_after cutoff
+    of (now + 3 hours UTC) so we skip games that are too close to first pitch.
+    The 3-hour window ensures coverage calculation and parlay building finish
+    before any of the fetched games start.
+
+    Returns:
+        {"success": true, "legs_count": N, "recommendations_count": N, "timestamp": "..."}
+    """
+    if not _check_auth(request):
+        return web.Response(
+            text=json.dumps({"error": "Unauthorized"}),
+            content_type="application/json",
+            status=401,
+        )
+
+    try:
+        from main import run_pipeline
+        from src.utils.db import get_scored_legs, get_todays_recommendations
+        from datetime import timezone, timedelta as _td
+
+        et_tz = pytz.timezone("America/New_York")
+        now_et = datetime.now(et_tz)
+
+        # Only fetch games starting >3 hours from now to save API quota
+        cutoff_utc = datetime.now(timezone.utc) + _td(hours=3)
+
+        print(
+            f"[refresh] Triggered at {now_et.strftime('%H:%M ET')} — "
+            f"fetching games starting after {(now_et + _td(hours=3)).strftime('%H:%M ET')}"
+        )
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, run_pipeline, cutoff_utc)
+
+        # Count what was saved for this run date
+        today_str = str(now_et.date())
+        legs = get_scored_legs(today_str)
+        recs = get_todays_recommendations()
+
+        return web.Response(
+            text=json.dumps({
+                "success": True,
+                "legs_count": len(legs),
+                "recommendations_count": len(recs),
+                "timestamp": now_et.isoformat(),
+            }),
+            content_type="application/json",
+        )
+    except Exception as exc:
+        return web.Response(
+            text=json.dumps({"error": str(exc)}),
+            content_type="application/json",
+            status=500,
+        )
+
+
 async def handle_train_model(request: web.Request) -> web.Response:
     """Trigger ML model training (admin only — requires ADMIN_SECRET)."""
     secret          = request.rel_url.query.get("secret", "")
@@ -521,6 +582,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/recommendations", handle_recommendations)
     app.router.add_post("/api/recommendations/regenerate", handle_regenerate_recommendations)
     app.router.add_post("/api/analyze-recommendation", handle_analyze_recommendation)
+    app.router.add_post("/api/refresh", handle_refresh)
     app.router.add_get("/api/train-model", handle_train_model)
     return app
 

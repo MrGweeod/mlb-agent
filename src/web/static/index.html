@@ -1130,10 +1130,32 @@ async function fetchLegs() {
   }
 }
 
-document.getElementById('refresh-btn').addEventListener('click', () => {
+document.getElementById('refresh-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('refresh-btn');
+  btn.disabled = true;
+  btn.textContent = 'Refreshing…';
   document.getElementById('legs-list').innerHTML =
-    '<div class="center-msg"><div class="spinner"></div><div>Refreshing…</div></div>';
-  fetchLegs();
+    '<div class="center-msg"><div class="spinner"></div><div>Fetching fresh data from SGO…</div></div>';
+
+  try {
+    const res = await fetch(`/api/refresh?password=${encodeURIComponent(password)}`, {
+      method: 'POST'
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+
+    // Reload legs tab with fresh data
+    await fetchLegs();
+
+    showToast(`Refreshed: ${data.legs_count} legs, ${data.recommendations_count} parlays`);
+  } catch (err) {
+    showToast('Refresh failed: ' + err.message);
+    fetchLegs(); // still reload from DB even on error
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Refresh';
+  }
 });
 
 // ── Filters ───────────────────────────────────────────────────────────────────

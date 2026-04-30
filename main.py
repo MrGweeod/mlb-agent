@@ -471,12 +471,17 @@ def generate_recommendations(
 
 # ── Public pipeline function ──────────────────────────────────────────────────
 
-def run_pipeline() -> tuple[list[dict], str]:
+def run_pipeline(starts_after_override=None) -> tuple[list[dict], str]:
     """
     Execute the full MLB parlay pipeline and return (parlays, analysis).
 
     Called by the web server scheduler in a background thread. All console
     output is visible in Railway logs.
+
+    Args:
+        starts_after_override: Optional UTC datetime. When provided, only SGO
+            games starting after this time are fetched (used by /api/refresh to
+            skip games starting within the next N hours and minimise API quota).
 
     Returns:
         (parlays, analysis) — parlays is a list of hybrid parlay dicts;
@@ -512,7 +517,7 @@ def run_pipeline() -> tuple[list[dict], str]:
     # ── Step 3: Player Props (SportsGameOdds) ─────────────────────────────────
     print("\n[3/8] Fetching player props from SportsGameOdds...")
     try:
-        sgo_games = get_todays_games()
+        sgo_games = get_todays_games(starts_after_override=starts_after_override)
     except RuntimeError as e:
         print(f"  SGO error: {e}")
         return [], ""
@@ -640,6 +645,25 @@ def run_pipeline() -> tuple[list[dict], str]:
         team_to_blocked=team_to_blocked,
     )
     print(f"  Built {len(parlays)} parlay(s)")
+
+    # Filter invalid strikeout lines before saving to DB
+    # Hitter strikeouts: only line 0.5 allowed
+    # Pitcher strikeouts: only line >= 3.5 allowed
+    def _valid_strikeout_line(leg: dict) -> bool:
+        if leg.get("stat") != "strikeouts":
+            return True
+        position = leg.get("position", "")
+        is_pitcher = position in _PITCHER_POSITIONS
+        line = leg.get("best_line")
+        if is_pitcher:
+            return line is not None and float(line) >= 3.5
+        else:
+            return line is not None and float(line) == 0.5
+
+    before_so_filter = len(qualifying_legs)
+    qualifying_legs = [l for l in qualifying_legs if _valid_strikeout_line(l)]
+    if before_so_filter != len(qualifying_legs):
+        print(f"  [so_filter] removed {before_so_filter - len(qualifying_legs)} invalid strikeout line(s)")
 
     # Log all scored legs regardless of parlay outcome
     parlay_odd_ids = {leg["odd_id"] for p in parlays for leg in p.get("legs", [])}

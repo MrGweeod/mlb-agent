@@ -233,7 +233,7 @@ def _sgo_get(path: str, params: dict) -> dict:
     return data
 
 
-def get_todays_games(date=None):
+def get_todays_games(date=None, starts_after_override=None):
     """
     Fetch all MLB games scheduled for today (or a given date) from SportsGameOdds.
 
@@ -247,6 +247,9 @@ def get_todays_games(date=None):
 
     Args:
         date: Optional date string in YYYY-MM-DD format. Defaults to today.
+        starts_after_override: Optional datetime (UTC-aware or naive UTC) to use
+            as the startsAfter filter instead of now. Useful for the /api/refresh
+            endpoint to fetch only games starting >N hours from now.
 
     Returns:
         List of game dicts from the SGO /events endpoint.
@@ -258,7 +261,14 @@ def get_todays_games(date=None):
         starts_before = f'{date}T23:59:59Z'
     else:
         now_utc = datetime.now(timezone.utc)
-        starts_after = now_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
+        if starts_after_override is not None:
+            # Normalise to UTC-aware if caller passed a naive datetime
+            if starts_after_override.tzinfo is None:
+                from datetime import timezone as _tz
+                starts_after_override = starts_after_override.replace(tzinfo=_tz.utc)
+            starts_after = starts_after_override.strftime('%Y-%m-%dT%H:%M:%SZ')
+        else:
+            starts_after = now_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
         # Cap at 30 hours after today's UTC midnight — captures all games in the
         # current MLB day (latest first pitch ~02:00 UTC + ~3h runtime = ~05:00 UTC)
         # while excluding the next day's slate.
