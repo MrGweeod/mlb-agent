@@ -2267,6 +2267,7 @@ async function regenerateRecommendations() {
     if (data.recommendations && data.recommendations.length > 0) {
       renderRecommendations(data.recommendations);
       updateTimestamp(data.recommendations[0].generated_at);
+      startRecsRefreshTimer();
     } else {
       document.getElementById('recommendations-container').innerHTML =
         '<div class="center-msg" style="padding:60px 24px">' +
@@ -2378,12 +2379,16 @@ function viewLegsInBuilder(recId) {
 }
 
 // Auto-refresh recommendations every 5 minutes when the tab is visible
-setInterval(() => {
-  const recEl = document.getElementById('recommendations');
-  if (password && recEl && recEl.style.display !== 'none') {
-    loadRecommendations();
-  }
-}, 5 * 60 * 1000);
+function startRecsRefreshTimer() {
+  clearInterval(_recsRefreshTimer);
+  _recsRefreshTimer = setInterval(() => {
+    const recEl = document.getElementById('recommendations');
+    if (password && recEl && recEl.style.display !== 'none') {
+      loadRecommendations();
+    }
+  }, 5 * 60 * 1000);
+}
+startRecsRefreshTimer();
 
 // Init
 updatePanel();
