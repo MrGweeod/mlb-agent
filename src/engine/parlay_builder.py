@@ -1,11 +1,13 @@
 """
 parlay_builder.py — Single scored-pool parlay builder for MLB.
 
-All eligible legs (coverage >= 60%) are scored once by composite_score,
+All eligible legs (coverage >= 55%) are scored once by composite_score,
 then the top POOL_SIZE are searched for combinations of MIN_LEGS–MAX_LEGS
-whose combined parlay odds land in +600 to +1500.
+whose combined parlay odds land in +1000 to +1500.
 
 Constraints:
+  - Min 5 legs, max 8 legs per parlay.
+  - Target odds: +1000 to +1500 combined American odds.
   - Max 1 batter leg per player (pitchers exempt — multiple pitcher props allowed).
   - Max 3 legs per game (keyed by game_pk, fallback to team abbreviation).
   - No duplicate odd_ids within a parlay.
@@ -115,11 +117,11 @@ def _tier_params(num_games: int) -> dict | None:
     Returns None for Tier 4 (≤1 game) — not enough to build a parlay.
     """
     if num_games >= 10:
-        return dict(min_legs=4, max_legs=8, tier=1)
+        return dict(min_legs=5, max_legs=8, tier=1)
     elif num_games >= 5:
-        return dict(min_legs=4, max_legs=8, tier=2)
+        return dict(min_legs=5, max_legs=8, tier=2)
     elif num_games >= 2:
-        return dict(min_legs=3, max_legs=8, tier=3)
+        return dict(min_legs=4, max_legs=8, tier=3)
     else:
         return None
 
@@ -135,9 +137,9 @@ def build_hybrid_parlays(
     """
     Build parlays from a single composite-scored pool.
 
-    Selects combinations of MIN_LEGS–MAX_LEGS legs whose combined
-    American odds land in +600 to +1500. Legs are ranked by composite_score
-    (40% recency-weighted coverage, 25% EV, 15% trend, 15% opp adj, 5% PA).
+    Selects combinations of MIN_LEGS–MAX_LEGS legs (5–8 on full slates)
+    whose combined American odds land in +1000 to +1500. Legs are ranked
+    by composite_score (ML-predicted P(hit) × 100 when USE_ML_SCORING=true).
 
     raw_props and blocked_players are accepted for backwards-compatibility
     but unused.
