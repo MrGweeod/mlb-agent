@@ -236,6 +236,157 @@ async def handle_analyze(request: web.Request) -> web.Response:
     )
 
 
+async def handle_build_parlays(request: web.Request) -> web.Response:
+    """
+    Build fresh parlays from today's scored legs, filtered for upcoming games only.
+
+    Replaces the stale mlb_parlay_recommendations table approach.
+    Returns top 5 parlays ranked by edge, built on-demand.
+    """
+    if not _check_auth(request):
+        return web.Response(
+            text=json.dumps({"error": "Unauthorized"}),
+            content_type="application/json",
+            status=401,
+        )
+
+    try:
+        from src.engine.parlay_builder import build_hybrid_parlays
+
+        today = date.today()
+        scored_legs = get_scored_legs(today)
+
+        if not scored_legs:
+            return web.Response(
+                text=json.dumps({
+                    "parlays": [],
+                    "message": "No scored legs available for today",
+                }),
+                content_type="application/json",
+            )
+
+        et_tz = pytz.timezone("America/New_York")
+        now_et = datetime.now(et_tz)
+        cutoff = now_et - timedelta(minutes=5)
+
+        upcoming_legs = []
+        started_count = 0
+
+        for leg in scored_legs:
+            gst = leg.get("game_start_time")
+            if not gst:
+                upcoming_legs.append(leg)
+                continue
+            try:
+                gt = datetime.strptime(str(gst), "%Y-%m-%d %H:%M:%S")
+                if et_tz.localize(gt) > cutoff:
+                    upcoming_legs.append(leg)
+                else:
+                    started_count += 1
+            except Exception:
+                upcoming_legs.append(leg)
+
+        print(
+            f"[build_parlays] {len(scored_legs)} scored legs → "
+            f"{len(upcoming_legs)} upcoming (filtered {started_count} started)"
+        )
+
+        if len(upcoming_legs) < 4:
+            return web.Response(
+                text=json.dumps({
+                    "parlays": [],
+                    "message": (
+                        f"Only {len(upcoming_legs)} upcoming legs available, "
+                        "need at least 4 for parlays"
+                    ),
+                }),
+                content_type="application/json",
+            )
+
+        qualifying_legs = []
+        for leg in upcoming_legs:
+            composite_score = leg.get("composite_score", 0)
+            if composite_score >= 55:
+                qualifying_legs.append({
+                    **leg,
+                    "best_odds": leg.get("odds"),
+                    "best_line": leg.get("line"),
+                })
+
+        print(f"[build_parlays] {len(qualifying_legs)} legs ≥55% ML score")
+
+        if len(qualifying_legs) < 4:
+            return web.Response(
+                text=json.dumps({
+                    "parlays": [],
+                    "message": (
+                        f"Only {len(qualifying_legs)} legs qualify (≥55% ML score), "
+                        "need at least 4"
+                    ),
+                }),
+                content_type="application/json",
+            )
+
+        parlays = build_hybrid_parlays(
+            qualifying_legs,
+            min_legs=5,
+            max_legs=8,
+            min_total_odds=1000,
+            max_total_odds=1500,
+        )
+
+        if not parlays:
+            return web.Response(
+                text=json.dumps({
+                    "parlays": [],
+                    "message": "No valid parlay combinations found in +1000 to +1500 range",
+                }),
+                content_type="application/json",
+            )
+
+        for parlay in parlays:
+            legs = parlay.get("legs", [])
+            win_prob = 1.0
+            for leg in legs:
+                coverage = leg.get("composite_score", 50) / 100
+                win_prob *= coverage
+            decimal_odds = (parlay.get("combined_odds", 0) + 100) / 100
+            edge_pct = (win_prob * decimal_odds - 1) * 100
+            parlay["win_probability"] = round(win_prob * 100, 1)
+            parlay["edge_pct"] = round(edge_pct, 1)
+
+        parlays.sort(key=lambda p: p.get("edge_pct", 0), reverse=True)
+        top_5 = parlays[:5]
+
+        for rank, parlay in enumerate(top_5, start=1):
+            parlay["rank"] = rank
+
+        print(
+            f"[build_parlays] Built {len(parlays)} parlays, returning top 5 "
+            f"(edges: {[p['edge_pct'] for p in top_5]})"
+        )
+
+        return web.Response(
+            text=json.dumps({
+                "parlays": top_5,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "legs_analyzed": len(qualifying_legs),
+                "total_combinations": len(parlays),
+            }, default=str),
+            content_type="application/json",
+        )
+
+    except Exception as exc:
+        import traceback
+        print(f"[build_parlays] Error: {exc}")
+        traceback.print_exc()
+        return web.Response(
+            text=json.dumps({"error": str(exc)}),
+            content_type="application/json",
+            status=500,
+        )
+
+
 async def handle_recommendations(request: web.Request) -> web.Response:
     """Return today's pre-built parlay recommendations with hydrated leg details.
 
@@ -617,6 +768,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/dashboard", handle_dashboard)
     app.router.add_get("/api/training-analytics", handle_training_analytics)
     app.router.add_post("/api/analyze", handle_analyze)
+    app.router.add_get("/api/build-parlays", handle_build_parlays)
     app.router.add_get("/api/recommendations", handle_recommendations)
     app.router.add_post("/api/recommendations/regenerate", handle_regenerate_recommendations)
     app.router.add_post("/api/analyze-recommendation", handle_analyze_recommendation)

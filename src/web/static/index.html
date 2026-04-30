@@ -2230,23 +2230,25 @@ let _recsRefreshTimer = null;
 
 async function loadRecommendations() {
   const container = document.getElementById('recommendations-container');
-  container.innerHTML = '<div class="center-msg"><div class="spinner"></div><div>Loading picks…</div></div>';
+  container.innerHTML = '<div class="center-msg"><div class="spinner"></div><div>Building parlays from current legs…</div></div>';
 
   try {
-    const res = await fetch(`/api/recommendations?password=${encodeURIComponent(password)}`);
+    const res = await fetch(`/api/build-parlays?password=${encodeURIComponent(password)}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
 
-    if (!data.recommendations || data.recommendations.length === 0) {
+    if (!data.parlays || data.parlays.length === 0) {
       container.innerHTML =
         '<div class="center-msg" style="padding:60px 24px">' +
-        '<div>No picks yet — wait for the next pipeline run (9 AM / 12 PM / 5:30 PM ET)</div></div>';
+        '<div>' + esc(data.message || 'Not enough qualifying legs for parlay building') + '</div></div>';
       updateTimestamp(null);
       return;
     }
 
-    renderRecommendations(data.recommendations);
-    updateTimestamp(data.recommendations[0]?.generated_at);
+    // Assign id from rank so renderRecommendations div IDs work
+    data.parlays.forEach(p => { p.id = p.rank; });
+    renderRecommendations(data.parlays);
+    updateTimestamp(data.generated_at);
   } catch (err) {
     console.error('loadRecommendations error:', err);
     container.innerHTML =
@@ -2277,25 +2279,9 @@ function updateTimestamp(isoStr) {
 async function regenerateRecommendations() {
   const btn = document.getElementById('regenerate-btn');
   btn.disabled = true;
-  btn.textContent = 'Generating…';
+  btn.textContent = 'Regenerating…';
   try {
-    const res = await fetch(
-      `/api/recommendations/regenerate?password=${encodeURIComponent(password)}`,
-      {method: 'POST'}
-    );
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    if (data.error) throw new Error(data.error);
-    if (data.recommendations && data.recommendations.length > 0) {
-      renderRecommendations(data.recommendations);
-      updateTimestamp(data.recommendations[0].generated_at);
-      startRecsRefreshTimer();
-    } else {
-      document.getElementById('recommendations-container').innerHTML =
-        '<div class="center-msg" style="padding:60px 24px">' +
-        '<div>No qualifying legs found for today.</div></div>';
-      updateTimestamp(null);
-    }
+    await loadRecommendations();
   } catch (err) {
     showToast('Regeneration failed: ' + err.message);
   } finally {
