@@ -64,6 +64,25 @@ class CalibratedModel:
 _cached: dict | None = None
 
 
+class _CompatUnpickler(pickle.Unpickler):
+    """
+    Redirect __main__.CalibratedModel → src.engine.ml_leg_scorer.CalibratedModel.
+
+    The model was saved while train_ml_model.py was running as __main__, so
+    pickle stored the class as __main__.CalibratedModel.  At inference time
+    __main__ is server.py (or whatever entry point is used), which doesn't have
+    the class.  This shim intercepts that lookup and returns the correct class.
+    """
+    def find_class(self, module: str, name: str):
+        if name == "CalibratedModel":
+            return CalibratedModel
+        return super().find_class(module, name)
+
+
+def _compat_load(file_obj):
+    return _CompatUnpickler(file_obj).load()
+
+
 def _load_model() -> dict:
     global _cached
     if _cached is not None:
@@ -75,7 +94,7 @@ def _load_model() -> dict:
             "Run: python scripts/train_ml_model.py"
         )
     with open(path, "rb") as f:
-        _cached = pickle.load(f)
+        _cached = _compat_load(f)
     return _cached
 
 

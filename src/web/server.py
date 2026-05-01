@@ -253,7 +253,7 @@ async def handle_build_parlays(request: web.Request) -> web.Response:
     try:
         from src.engine.parlay_builder import build_hybrid_parlays
 
-        today = date.today()
+        today = str(date.today())
         scored_legs = get_scored_legs(today)
 
         if not scored_legs:
