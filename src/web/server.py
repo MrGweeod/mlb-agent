@@ -327,7 +327,7 @@ async def handle_build_parlays(request: web.Request) -> web.Response:
                 content_type="application/json",
             )
 
-        parlays = build_hybrid_parlays(qualifying_legs)
+        parlays = build_hybrid_parlays(qualifying_legs, top_n=10)
 
         if not parlays:
             return web.Response(
@@ -339,12 +339,17 @@ async def handle_build_parlays(request: web.Request) -> web.Response:
             )
 
         for parlay in parlays:
+            # parlay_odds is a string like "+1476"; expose as integer combined_odds
+            raw_odds_str = parlay.get("parlay_odds", "+0")
+            combined_odds = int(raw_odds_str.replace("+", ""))
+            parlay["combined_odds"] = combined_odds
+
             legs = parlay.get("legs", [])
             win_prob = 1.0
             for leg in legs:
                 coverage = leg.get("composite_score", 50) / 100
                 win_prob *= coverage
-            decimal_odds = (parlay.get("combined_odds", 0) + 100) / 100
+            decimal_odds = (combined_odds / 100) + 1
             edge_pct = (win_prob * decimal_odds - 1) * 100
             parlay["win_probability"] = round(win_prob * 100, 1)
             parlay["edge_pct"] = round(edge_pct, 1)
