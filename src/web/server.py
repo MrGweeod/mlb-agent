@@ -327,13 +327,7 @@ async def handle_build_parlays(request: web.Request) -> web.Response:
                 content_type="application/json",
             )
 
-        parlays = build_hybrid_parlays(
-            qualifying_legs,
-            min_legs=5,
-            max_legs=8,
-            min_total_odds=1000,
-            max_total_odds=1500,
-        )
+        parlays = build_hybrid_parlays(qualifying_legs)
 
         if not parlays:
             return web.Response(
