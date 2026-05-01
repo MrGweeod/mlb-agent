@@ -1,6 +1,496 @@
 # MLB Parlay Agent — Architecture Decisions
 
-**Last Updated:** April 30, 2026 (Evening)
+**Last Updated:** April 30, 2026 (End of Day)
+
+---
+
+## Dynamic Picks Tab Architecture (April 30, 2026 - End of Day)
+
+**Decision:** Rebuild Picks tab to generate parlays dynamically from live `mlb_scored_legs` data instead of displaying stale recommendations from the database.
+
+**Context:**
+- User screenshot at 4:33 PM showed timestamp "09:33 PM ET" (+5 hours wrong)
+- Jung Hoo Lee appeared in recommendations despite SF @ PHI starting at 4:05 PM
+- Fixes for timestamp and game filtering were deployed but bugs persisted
+- Root cause: **Picks tab displayed static 9 AM recommendations from `mlb_parlay_recommendations` table**
+
+**The Fundamental Problem:**
+
+Static recommendations created at 9 AM become stale as games start throughout the day:
+
+```
+9:00 AM Pipeline:
+├─ All games upcoming (1:05, 4:05, 7:05, 10:05 PM)
+├─ Builds parlays from all legs
+└─ Saves 5 recommendations to mlb_parlay_recommendations table
+
+4:33 PM User Views Picks:
+├─ 1:05 PM games finished 3 hours ago
+├─ 4:05 PM games in progress
+├─ But recommendations still include legs from these games
+└─ Filtering AFTER parlays built is too late
+```
+
+**Filtering after parlay construction doesn't work** because:
+- Parlays are specific combinations of legs
+- Removing one leg from a 5-leg parlay breaks the whole parlay
+- Can't just "filter out" started legs and keep the parlay intact
+
+**User's Key Question:** "Why can't we build parlays from the same scored legs pool as the Legs tab?"
+
+**The Answer:** We should. The Legs tab worked perfectly because it queries live data.
+
+---
+
+## Comparison: Static vs Dynamic
+
+### Old Architecture (BROKEN):
+```
+Pipeline (3x/day):
+├─ Fetch props from SGO
+├─ Score legs with ML
+├─ Save to mlb_scored_legs ✅
+├─ Build parlays
+└─ Save to mlb_parlay_recommendations ❌ STALE
+
+Picks Tab:
+└─ Query mlb_parlay_recommendations ❌ STALE DATA
+```
+
+### New Architecture (WORKING):
+```
+Pipeline (3x/day):
+├─ Fetch props from SGO
+├─ Score legs with ML
+└─ Save to mlb_scored_legs ✅ SINGLE SOURCE OF TRUTH
+
+Picks Tab:
+├─ Query mlb_scored_legs ✅ LIVE DATA
+├─ Filter started games
+├─ Build parlays on-demand
+└─ Display top 5 ✅ ALWAYS CURRENT
+
+Legs Tab (already working):
+├─ Query mlb_scored_legs ✅ SAME DATA SOURCE
+├─ Filter started games
+└─ Display in builder ✅ ALWAYS CURRENT
+```
+
+**Key Insight:** Both Picks and Legs tabs now use the same data path - query `mlb_scored_legs`, filter, display.
+
+---
+
+## Implementation Details
+
+### New Endpoint: `/api/build-parlays`
+
+**Purpose:** Build fresh parlays from current scored legs, filtered for upcoming games only.
+
+**Process:**
+1. Query `mlb_scored_legs` for today
+2. Filter out games that started >5 minutes ago
+3. Filter to legs with ≥55% ML score
+4. Run Branch-and-Bound parlay builder (5-8 legs, +1000-1500 odds)
+5. Calculate win probability and edge for each parlay
+6. Sort by edge descending, return top 5
+
+**Key Points:**
+- **No SGO API calls** - uses cached data from pipeline runs
+- **No database writes** - returns results directly to frontend
+- **Pure computation** - parlay building is just Branch-and-Bound algorithm
+- **Takes 1-2 seconds** - acceptable for on-demand generation
+- **Always current** - filters started games in real-time
+
+### Frontend Changes
+
+**Old `loadRecommendations()`:**
+```javascript
+const res = await fetch('/api/recommendations');  // Static DB data
+const data = await res.json();
+displayRecommendations(data.recommendations);
+```
+
+**New `loadRecommendations()`:**
+```javascript
+const res = await fetch('/api/build-parlays');  // Dynamic generation
+const data = await res.json();
+data.parlays.forEach(p => { p.id = p.rank; });  // Assign IDs for rendering
+displayRecommendations(data.parlays);
+updateTimestamp(data.generated_at);  // Server timestamp
+```
+
+**Old "Regenerate Now" Button:**
+```javascript
+// Called /api/recommendations/regenerate (POST)
+// Triggered full pipeline run
+// Made SGO API calls
+```
+
+**New "Regenerate Now" Button:**
+```javascript
+// Just calls loadRecommendations()
+// No pipeline run, no SGO calls
+// Instant rebuild from current scored_legs
+```
+
+---
+
+## SGO API Usage Analysis
+
+**Monthly Limit:** 100,000 objects  
+**Current Usage:** 265 objects (0.27%)
+
+### Will Dynamic Picks Increase API Usage?
+
+**No.** Here's the detailed breakdown:
+
+**SGO API is only called during pipeline runs:**
+```python
+# main.py - run_pipeline()
+props = fetch_props_from_sgo()  # ← ONLY SGO CALL
+# ... compute coverage, ML scoring, etc ...
+save_to_scored_legs(props)
+```
+
+**Dynamic parlay building uses cached data:**
+```python
+# server.py - /api/build-parlays
+scored_legs = get_scored_legs(today)  # Database query (free)
+upcoming = filter_started_games(scored_legs)  # In-memory filter (free)
+parlays = build_hybrid_parlays(upcoming)  # Branch-and-Bound math (free)
+return top_5_parlays  # No external calls
+```
+
+**SGO API Call Count:**
+- **Before dynamic Picks:** 3 pipeline runs/day × 150 props = 450 props/day = 13,500/month
+- **After dynamic Picks:** 3 pipeline runs/day × 150 props = 450 props/day = 13,500/month
+- **Change:** +0 calls
+
+**User Actions That Don't Call SGO:**
+- ✅ Loading Picks tab
+- ✅ Clicking "Regenerate Now"
+- ✅ Auto-refresh on Legs tab (every 60 seconds)
+- ✅ Viewing Dashboard or Training tabs
+
+**User Actions That DO Call SGO:**
+- ⚠️ Clicking "Refresh" button on Legs tab (manual refresh with 3-hour filter, ~75 props)
+
+**Estimated Monthly Usage:**
+- 3 pipeline runs/day × 30 days × 150 props = 13,500 objects
+- 5 manual refreshes/day × 30 days × 75 props = 11,250 objects
+- **Total: ~25,000 objects/month (25% of limit)**
+
+---
+
+## Trade-offs
+
+### What We Gained:
+1. ✅ **Always current data** - no stale recommendations
+2. ✅ **No started games** - filtering happens before parlay building
+3. ✅ **Simpler architecture** - same data path as Legs tab
+4. ✅ **Zero additional API costs** - uses cached scored_legs
+5. ✅ **Instant regeneration** - 1-2 second rebuild on demand
+6. ✅ **Correct timestamps** - server-side UTC generation
+
+### What We Lost:
+1. ❌ **Historical recommendation tracking** - can't measure which parlays won/lost over time
+2. ❌ **Pre-computed recommendations** - slight delay on page load (1-2 sec)
+
+### What We Could Add Back:
+If historical tracking is needed:
+- Save generated parlays to database AFTER displaying them
+- Add `placed_at` timestamp to track when user actually saw the recommendation
+- Outcome resolver can still match against saved recommendations
+- But: Don't use saved recommendations for display - always build fresh
+
+---
+
+## Alternative Architectures Considered
+
+### Option 1: Filter Stale Legs from Stored Recommendations (REJECTED)
+
+**Idea:** Keep storing recommendations in database, but filter out started legs when displaying.
+
+**Problem:**
+```python
+# Parlay: [Leg A, Leg B, Leg C, Leg D, Leg E]
+# If Leg B's game started, what do we show?
+
+# Option 1: Show incomplete parlay [A, C, D, E]
+# ❌ Odds are wrong (missing one leg)
+# ❌ Edge calculation is wrong
+# ❌ Not the parlay the algorithm selected
+
+# Option 2: Hide entire parlay
+# ❌ Might hide all 5 recommendations
+# ❌ User sees nothing
+```
+
+**Why Rejected:** Filtering after parlay construction fundamentally doesn't work. Parlays are indivisible combinations.
+
+---
+
+### Option 2: Regenerate Every 30 Minutes (REJECTED)
+
+**Idea:** Add scheduled task to regenerate recommendations every 30 minutes, save to database.
+
+**Code:**
+```python
+@tasks.loop(minutes=30)
+async def regenerate_recommendations():
+    scored_legs = get_scored_legs(today)
+    upcoming = filter_started_games(scored_legs)
+    parlays = build_hybrid_parlays(upcoming)
+    save_to_database(parlays)
+```
+
+**Problems:**
+- Still can have 30-minute staleness window
+- More complex (additional background task)
+- Still need to filter at display time anyway
+- Why cache if we're filtering every time?
+
+**Why Rejected:** Doesn't fully solve staleness, adds complexity, provides minimal benefit over on-demand generation.
+
+---
+
+### Option 3: Client-Side Parlay Building (REJECTED)
+
+**Idea:** Send all scored legs to frontend, build parlays in JavaScript.
+
+**Problems:**
+- Branch-and-Bound algorithm is compute-intensive (~1000 iterations)
+- JavaScript performance worse than Python
+- Sends unnecessary data over network (all legs, not just top 5)
+- Can't leverage NumPy optimizations
+- Mobile devices would struggle
+
+**Why Rejected:** Performance, network overhead, complexity.
+
+---
+
+### Option 4: Dynamic Generation with Aggressive Caching (CONSIDERED BUT UNNECESSARY)
+
+**Idea:** Build parlays on-demand but cache results for 5 minutes.
+
+**Code:**
+```python
+cache = {}
+
+async def handle_build_parlays(request):
+    cache_key = f"parlays_{datetime.now().minute // 5}"
+    if cache_key in cache:
+        return cache[cache_key]
+    
+    parlays = build_fresh_parlays()
+    cache[cache_key] = parlays
+    return parlays
+```
+
+**Why Not Needed:**
+- Parlay building takes 1-2 seconds (acceptable)
+- Caching reintroduces staleness (games start continuously)
+- Adds complexity for minimal benefit
+- If performance becomes an issue, can add later
+
+**Current Decision:** Skip caching, build fresh every time.
+
+---
+
+## Database Schema Impact
+
+### Tables Affected:
+
+**`mlb_parlay_recommendations` - DEPRECATED**
+- No longer written to by pipeline or regenerate endpoint
+- Frontend doesn't query it anymore
+- Can keep for historical data or drop entirely
+- Current rows: 5 (stale from 9 AM)
+
+**`mlb_scored_legs` - NOW SINGLE SOURCE OF TRUTH**
+- Both Picks and Legs tabs query this table
+- Pipeline writes to it 3x/day
+- No changes to schema needed
+- Current rows: 31 (today's scored props)
+
+### Optional Cleanup:
+
+If we want to track recommendations historically:
+
+```sql
+-- Add new column to track when parlays were actually shown to user
+ALTER TABLE mlb_parlay_recommendations 
+ADD COLUMN displayed_at TIMESTAMP;
+
+-- Or create new table for user-facing recommendations
+CREATE TABLE mlb_displayed_recommendations (
+  id SERIAL PRIMARY KEY,
+  displayed_at TIMESTAMP NOT NULL,
+  rank INT NOT NULL,
+  leg_odd_ids TEXT[] NOT NULL,
+  combined_odds INT NOT NULL,
+  win_probability FLOAT NOT NULL,
+  edge_pct FLOAT NOT NULL
+);
+```
+
+**Decision:** Defer this until we have evidence that historical tracking is valuable.
+
+---
+
+## Timestamp Fix (Bonus Architecture Decision)
+
+**Problem:** `datetime.now()` created naive datetime, browser interpreted as local time.
+
+**Old Flow:**
+```python
+run_time = datetime.now()  # Naive: "2026-04-30 20:33:00"
+# Serializes to JSON: "2026-04-30 20:33:00"
+# Browser: new Date("2026-04-30 20:33:00") → treats as LOCAL time
+# User in ET: 8:33 PM (but it's 4:33 PM UTC, should show as 4:33 PM ET)
+# Displays: "09:33 PM ET" (wrong)
+```
+
+**New Flow:**
+```python
+run_time = datetime.now(timezone.utc)  # Aware: "2026-04-30 20:33:00+00:00"
+# Serializes to JSON: "2026-04-30T20:33:00+00:00"
+# Browser: new Date("2026-04-30T20:33:00+00:00") → treats as UTC
+# User in ET: Converts to ET timezone
+# Displays: "04:33 PM ET" (correct)
+```
+
+**Key Principle:** Always use timezone-aware datetimes for any value that will be serialized and consumed by a client.
+
+---
+
+## Lessons Learned
+
+### 1. Static Data + Volatile Reality = Bugs
+
+Games start continuously throughout the day. Static recommendations generated once in the morning can't adapt to this reality. **Dynamic generation from live data is the only architecture that works.**
+
+### 2. Same Data Source for Related Features
+
+Picks tab and Legs tab show different views of the same underlying data (scored legs). They should query the same source. Having one query live data and one query cached data created inconsistency and bugs.
+
+### 3. Filter at the Source, Not the Destination
+
+Filtering started games AFTER building parlays doesn't work because you can't remove a leg from a parlay without invalidating it. **Filter before building.**
+
+### 4. User Questions Reveal Architecture Issues
+
+"Why can't we build from the same scored legs pool?" - This simple question exposed the fundamental flaw: we were using two different data paths for similar features.
+
+### 5. Performance vs Correctness
+
+1-2 second parlay building time is acceptable. Showing stale or incorrect recommendations is not. **Correctness > Speed** for a betting application.
+
+### 6. Timezone-Aware by Default
+
+Never use `datetime.now()` for values that will be serialized. Always use `datetime.now(timezone.utc)`. **Explicit timezone > Implicit assumptions.**
+
+---
+
+## Migration Path
+
+### For Existing Sessions:
+
+No data migration needed. The old `mlb_parlay_recommendations` table can stay in the database harmlessly. It's simply no longer queried by the frontend.
+
+### For Historical Analysis:
+
+If we later want to analyze recommendation performance:
+
+1. Query `mlb_scored_legs` for historical dates
+2. Run parlay builder algorithm retroactively
+3. Compare generated parlays to actual outcomes
+4. No need for stored recommendations
+
+---
+
+## Future Enhancements (If Needed)
+
+### 1. Parlay-Level Outcome Tracking
+
+```python
+# After user views recommendations, save what they saw
+async def handle_build_parlays(request):
+    parlays = build_fresh_parlays()
+    
+    # Optional: Save for historical tracking
+    for parlay in parlays:
+        save_displayed_recommendation({
+            'displayed_at': datetime.now(timezone.utc),
+            'rank': parlay['rank'],
+            'legs': parlay['legs'],
+            'odds': parlay['combined_odds'],
+        })
+    
+    return parlays
+```
+
+### 2. Smart Caching (If Performance Becomes Issue)
+
+```python
+# Cache invalidation on game start
+@dataclass
+class ParlayCacheEntry:
+    parlays: List[Dict]
+    generated_at: datetime
+    next_game_start: datetime
+
+cache = None
+
+async def handle_build_parlays(request):
+    global cache
+    
+    now = datetime.now(timezone.utc)
+    
+    # Cache valid until next game starts
+    if cache and now < cache.next_game_start:
+        return cache.parlays
+    
+    # Rebuild
+    parlays = build_fresh_parlays()
+    next_start = get_next_game_start_time()
+    cache = ParlayCacheEntry(parlays, now, next_start)
+    
+    return parlays
+```
+
+### 3. WebSocket Push Updates
+
+Instead of polling, push updates when new games start:
+
+```python
+# When a game starts, push notification to connected clients
+async def on_game_start(game_id):
+    await websocket.send_json({
+        'type': 'game_started',
+        'game_id': game_id,
+        'action': 'refresh_recommendations'
+    })
+```
+
+**Decision:** None of these are needed yet. Start simple, add complexity only when necessary.
+
+---
+
+## Related Architecture Decisions
+
+This decision connects to:
+- [Trust ML Model Uniformly](#trust-ml-model-uniformly-april-30-2026) - Filtering happens before parlay building
+- [Raw Coverage Signals](#raw-coverage-signals-april-29-2026) - ML features come from scored_legs table
+- [Game Time Filtering](#game-time-filtering-is-critical-april-29-2026) - Applied at multiple points, including /api/build-parlays
+
+---
+
+**Decision Status:** ✅ Implemented and deployed (pending final commit)
+
+**Expected Impact:** Zero stale recommendations, always current parlays, no additional API costs
+
+**Review Date:** May 1, 2026 (after first full day of production use)
 
 ---
 
@@ -379,6 +869,10 @@ enriched_legs = upcoming_legs
 - Add same game time filtering logic to `generate_recommendations()` before building parlays
 - Ensures scheduled pipeline AND regenerate endpoint both filter correctly
 
+**FINAL EXTENSION - April 30 End of Day:**
+
+**Ultimate Solution:** Rebuilt Picks tab to be dynamic - filtering now happens in `/api/build-parlays` endpoint before every display. No stored recommendations means no stale data.
+
 **Alternative considered:** Frontend-only filtering
 
 **Rejected because:** Backend must enforce this - can't trust frontend alone
@@ -487,19 +981,23 @@ coverage = (
 
 **Design choice: Persistent vs Ephemeral**
 
-**Persistent (CHOSEN):**
+**Persistent (INITIALLY CHOSEN, LATER DEPRECATED):**
 - Recommendations stored in `mlb_parlay_recommendations` table
 - Tracks which parlays won/lost over time
 - Enables historical analysis of recommendation quality
 - Claude analysis cached (only generated once per parlay)
 
-**Ephemeral (REJECTED):**
+**Ephemeral (REJECTED INITIALLY, ADOPTED LATER):**
 - Generate recommendations on-demand when user visits tab
 - No database storage
 - Regenerate Claude analysis every time
 - Can't track historical performance
 
-**Database schema:**
+**REVERSAL (April 30 End of Day):**
+
+After discovering that stored recommendations became stale as games started, we reversed this decision and adopted the ephemeral approach with dynamic generation from `mlb_scored_legs`.
+
+**Database schema (NOW DEPRECATED):**
 ```sql
 CREATE TABLE mlb_parlay_recommendations (
   id SERIAL PRIMARY KEY,
@@ -516,7 +1014,7 @@ CREATE TABLE mlb_parlay_recommendations (
 );
 ```
 
-**Generation algorithm:**
+**Generation algorithm (NOW REPLACED BY /api/build-parlays):**
 1. Branch-and-Bound finds top 20 parlay combinations (5-8 legs, +1000 to +1500 odds)
 2. Calculate `win_probability = product(coverage/100 for each leg)`
 3. Calculate `edge_pct = (win_prob × decimal_odds - 1) × 100`
@@ -524,7 +1022,7 @@ CREATE TABLE mlb_parlay_recommendations (
 5. Apply diversity filter: each leg max 2 appearances across top 5
 6. Save top 5 to database, rank 1-5
 
-**API endpoints:**
+**API endpoints (DEPRECATED):**
 - `GET /api/recommendations` → Hydrates legs from mlb_scored_legs, returns JSON
 - `POST /api/analyze-recommendation` → Calls Claude API (300 tokens max), caches result
 
@@ -541,8 +1039,10 @@ CREATE TABLE mlb_parlay_recommendations (
 
 **Alternative considered:** Live recommendations (no storage)
 
-**Rejected because:** Can't track performance, loses historical context
+**Initially Rejected:** Can't track performance, loses historical context
 
-**NOTE:** With ML model deployed (April 29 evening), recommendations now use ML predictions instead of heuristic scores. The persistent storage architecture remains unchanged.
+**Later Adopted (April 30):** Dynamic generation proved necessary to avoid stale data
 
-**KNOWN BUG (April 30):** Recommendations include started games - game time filter missing from `generate_recommendations()` function. Fix in progress.
+**NOTE:** With ML model deployed (April 29 evening), recommendations now use ML predictions instead of heuristic scores. The persistent storage architecture was later deprecated in favor of dynamic generation.
+
+---
