@@ -227,7 +227,8 @@ def init_db():
             last_updated TEXT,
             logged_at TEXT NOT NULL,
             odd_id TEXT,
-            UNIQUE (odd_id)
+            composite_score REAL,
+            UNIQUE (run_date, odd_id)
         )
     """)
 
@@ -714,8 +715,8 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
     """
     Bulk-insert all scored legs from a pipeline run into mlb_scored_legs.
 
-    Idempotent per odd_id: uses ON CONFLICT (odd_id) DO NOTHING so that
-    re-running the pipeline later in the same day (e.g. after pitcher K props
+    Idempotent per (run_date, odd_id): uses ON CONFLICT (run_date, odd_id) DO NOTHING
+    so that re-running the pipeline later in the same day (e.g. after pitcher K props
     become available) appends new legs without duplicating existing ones.
     Legs without an odd_id are skipped entirely.
 
@@ -752,6 +753,7 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
             leg.get("odd_id"),
             leg.get("game_start_time"),
             leg.get("pitcher_hand"),
+            leg.get("composite_score"),
         )
         for leg in legs
         if leg.get("stat") and leg.get("player_name") and leg.get("odd_id")
@@ -768,9 +770,9 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
              coverage_pct, p_over, ev_per_unit, trend_pass, trend_score,
              opponent_adjustment, position, in_parlay,
              game_pk, player_id, opposing_pitcher_id, logged_at, odd_id,
-             game_start_time, pitcher_hand)
+             game_start_time, pitcher_hand, composite_score)
         VALUES %s
-        ON CONFLICT (odd_id) DO NOTHING
+        ON CONFLICT (run_date, odd_id) DO NOTHING
         """,
         rows,
     )
