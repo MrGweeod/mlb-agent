@@ -28,9 +28,20 @@ import pytz
 from datetime import date, datetime, time as dtime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+import threading
+
 from aiohttp import web
 
 from anthropic import Anthropic
+
+# In-memory parlay cache — avoids re-running the full pipeline on every tab load.
+_parlay_cache: dict = {
+    "parlays": None,
+    "generated_at": None,
+    "timestamp": None,
+    "lock": threading.Lock(),
+}
+_CACHE_TTL_MINUTES = 30
 
 from src.utils.db import (
     get_scored_legs,
@@ -238,11 +249,12 @@ async def handle_analyze(request: web.Request) -> web.Response:
 
 async def handle_build_parlays(request: web.Request) -> web.Response:
     """
-    Build fresh parlays from today's scored legs, filtered for upcoming games only.
+    Build parlays with smart in-memory caching to avoid re-running the pipeline
+    on every tab load.
 
     Query params:
-        refresh=true  - Run full pipeline to fetch fresh SGO props and re-score
-        refresh=false - Use cached database legs from last pipeline run (default)
+        refresh=true  - Force pipeline run, clear cache, return fresh results
+        refresh=false - Return cached parlays if < 30 min old (default)
     """
     if not _check_auth(request):
         return web.Response(
@@ -257,12 +269,33 @@ async def handle_build_parlays(request: web.Request) -> web.Response:
         force_refresh = request.rel_url.query.get("refresh", "false").lower() == "true"
         today = str(date.today())
 
+        # Return cached result if still fresh and not a forced refresh
+        with _parlay_cache["lock"]:
+            cache_ts = _parlay_cache["timestamp"]
+            cache_valid = (
+                _parlay_cache["parlays"] is not None
+                and cache_ts is not None
+                and datetime.now() - cache_ts < timedelta(minutes=_CACHE_TTL_MINUTES)
+            )
+            if cache_valid and not force_refresh:
+                age_min = (datetime.now() - cache_ts).total_seconds() / 60
+                print(f"[build_parlays] Returning cached parlays (age: {age_min:.1f} min)")
+                return web.Response(
+                    text=json.dumps({
+                        "parlays": _parlay_cache["parlays"],
+                        "generated_at": _parlay_cache["generated_at"],
+                    }),
+                    content_type="application/json",
+                )
+
         if force_refresh:
-            print("[build_parlays] LIVE REFRESH requested — running pipeline for fresh data")
+            print("[build_parlays] FORCE REFRESH — clearing cache and running pipeline")
             from main import run_pipeline
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, run_pipeline)
             print("[build_parlays] Pipeline complete — reading fresh legs from DB")
+        else:
+            print("[build_parlays] Cache miss — building parlays from DB legs")
 
         scored_legs = get_scored_legs(today)
 
@@ -315,7 +348,10 @@ async def handle_build_parlays(request: web.Request) -> web.Response:
 
         qualifying_legs = []
         for leg in upcoming_legs:
-            composite_score = leg.get("composite_score", 0)
+            composite_score = leg.get("composite_score")
+            # Fix: skip legs with None composite_score instead of comparing None >= 65
+            if composite_score is None:
+                continue
             if composite_score >= 65:
                 qualifying_legs.append({
                     **leg,
@@ -349,7 +385,6 @@ async def handle_build_parlays(request: web.Request) -> web.Response:
             )
 
         for parlay in parlays:
-            # parlay_odds is a string like "+1476"; expose as integer combined_odds
             raw_odds_str = parlay.get("parlay_odds", "+0")
             combined_odds = int(raw_odds_str.replace("+", ""))
             parlay["combined_odds"] = combined_odds
@@ -357,7 +392,7 @@ async def handle_build_parlays(request: web.Request) -> web.Response:
             legs = parlay.get("legs", [])
             win_prob = 1.0
             for leg in legs:
-                coverage = leg.get("composite_score", 50) / 100
+                coverage = (leg.get("composite_score") or 50) / 100
                 win_prob *= coverage
             decimal_odds = (combined_odds / 100) + 1
             edge_pct = (win_prob * decimal_odds - 1) * 100
@@ -370,15 +405,24 @@ async def handle_build_parlays(request: web.Request) -> web.Response:
         for rank, parlay in enumerate(top_5, start=1):
             parlay["rank"] = rank
 
+        generated_at = datetime.now(timezone.utc).isoformat()
+
         print(
             f"[build_parlays] Built {len(parlays)} parlays, returning top 5 "
             f"(edges: {[p['edge_pct'] for p in top_5]})"
         )
 
+        # Cache the results
+        with _parlay_cache["lock"]:
+            _parlay_cache["parlays"] = top_5
+            _parlay_cache["generated_at"] = generated_at
+            _parlay_cache["timestamp"] = datetime.now()
+        print(f"[build_parlays] Cached {len(top_5)} parlays (expires in {_CACHE_TTL_MINUTES} min)")
+
         return web.Response(
             text=json.dumps({
                 "parlays": top_5,
-                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "generated_at": generated_at,
                 "legs_analyzed": len(qualifying_legs),
                 "total_combinations": len(parlays),
             }, default=str),

@@ -2228,12 +2228,15 @@ function renderTrainFeatures(rows) {
 // ── Recommendations ──────────────────────────────────────────────────────────
 let _recsRefreshTimer = null;
 
-async function loadRecommendations() {
+async function loadRecommendations(forceRefresh = false) {
   const container = document.getElementById('recommendations-container');
-  container.innerHTML = '<div class="center-msg"><div class="spinner"></div><div>Building parlays from current legs…</div></div>';
+  container.innerHTML = '<div class="center-msg"><div class="spinner"></div><div>' +
+    (forceRefresh ? 'Running fresh pipeline…' : 'Loading parlay recommendations…') +
+    '</div></div>';
 
   try {
-    const res = await fetch(`/api/build-parlays?refresh=true&password=${encodeURIComponent(password)}`);
+    const refreshParam = forceRefresh ? 'refresh=true' : 'refresh=false';
+    const res = await fetch(`/api/build-parlays?${refreshParam}&password=${encodeURIComponent(password)}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
 
@@ -2281,7 +2284,7 @@ async function regenerateRecommendations() {
   btn.disabled = true;
   btn.textContent = 'Regenerating…';
   try {
-    await loadRecommendations();
+    await loadRecommendations(true);  // force refresh=true
   } catch (err) {
     showToast('Regeneration failed: ' + err.message);
   } finally {
