@@ -756,6 +756,46 @@ def run_pipeline(starts_after_override=None) -> tuple[list[dict], str]:
     return parlays, analysis
 
 
+def run_morning_pipeline() -> None:
+    """
+    Morning resolution pipeline (9 AM ET): resolve yesterday's outcomes and
+    update training data. Does NOT fetch props, score legs, or build parlays.
+
+    Live recommendations are served on-demand via /api/build-parlays?refresh=true.
+    """
+    today  = str(date.today())
+    yesterday = str(date.today() - timedelta(days=1))
+
+    print("\nMLB Parlay Agent — Morning Resolution Pipeline")
+    print("=" * 50)
+    print(f"  Resolving outcomes for {yesterday}")
+
+    # Step 1: Transaction wire (for blocked-player context in later pipeline runs)
+    print("\n[1/3] Fetching transaction wire (IL/DFA)...")
+    blocked_names = _get_blocked_players(today)
+    print(f"  {len(blocked_names)} player(s) blocked from today's transactions")
+
+    # Step 2: Training data health check
+    print("\n[2/3] Training data health check...")
+    try:
+        from scripts.training_health_check import check_training_health
+        health = check_training_health(days_back=7)
+        if not health["healthy"]:
+            print("  [health] TRAINING DATA ISSUES DETECTED:")
+            for issue in health["issues"]:
+                print(f"    {issue}")
+        else:
+            print("  [health] Training data OK")
+        if health["hit_rate"] is not None:
+            print(f"  [health] Hit rate (7d): {health['hit_rate']:.1f}%")
+    except Exception as _hc_err:
+        print(f"  [health] Health check skipped: {_hc_err}")
+
+    # Step 3: Log summary
+    print("\n[3/3] Morning pipeline complete")
+    print("  For live recommendations, use /api/build-parlays?refresh=true")
+
+
 def run():
     """CLI entry point — calls run_pipeline() and prints output."""
     run_pipeline()

@@ -2233,7 +2233,7 @@ async function loadRecommendations() {
   container.innerHTML = '<div class="center-msg"><div class="spinner"></div><div>Building parlays from current legs…</div></div>';
 
   try {
-    const res = await fetch(`/api/build-parlays?password=${encodeURIComponent(password)}`);
+    const res = await fetch(`/api/build-parlays?refresh=true&password=${encodeURIComponent(password)}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
 

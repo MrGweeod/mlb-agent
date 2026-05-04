@@ -240,8 +240,9 @@ async def handle_build_parlays(request: web.Request) -> web.Response:
     """
     Build fresh parlays from today's scored legs, filtered for upcoming games only.
 
-    Replaces the stale mlb_parlay_recommendations table approach.
-    Returns top 5 parlays ranked by edge, built on-demand.
+    Query params:
+        refresh=true  - Run full pipeline to fetch fresh SGO props and re-score
+        refresh=false - Use cached database legs from last pipeline run (default)
     """
     if not _check_auth(request):
         return web.Response(
@@ -253,7 +254,16 @@ async def handle_build_parlays(request: web.Request) -> web.Response:
     try:
         from src.engine.parlay_builder import build_hybrid_parlays
 
+        force_refresh = request.rel_url.query.get("refresh", "false").lower() == "true"
         today = str(date.today())
+
+        if force_refresh:
+            print("[build_parlays] LIVE REFRESH requested — running pipeline for fresh data")
+            from main import run_pipeline
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, run_pipeline)
+            print("[build_parlays] Pipeline complete — reading fresh legs from DB")
+
         scored_legs = get_scored_legs(today)
 
         if not scored_legs:
@@ -306,21 +316,21 @@ async def handle_build_parlays(request: web.Request) -> web.Response:
         qualifying_legs = []
         for leg in upcoming_legs:
             composite_score = leg.get("composite_score", 0)
-            if composite_score >= 55:
+            if composite_score >= 65:
                 qualifying_legs.append({
                     **leg,
                     "best_odds": leg.get("odds"),
                     "best_line": leg.get("line"),
                 })
 
-        print(f"[build_parlays] {len(qualifying_legs)} legs ≥55% ML score")
+        print(f"[build_parlays] {len(qualifying_legs)} legs ≥65% ML score")
 
         if len(qualifying_legs) < 4:
             return web.Response(
                 text=json.dumps({
                     "parlays": [],
                     "message": (
-                        f"Only {len(qualifying_legs)} legs qualify (≥55% ML score), "
+                        f"Only {len(qualifying_legs)} legs qualify (≥65% ML score), "
                         "need at least 4"
                     ),
                 }),
@@ -777,21 +787,26 @@ def create_app() -> web.Application:
 
 
 _ET = ZoneInfo("America/New_York")
+# Morning resolution pipeline runs once at 9 AM ET.
+# Live recommendations are served on-demand via /api/build-parlays?refresh=true.
 _PIPELINE_SCHEDULE = [
-    dtime(9, 0),    # 9:00 AM ET
-    dtime(12, 0),   # 12:00 PM ET
-    dtime(17, 30),  # 5:30 PM ET
+    dtime(9, 0),    # 9:00 AM ET — resolution only
 ]
 
 
 async def _pipeline_scheduler() -> None:
     """
-    Background task that runs run_pipeline() at 9 AM, 12 PM, and 5:30 PM ET.
+    Background task that runs run_morning_pipeline() at 9 AM ET (resolution only).
 
     Computes the next scheduled time on each iteration, sleeps until then,
     then runs the pipeline in a thread executor (it's synchronous/blocking).
+
+    Live recommendations are served on-demand via /api/build-parlays?refresh=true.
     """
-    from main import run_pipeline
+    from main import run_morning_pipeline
+
+    print("[scheduler] Morning pipeline scheduled at 9:00 AM ET (resolution only)")
+    print("[scheduler] Live recommendations via /api/build-parlays?refresh=true")
 
     while True:
         now = datetime.now(_ET)
@@ -813,18 +828,18 @@ async def _pipeline_scheduler() -> None:
 
         sleep_secs = (next_run - datetime.now(_ET)).total_seconds()
         print(
-            f"[scheduler] next pipeline run at "
+            f"[scheduler] next morning pipeline at "
             f"{next_run.strftime('%Y-%m-%d %H:%M ET')} "
             f"(in {sleep_secs / 3600:.1f}h)"
         )
         await asyncio.sleep(max(sleep_secs, 1))
 
-        print(f"[scheduler] running pipeline at {datetime.now(_ET).strftime('%H:%M ET')}")
+        print(f"[scheduler] running morning pipeline at {datetime.now(_ET).strftime('%H:%M ET')}")
         try:
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, run_pipeline)
+            await loop.run_in_executor(None, run_morning_pipeline)
         except Exception as exc:
-            print(f"[scheduler] pipeline error: {exc}")
+            print(f"[scheduler] morning pipeline error: {exc}")
 
 
 async def start_server() -> web.AppRunner:
@@ -842,7 +857,7 @@ async def start_server() -> web.AppRunner:
 
     # Start the background pipeline scheduler
     asyncio.ensure_future(_pipeline_scheduler())
-    print("[web] Pipeline scheduler started (9:00 AM / 12:00 PM / 5:30 PM ET)")
+    print("[web] Morning pipeline scheduler started (9:00 AM ET — resolution only)")
 
     return runner
 
