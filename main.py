@@ -771,12 +771,23 @@ def run_morning_pipeline() -> None:
     print(f"  Resolving outcomes for {yesterday}")
 
     # Step 1: Transaction wire (for blocked-player context in later pipeline runs)
-    print("\n[1/3] Fetching transaction wire (IL/DFA)...")
+    print("\n[1/4] Fetching transaction wire (IL/DFA)...")
     blocked_names = _get_blocked_players(today)
     print(f"  {len(blocked_names)} player(s) blocked from today's transactions")
 
-    # Step 2: Training data health check
-    print("\n[2/3] Training data health check...")
+    # Step 2: Resolve yesterday's training data outcomes
+    print(f"\n[2/4] Resolving outcomes for {yesterday}...")
+    try:
+        from src.tracker.outcome_resolver import resolve_training_data
+        resolution_stats = resolve_training_data(yesterday, verbose=True)
+        print(f"  Resolution complete: {resolution_stats['hit']} hits, "
+              f"{resolution_stats['miss']} misses, {resolution_stats['void']} voids")
+    except Exception as _res_err:
+        print(f"  WARNING: Outcome resolution failed: {_res_err}")
+        # Don't crash the pipeline if resolution fails
+
+    # Step 3: Training data health check
+    print("\n[3/4] Training data health check...")
     try:
         from scripts.training_health_check import check_training_health
         health = check_training_health(days_back=7)
@@ -791,8 +802,8 @@ def run_morning_pipeline() -> None:
     except Exception as _hc_err:
         print(f"  [health] Health check skipped: {_hc_err}")
 
-    # Step 3: Log summary
-    print("\n[3/3] Morning pipeline complete")
+    # Step 4: Log summary
+    print("\n[4/4] Morning pipeline complete")
     print("  For live recommendations, use /api/build-parlays?refresh=true")
 
 
