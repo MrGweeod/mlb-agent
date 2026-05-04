@@ -284,7 +284,7 @@ async def handle_build_parlays(request: web.Request) -> web.Response:
                     text=json.dumps({
                         "parlays": _parlay_cache["parlays"],
                         "generated_at": _parlay_cache["generated_at"],
-                    }),
+                    }, default=str),
                     content_type="application/json",
                 )
 
