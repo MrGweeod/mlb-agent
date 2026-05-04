@@ -2227,6 +2227,7 @@ function renderTrainFeatures(rows) {
 
 // ── Recommendations ──────────────────────────────────────────────────────────
 let _recsRefreshTimer = null;
+let _currentParlays = [];
 
 async function loadRecommendations(forceRefresh = false) {
   const container = document.getElementById('recommendations-container');
@@ -2250,6 +2251,7 @@ async function loadRecommendations(forceRefresh = false) {
 
     // Assign id from rank so renderRecommendations div IDs work
     data.parlays.forEach(p => { p.id = p.rank; });
+    _currentParlays = data.parlays;
     renderRecommendations(data.parlays);
     updateTimestamp(data.generated_at);
   } catch (err) {
@@ -2363,13 +2365,14 @@ async function analyzeRecommendation(recId) {
   analysisText.innerHTML = '<span style="color:var(--muted)">Generating analysis…</span>';
 
   try {
+    const parlay = _currentParlays.find(p => p.id === recId);
     const res = await fetch('/api/analyze-recommendation', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${password}`,
       },
-      body: JSON.stringify({ recommendation_id: recId }),
+      body: JSON.stringify(parlay ? { parlay } : { recommendation_id: recId }),
     });
     const data = await res.json();
 

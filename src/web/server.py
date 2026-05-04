@@ -727,29 +727,35 @@ async def handle_analyze_recommendation(request: web.Request) -> web.Response:
         )
 
     recommendation_id = body.get("recommendation_id")
-    if not recommendation_id:
+    parlay_direct = body.get("parlay")
+
+    if parlay_direct:
+        # Parlay data passed directly from frontend (dynamic build, no DB record)
+        rec = parlay_direct
+        recommendation_id = None
+    elif recommendation_id:
+        # Find the recommendation in today's DB list
+        try:
+            all_recs = get_todays_recommendations()
+            rec = next((r for r in all_recs if r["id"] == int(recommendation_id)), None)
+        except Exception as exc:
+            return web.Response(
+                text=json.dumps({"error": str(exc)}),
+                content_type="application/json",
+                status=500,
+            )
+
+        if not rec:
+            return web.Response(
+                text=json.dumps({"error": "Recommendation not found"}),
+                content_type="application/json",
+                status=404,
+            )
+    else:
         return web.Response(
-            text=json.dumps({"error": "recommendation_id required"}),
+            text=json.dumps({"error": "recommendation_id or parlay required"}),
             content_type="application/json",
             status=400,
-        )
-
-    # Find the recommendation in today's list
-    try:
-        all_recs = get_todays_recommendations()
-        rec = next((r for r in all_recs if r["id"] == int(recommendation_id)), None)
-    except Exception as exc:
-        return web.Response(
-            text=json.dumps({"error": str(exc)}),
-            content_type="application/json",
-            status=500,
-        )
-
-    if not rec:
-        return web.Response(
-            text=json.dumps({"error": "Recommendation not found"}),
-            content_type="application/json",
-            status=404,
         )
 
     # If analysis was already generated, return it immediately
@@ -800,11 +806,12 @@ async def handle_analyze_recommendation(request: web.Request) -> web.Response:
             status=500,
         )
 
-    # Persist and return
-    try:
-        update_recommendation_analysis(int(recommendation_id), analysis)
-    except Exception as exc:
-        print(f"  [server] failed to save analysis for rec {recommendation_id}: {exc}")
+    # Persist only when we have a DB-backed recommendation_id
+    if recommendation_id:
+        try:
+            update_recommendation_analysis(int(recommendation_id), analysis)
+        except Exception as exc:
+            print(f"  [server] failed to save analysis for rec {recommendation_id}: {exc}")
 
     return web.Response(
         text=json.dumps({"analysis": analysis}),
