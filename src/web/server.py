@@ -419,6 +419,23 @@ async def handle_build_parlays(request: web.Request) -> web.Response:
             _parlay_cache["timestamp"] = datetime.now()
         print(f"[build_parlays] Cached {len(top_5)} parlays (expires in {_CACHE_TTL_MINUTES} min)")
 
+        # Persist parlays to DB for outcome tracking
+        from src.utils.db import save_parlay_recommendation
+        run_time = datetime.now(timezone.utc)
+        for parlay in top_5:
+            try:
+                save_parlay_recommendation({
+                    "recommendation_date": date.today(),
+                    "pipeline_run_time":   run_time,
+                    "rank":                parlay["rank"],
+                    "leg_odd_ids":         [leg["odd_id"] for leg in parlay.get("legs", []) if leg.get("odd_id")],
+                    "combined_odds":       parlay.get("combined_odds", 0),
+                    "win_probability":     parlay.get("win_probability", 0.0),
+                    "edge_pct":            parlay.get("edge_pct", 0.0),
+                })
+            except Exception as _save_err:
+                print(f"[build_parlays] Failed to save rank {parlay.get('rank')}: {_save_err}")
+
         return web.Response(
             text=json.dumps({
                 "parlays": top_5,

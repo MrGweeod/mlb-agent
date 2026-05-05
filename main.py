@@ -790,16 +790,32 @@ def run_morning_pipeline() -> None:
     blocked_names = _get_blocked_players(today)
     print(f"  {len(blocked_names)} player(s) blocked from today's transactions")
 
-    # Step 2: Resolve yesterday's training data outcomes
-    print(f"\n[2/4] Resolving outcomes for {yesterday}...")
+    # Step 2: Resolve yesterday's scored legs (mlb_scored_legs)
+    print(f"\n[2/4] Resolving scored legs for {yesterday}...")
     try:
-        from src.tracker.outcome_resolver import resolve_training_data
+        from src.tracker.outcome_resolver import resolve_all_legs, resolve_training_data
+        leg_stats = resolve_all_legs(yesterday, verbose=True)
+        print(f"  Scored legs: {leg_stats['won']} won, "
+              f"{leg_stats['lost']} lost, {leg_stats['void']} void")
+    except Exception as _leg_err:
+        print(f"  WARNING: Scored-leg resolution failed: {_leg_err}")
+
+    # Step 2b: Resolve yesterday's training data outcomes
+    try:
         resolution_stats = resolve_training_data(yesterday, verbose=True)
-        print(f"  Resolution complete: {resolution_stats['hit']} hits, "
+        print(f"  Training data: {resolution_stats['hit']} hits, "
               f"{resolution_stats['miss']} misses, {resolution_stats['void']} voids")
     except Exception as _res_err:
-        print(f"  WARNING: Outcome resolution failed: {_res_err}")
-        # Don't crash the pipeline if resolution fails
+        print(f"  WARNING: Training data resolution failed: {_res_err}")
+
+    # Step 2c: Resolve yesterday's parlay recommendations
+    try:
+        from src.tracker.parlay_outcome_resolver import resolve_parlay_recommendations
+        parlay_stats = resolve_parlay_recommendations(yesterday, verbose=True)
+        print(f"  Parlays: {parlay_stats['won']} won, {parlay_stats['lost']} lost, "
+              f"{parlay_stats['void']} void, {parlay_stats['skipped']} skipped")
+    except Exception as _par_err:
+        print(f"  WARNING: Parlay resolution failed: {_par_err}")
 
     # Step 3: Training data health check
     print("\n[3/4] Training data health check...")
