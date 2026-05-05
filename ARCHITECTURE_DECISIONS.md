@@ -1,680 +1,387 @@
 # MLB Parlay Agent — Architecture Decisions
 
-**Last Updated:** May 4, 2026
+**Last Updated:** May 5, 2026
 
 ---
 
-## In-Memory Parlay Cache (May 4, 2026)
+## Pass Full Parlay Payload Instead of DB ID (May 5, 2026)
 
-**Decision:** Implement 30-minute in-memory cache for parlay recommendations
+**Decision:** Frontend sends full parlay object to `/api/analyze-recommendation` instead of just recommendation_id
 
 ### Context
 
-Picks tab was running full pipeline (1-2 min) on every page load because frontend always sent `refresh=true`. This caused:
-- Poor user experience (long waits)
-- Database connection pool exhaustion (concurrent pipelines)
-- Wasted compute resources (same data fetched repeatedly)
+The "Analyze Parlay" button was returning 404 "Recommendation not found" even though the endpoint existed and worked correctly.
 
-### Problem Analysis
+### Root Cause
 
-**User workflow:**
+**The ID mismatch:**
 ```
-User clicks "Picks" tab
-  → Frontend sends refresh=true
-  → Backend runs 8-step pipeline (1-2 min)
-  → User clicks away, comes back
-  → Frontend sends refresh=true AGAIN
-  → Another full pipeline run
-```
+Frontend:
+  - Builds parlays dynamically via /api/build-parlays (in-memory, not saved to DB)
+  - Assigns p.id = p.rank (1, 2, 3, 4, 5)
+  - Sends {recommendation_id: 1} to backend
 
-**Evidence from logs (May 4, 15:37):**
-```
-[build_parlays] LIVE REFRESH requested — running pipeline
-[db] connection attempt 1 failed (EDBHANDLEREXITED)
-[db] connection attempt 1 failed (ECHECKOUTTIMEOUT)
+Backend:
+  - Searches mlb_parlay_recommendations table for r["id"] == 1
+  - But DB id is auto-increment PK (42, 43, 44...)
+  - Lookup fails → returns 404
 ```
 
-Three pipeline runs in parallel exhausted Supabase's 15-connection pool.
+**The fundamental issue:** Frontend was using rank as ID, backend expected database primary key.
 
 ### Solution Options Considered
 
-**Option A: Database cache with timestamp column** ❌
-- Pros: Persistent across server restarts
-- Cons: Still requires DB query on every load, adds table complexity
+**Option A: Use rank as DB ID** ❌
+- Store rank in database as ID
+- Cons: Complicates DB schema, rank changes with reordering
+- Not chosen: Rank is presentation layer, not data layer
 
-**Option B: Redis/Memcached external cache** ❌
-- Pros: Scales across multiple instances
-- Cons: Additional infrastructure cost, overkill for single Railway instance
+**Option B: Return DB IDs from /api/build-parlays** ❌
+- Save parlays to DB before returning
+- Cons: Unnecessary DB writes for ephemeral recommendations
+- Not chosen: Dynamic parlays shouldn't pollute recommendation table
 
-**Option C: In-memory cache with threading.Lock()** ✅ **CHOSEN**
-- Pros: Zero infrastructure, fast (no I/O), simple to implement
-- Cons: Lost on server restart, doesn't scale to multiple instances
-- Rationale: Current single-instance Railway deployment makes this ideal
+**Option C: Pass full parlay object** ✅ **CHOSEN**
+- Frontend stores parlays in memory
+- Sends complete parlay object to analysis endpoint
+- Backend uses object directly, skips DB lookup
+- Pros: No ID mapping, works for both dynamic and saved parlays
+- Cons: Larger request payload (~2KB vs 4 bytes)
 
 ### Implementation
 
-**Cache structure:**
-```python
-_parlay_cache = {
-    "parlays": None,          # List of parlay dicts
-    "timestamp": None,        # datetime when cached
-    "generated_at": None,     # ISO timestamp for frontend
-    "lock": threading.Lock()  # Thread-safe access
-}
-_CACHE_TTL_MINUTES = 30
-```
-
-**Cache logic flow:**
-```python
-async def handle_build_parlays(request):
-    force_refresh = request.query.get("refresh") == "true"
-    
-    # Check cache first
-    with _parlay_cache["lock"]:
-        cache_age = datetime.now() - _parlay_cache["timestamp"]
-        cache_valid = cache_age < timedelta(minutes=30)
-        
-        if cache_valid and not force_refresh:
-            return cached_parlays  # < 1 sec
-    
-    # Cache miss or forced refresh
-    run_pipeline()  # 1-2 min
-    build_parlays()
-    
-    # Store in cache
-    with _parlay_cache["lock"]:
-        _parlay_cache["parlays"] = parlays
-        _parlay_cache["timestamp"] = datetime.now()
-    
-    return parlays
-```
-
-**Frontend coordination:**
+**Frontend changes:**
 ```javascript
-// Initial Picks tab load
-loadRecommendations(forceRefresh=false)  // Uses cache if available
+// Global to store current parlays
+let _currentParlays = [];
 
-// "Regenerate Now" button
-loadRecommendations(forceRefresh=true)   // Forces fresh pipeline
+// Populate when loading recommendations
+async function loadRecommendations(forceRefresh) {
+    const data = await fetch('/api/build-parlays?refresh=' + forceRefresh).then(r => r.json());
+    _currentParlays = data.parlays;  // Cache in memory
+    renderRecommendations(data.parlays);
+}
+
+// Send full object instead of just ID
+async function analyzeRecommendation(recId) {
+    const parlay = _currentParlays.find(p => p.id === recId);
+    const response = await fetch('/api/analyze-recommendation', {
+        method: 'POST',
+        body: JSON.stringify(parlay ? { parlay } : { recommendation_id: recId })
+    });
+}
+```
+
+**Backend changes:**
+```python
+async def handle_analyze_recommendation(request):
+    body = await request.json()
+    
+    # Accept both paths
+    parlay_direct = body.get("parlay")
+    recommendation_id = body.get("recommendation_id")
+    
+    if parlay_direct:
+        # Use passed parlay (dynamic builds, no DB record)
+        rec = parlay_direct
+        recommendation_id = None
+    elif recommendation_id:
+        # Lookup in DB (saved recommendations)
+        rec = next((r for r in all_recs if r["id"] == int(recommendation_id)), None)
+        if not rec:
+            return web.Response(status=404, text="Recommendation not found")
+    else:
+        return web.Response(status=400, text="recommendation_id or parlay required")
+    
+    # Generate analysis
+    analysis = await call_claude_api(rec)
+    
+    # Only persist if we have a DB record
+    if recommendation_id:
+        update_recommendation_analysis(int(recommendation_id), analysis)
+    
+    return web.Response(text=json.dumps({"analysis": analysis}))
 ```
 
 ### Impact
 
 **Before (Broken):**
-- Every tab load: 1-2 min pipeline run
-- Connection pool exhausted: HTTP 500 errors
-- Poor UX: Long waits, no visual feedback
+```
+User clicks "Analyze Parlay #1"
+  → Frontend sends {recommendation_id: 1}
+  → Backend searches DB for id=1
+  → Not found (DB id is 42)
+  → Returns 404
+```
 
 **After (Fixed):**
-- First load: 1-2 min (cache miss)
-- Subsequent loads: < 1 sec (cache hit)
-- Regenerate button: 1-2 min (forced refresh)
-- Cache expires after 30 min: Auto-refresh on next load
+```
+User clicks "Analyze Parlay #1"
+  → Frontend sends {parlay: {legs: [...], combined_odds: 1490, ...}}
+  → Backend uses object directly
+  → Generates analysis
+  → Returns 200 with Claude's analysis
+```
 
 ### Trade-offs Accepted
 
-**Cache invalidation complexity:**
-- Cache doesn't know about external data changes (lineups, odds)
-- User must manually click "Regenerate Now" for fresh data
-- **Mitigation:** 30-min TTL ensures data never more than 30 min stale
+**Larger request payload:**
+- Sending full parlay object (~2KB) vs just ID (4 bytes)
+- **Mitigation:** Acceptable for HTTP POST, gzipped by default
 
-**Lost on server restart:**
-- Railway restarts clear cache (cold start = full pipeline)
-- **Mitigation:** Acceptable for current usage pattern
+**Stateful frontend:**
+- Frontend must keep `_currentParlays` in memory
+- Lost on page refresh (acceptable - just reload)
+- **Mitigation:** Simple array storage, no complexity
 
-**Single-instance only:**
-- Won't work with load balancing (each instance has own cache)
-- **Mitigation:** Not needed now; revisit if scaling horizontally
+**Two code paths in backend:**
+- Must handle both `{parlay}` and `{recommendation_id}`
+- **Benefit:** Supports both dynamic and DB-backed recommendations
+- **Mitigation:** Clear if/elif logic, well-documented
 
 ### Key Lessons
 
-**1. Default to cached, opt-in to fresh**
-- Never run expensive operations by default
-- Make user explicitly request fresh data
+**1. ID semantics matter**
+- Rank (1, 2, 3) is presentation order, not persistent identity
+- Database IDs are persistent, but not guaranteed to match rank
+- Never assume frontend and backend share ID namespace
 
-**2. In-memory cache sufficient for single instance**
-- Don't over-engineer with Redis for 1 Railway dyno
-- Start simple, add complexity only when needed
+**2. Pass objects when IDs are ambiguous**
+- If ID mapping is complex or error-prone, pass the full object
+- Slightly larger payload beats broken functionality
 
-**3. Thread-safe critical for web servers**
-- Multiple requests can hit endpoint simultaneously
-- `threading.Lock()` prevents race conditions
-
-### Future Considerations
-
-**If scaling to multiple instances:**
-- Move to Redis with shared cache
-- Or accept eventual consistency (each instance caches independently)
-
-**If lineup changes matter more:**
-- Reduce TTL from 30 min to 10 min
-- Or implement webhook from MLB lineup API to invalidate cache
-
-**If cache hit rate low:**
-- Investigate user patterns (are they clicking Regenerate too often?)
-- May indicate data freshness is more important than speed
+**3. Support multiple access patterns**
+- Dynamic (in-memory) vs persistent (DB) recommendations
+- Backend should accept both, not force one pattern
 
 ---
 
-## Parlay Construction Strategy Restoration (May 4, 2026)
+## Perpetual Data Loop - Option A (May 5, 2026)
 
-**Decision:** Revert to 4-6 legs targeting +1000-1500 odds with 65% ML threshold
+**Decision:** Automate outcome resolution daily, keep model retraining manual for quality control
 
 ### Context
 
-Previous fix (May 1) widened odds to +600-2500 to solve "0 parlays built" issue. This moved away from core betting strategy of 10-15x returns with manageable risk.
+User expected **perpetual calibration** where the ML model continuously learns from new data:
+1. Props logged daily → 2. Outcomes resolved daily → 3. Model retrained automatically → 4. Predictions improve
 
-### Root Cause Analysis
+Investigation revealed only step 1 was working. Steps 2-4 were broken or manual-only.
 
-**The math problem:**
+### Problem Analysis
+
+**What was working:**
+- ✅ Props logged to `mlb_training_data` daily (result = NULL)
+- ✅ Training script exists (`scripts/train_ml_model.py`)
+- ✅ Manual retrain endpoint exists (`GET /api/train-model?secret=PASSWORD`)
+
+**What was broken:**
+- ❌ Outcome resolution not automated (`resolve_training_data()` exists but not called by pipeline)
+- ❌ Model retraining not scheduled (no cron, no automation)
+- ❌ Model never reloads (cached at startup, even if pickle updates)
+
+**The data flow gap:**
 ```
-5 legs at -110 each:
-  decimal_odds = (100/110 + 1) = 1.909
-  combined = (1.909^5 - 1) × 100 = +2,435
-  → Exceeds +1500 target ❌
-
-4 legs at -110 each:
-  combined = (1.909^4 - 1) × 100 = +1,228
-  → Fits +1000-1500 range ✅
+Props logged (result=NULL)
+  → Sit unresolved forever
+  → Training data doesn't grow
+  → Model uses April 30 weights indefinitely
 ```
 
-**The actual issue:** Minimum 5 legs incompatible with +1000-1500 target, not that target was wrong.
+### Solution Options Considered
 
-### Solution Chosen
+**Option A: Quick Fix (Automated Resolution + Manual Retraining)** ✅ **CHOSEN**
+- Automate outcome resolution (9 AM daily)
+- Keep retraining manual (weekly via `/api/train-model`)
+- Keep deployment manual (Railway redeploy)
+- Pros: Simple, immediate impact, manual quality control
+- Cons: Still requires weekly human intervention
 
-**Change minimum legs from 5 to 4:**
+**Option B: Full Perpetual Calibration (Everything Automated)** ⏳ **FUTURE**
+- Automate outcome resolution (9 AM daily)
+- Automate model retraining (weekly via cron)
+- Automate model hot-reload (after training completes)
+- Add validation gates (don't deploy if AUC drops)
+- Pros: True perpetual learning, zero intervention
+- Cons: More complex, risk of bad model auto-deploying
+
+**Why Option A chosen:**
+1. Gets data flowing immediately
+2. Validates retraining process manually before automating
+3. User controls when model updates deploy
+4. Can add automation incrementally once proven
+
+### Implementation
+
+**Modified `main.py` - `run_morning_pipeline()` function:**
+
+**Added Step 2 (Outcome Resolution):**
 ```python
-# Before (broken)
-MIN_LEGS = 5  # Can't hit +1000-1500 with typical -110 props
-MAX_LEGS = 8
-MIN_PARLAY_ODDS = 600   # Too permissive
-MAX_PARLAY_ODDS = 2500  # Too risky
-
-# After (correct)
-MIN_LEGS = 4  # Perfect for +1000-1500 range
-MAX_LEGS = 6  # Reasonable ceiling
-MIN_PARLAY_ODDS = 1000  # Core strategy target
-MAX_PARLAY_ODDS = 1500  # Risk management
+# Step 2: Resolve yesterday's training data outcomes
+print(f"\n[2/4] Resolving outcomes for {yesterday}...")
+try:
+    from src.tracker.outcome_resolver import resolve_training_data
+    resolution_stats = resolve_training_data(yesterday, verbose=True)
+    print(f"  Resolution complete: {resolution_stats['hit']} hits, "
+          f"{resolution_stats['miss']} misses, {resolution_stats['void']} voids")
+except Exception as _res_err:
+    print(f"  WARNING: Outcome resolution failed: {_res_err}")
+    # Don't crash the pipeline if resolution fails
 ```
 
-### Why Not Widen Odds Window?
-
-**User's core betting philosophy:**
-- 10-15x returns on small wagers (entertainment + upside)
-- Avoid "lottery ticket" parlays (+2000+) with < 5% hit rate
-- Manageable risk (4-6 legs, not 8-10)
-
-**Widening to +600-2500 would:**
-- Include 3-leg parlays (+600-800 range) = too conservative
-- Include 7-8 leg parlays (+2000+ range) = too risky
-- Dilute focus from sweet spot (4-6 legs, +1000-1500)
+**No other changes needed:**
+- `resolve_training_data()` already existed in `src/tracker/outcome_resolver.py`
+- Just needed to wire it into the daily pipeline
+- Function handles all box score fetching, outcome determination, DB updates
 
 ### Impact
 
-**Odds distribution validation:**
+**Before (Broken):**
 ```
-4 legs at -110: +1,228 ✅
-4 legs at -120: +1,073 ✅
-4 legs at -130: +941 (close, acceptable) ✅
-4 legs at -150: +775 ❌ (below range)
-
-5 legs at -110: +2,435 ❌ (exceeds range)
-6 legs at -110: +4,741 ❌ (way too high)
+9 AM Pipeline:
+1. Transaction wire
+2. Health check
+3. Done
+→ Props accumulate as NULL forever
 ```
 
-**Conclusion:** 4-6 legs with typical DK prop odds (-110 to -130) fit +1000-1500 target.
-
-### Key Lessons
-
-**1. Math constraints inform architecture**
-- Can't just "set target odds" without validating achievability
-- Must test with real prop pricing (-110, -120, -130)
-
-**2. User strategy is non-negotiable**
-- +1000-1500 target reflects deliberate risk/reward philosophy
-- Technical "fixes" that violate strategy are bugs, not features
-
-**3. Minimum leg count matters**
-- 4 legs = accessible sweet spot
-- 5 legs = forces too-high odds or too-low individual odds
-- 6+ legs = lottery territory
-
----
-
-## ML Model as Gatekeeper (May 4, 2026)
-
-**Decision:** Raise ML threshold from 55% to 65% for strict quality filter
-
-### Context
-
-Original 55% threshold was producing 270 qualifying legs from ~1800 raw props (15% pass rate). This created two problems:
-
-1. **Too many mediocre legs** - parlay builder only uses top 20, wasting 250 scored legs
-2. **Diluted quality** - 55% prediction is barely better than coin flip
-
-### Philosophy Change
-
-**Old approach (quantity focus):**
+**After (Fixed):**
 ```
-Cast wide net → Score everything ≥55% → Parlay builder picks best 20
+9 AM Pipeline:
+1. Transaction wire
+2. Resolve yesterday's outcomes (NULL → hit/miss/void)
+3. Health check
+4. Done
+→ Training dataset grows ~150-200 rows/day
 ```
 
-**New approach (quality focus):**
+**Data flow now:**
 ```
-ML model filters strictly ≥65% → Only elite legs scored → Parlay builder optimizes from curated pool
-```
-
-**Analogy:** ML model is the **strict gatekeeper**, parlay builder is the **optimizer**.
-
-### Impact Analysis
-
-**Expected leg counts:**
-```
-55% threshold: 270 legs (15% of 1800 props)
-65% threshold: 40-60 legs (2-3% of 1800 props)
-
-For parlay building:
-- Need minimum 20 legs for diversity
-- Target 40-60 for good combination space
-- Above 100 = wasted computation
+Day 1: Log 150 props (result=NULL)
+Day 2 9AM: Resolve Day 1 props → 75 hits, 70 misses, 5 voids
+Day 2: Log 150 new props (result=NULL)
+Day 3 9AM: Resolve Day 2 props
+...
+Training data grows automatically
 ```
 
-**Quality improvement:**
-```
-55% legs: Barely above break-even (52% actual hit rate typical)
-65% legs: Clear edge (60-70% actual hit rate expected)
-```
+### Manual Retraining Workflow
+
+**Every Sunday (or as desired):**
+
+1. **Trigger retraining:**
+   ```bash
+   curl GET /api/train-model?secret=PASSWORD
+   ```
+
+2. **Evaluate response:**
+   ```json
+   {
+     "status": "success",
+     "auc": 0.8612,
+     "samples": 84523,
+     "old_auc": 0.8532,
+     "improvement": "+0.0080"
+   }
+   ```
+
+3. **Quality checks:**
+   - AUC improved or stable (>0.85)?
+   - Sample count grew (77K → 84K)?
+   - Improvement positive or small negative (<0.01)?
+
+4. **Deploy if good:**
+   - Railway dashboard → Redeploy
+   - Wait 2-3 min for new model to load
+
+5. **Monitor next week:**
+   - Are predictions calibrated?
+   - Did quality improve?
+   - Any new biases?
 
 ### Trade-offs Accepted
 
-**Fewer parlays on thin slates:**
-- If only 30 elite legs available, combinations limited
-- May build 2-3 parlays instead of 5
-- **Mitigation:** Better to have 2 quality parlays than 5 mediocre ones
+**Manual intervention still required:**
+- Weekly trigger of `/api/train-model`
+- Manual validation of results
+- Manual Railway redeploy
+- **Benefit:** User controls quality, can skip bad models
 
-**Stricter than calibration target:**
-- ML model calibrated across full distribution (40-80% range)
-- Using only top end (≥65%) may introduce selection bias
-- **Mitigation:** Monitor actual hit rates over 7 days, recalibrate if needed
+**Model doesn't auto-reload:**
+- Even if pickle updates, must redeploy Railway
+- **Mitigation:** Acceptable for weekly cadence
+- **Future:** Can add hot-reload mechanism
 
-**Smaller training signal:**
-- Fewer legs logged = slower accumulation of outcome data
-- **Mitigation:** Still logging 40-60 props/day × 150 days/season = 6-9K samples
-
-### Validation Plan
-
-**Week 1 (May 5-11):**
-- Track actual hit rate of ≥65% legs
-- Target: 60-70% (allowing for ±5pp calibration error)
-- If < 55%: Model overconfident, retrain or lower threshold
-- If > 75%: Model underconfident, could raise threshold
-
-**Week 2-4 (May 12-31):**
-- A/B test 60% vs 65% vs 70% thresholds
-- Measure: hit rate, parlay quality, user satisfaction
-- Choose optimal threshold based on data
+**No validation gates:**
+- Nothing prevents deploying a bad model
+- User must check AUC manually
+- **Mitigation:** Automated gates can be added later
 
 ### Key Lessons
 
-**1. ML threshold is strategic, not technical**
-- 65% reflects betting philosophy (elite legs only)
-- Could set at 50% (more legs) or 80% (fewer legs)
-- Right answer depends on user's risk tolerance
+**1. "Perpetual" requires explicit wiring**
+- Having code doesn't mean it runs
+- Must add to scheduled pipeline
+- Automation is opt-in, not default
 
-**2. Quantity ≠ Quality**
-- 270 mediocre legs worse than 40 elite legs
-- Parlay builder can't fix low-quality input
+**2. Start with manual quality control**
+- Validate process works before automating
+- Build confidence in retraining quality
+- Easier to add automation than remove it
 
-**3. Gatekeeper pattern separates concerns**
-- ML model: Is this leg good? (binary filter)
-- Parlay builder: Which legs combine best? (optimization)
+**3. Separation of concerns**
+- Data collection: Automated
+- Model training: Manual
+- Deployment: Manual
+- Each can be automated independently
 
----
+**4. Weekly cadence is reasonable**
+- Model doesn't need daily retraining
+- 1 week = ~1K new samples (enough to matter)
+- Manual review feasible once per week
 
-## Pipeline Schedule Simplification (May 4, 2026)
+### Future Path to Full Automation (Option B)
 
-**Decision:** Remove 12 PM and 5:30 PM scheduled runs, keep only 9 AM resolution
+**After 3-4 successful manual retrainings:**
 
-### Context
+1. **Add weekly cron job:**
+   ```python
+   # Railway cron: every Sunday 3 AM
+   async def weekly_retrain():
+       response = requests.get("/api/train-model?secret=...")
+       if response.json()["auc"] > 0.85:
+           trigger_railway_redeploy()
+   ```
 
-Original schedule had three daily runs:
-- **9:00 AM ET:** Resolve yesterday + fresh props for today
-- **12:00 PM ET:** Updated props, mid-day recommendations
-- **5:30 PM ET:** Final props before first pitches, lineup confirmations
+2. **Add model hot-reload:**
+   ```python
+   # In ml_leg_scorer.py
+   def get_model():
+       global _cached_model, _cached_timestamp
+       if pickle_file_newer_than(_cached_timestamp):
+           _cached_model = load_model()
+           _cached_timestamp = now()
+       return _cached_model
+   ```
 
-This created two problems:
+3. **Add validation gates:**
+   ```python
+   # Don't deploy if quality regresses
+   if new_auc < old_auc - 0.02:
+       alert_user("Model quality dropped, skipping deployment")
+       return
+   ```
 
-1. **Scheduled recommendations stale by viewing time** - 5:30 PM props stale by 7 PM when user checks
-2. **Wasted compute** - Most 12 PM/5:30 PM runs never viewed
+4. **Add rollback mechanism:**
+   ```python
+   # Keep last 5 model versions
+   # Revert to previous if production metrics degrade
+   ```
 
-### New Architecture
-
-**Morning pipeline (9 AM only):**
-```python
-def run_morning_pipeline():
-    """Resolution and data maintenance only"""
-    resolve_yesterday_outcomes()
-    fetch_transaction_wire()  # IL placements
-    update_training_data()
-    generate_calibration_report()
-    # NO prop fetching
-    # NO leg scoring
-    # NO parlay building
-```
-
-**Live recommendations (on-demand):**
-```python
-def handle_build_parlays(refresh=false):
-    """User clicks Picks tab or Regenerate button"""
-    if cached and not expired:
-        return cached_parlays  # Instant
-    else:
-        run_full_pipeline()    # Fresh props, fresh scores
-        build_parlays()
-        cache_results()
-        return parlays
-```
-
-### Why This Is Better
-
-**Freshness:**
-```
-Old: 5:30 PM scheduled run → User views at 7 PM = 1.5 hr stale
-New: User clicks at 7 PM → Fresh pipeline run = 0 min stale
-```
-
-**Efficiency:**
-```
-Old: 3 scheduled runs/day × 2 min each = 6 min compute
-     May never be viewed (if user doesn't check that day)
-     
-New: 1 scheduled run (9 AM resolution) = 1 min
-     + On-demand runs only when user requests = user-driven cost
-```
-
-**User control:**
-```
-Old: "These are the recommendations from 5:30 PM" (take it or leave it)
-New: "These are fresh recommendations" (user trusts data is current)
-```
-
-### Trade-offs Accepted
-
-**Initial load slower:**
-- First Picks tab load triggers full pipeline (1-2 min)
-- **Mitigation:** Cache makes subsequent loads instant
-
-**Database may be empty:**
-- If user checks Picks at 8 AM (before morning pipeline), no data yet
-- **Mitigation:** Morning pipeline populates DB by 9:05 AM
-
-**No "standing recommendations":**
-- Can't review recommendations from yesterday
-- **Mitigation:** Could add recommendation archive feature if needed
-
-### Key Lessons
-
-**1. Schedule for data maintenance, not delivery**
-- Pipelines should resolve past, not predict future
-- Predictions delivered on-demand when user needs them
-
-**2. User-driven better than scheduled**
-- User knows when they need fresh data (before betting)
-- Scheduled runs often wasted (user doesn't check)
-
-**3. Cache bridges the gap**
-- On-demand expensive (1-2 min pipeline)
-- Cache makes it feel instant (< 1 sec)
+But for now: **Automated data, manual quality control.**
 
 ---
 
-## Frontend Default to Cached Loads (May 4, 2026)
-
-**Decision:** Use `refresh=false` by default, `refresh=true` only for "Regenerate Now" button
-
-### Context
-
-After implementing in-memory cache, frontend still sent `refresh=true` on every Picks tab load because earlier code said "always use refresh=true for live recommendations."
-
-This defeated the entire purpose of the cache.
-
-### Problem
-
-**Code flow (broken):**
-```javascript
-// User clicks Picks tab
-loadRecommendations()
-  → fetch('/api/build-parlays?refresh=true')  // Always true!
-  → Backend: "Oh, forced refresh, run pipeline"
-  → 1-2 min wait every time
-```
-
-**Cache never used** because `refresh=true` bypassed it.
-
-### Solution
-
-**Add `forceRefresh` parameter:**
-```javascript
-async function loadRecommendations(forceRefresh = false) {
-    const refreshParam = forceRefresh ? 'refresh=true' : 'refresh=false';
-    fetch(`/api/build-parlays?${refreshParam}`);
-}
-
-// Tab load
-loadRecommendations()  // forceRefresh=false (default)
-
-// Button click
-regenerateRecommendations() {
-    loadRecommendations(true)  // forceRefresh=true
-}
-```
-
-### Why This Pattern
-
-**Principle: Make expensive operations opt-in, not default**
-
-```
-Fast operation (cache read): Default, always available
-Slow operation (pipeline): Opt-in, user explicitly requests
-```
-
-**User mental model:**
-```
-Click tab → "Show me parlays" (expects instant)
-Click button → "Get fresh parlays" (expects wait)
-```
-
-### UX Considerations
-
-**Spinner text distinguishes operations:**
-```javascript
-// Cached load
-"Loading parlay recommendations..."  // Implies quick
-
-// Forced refresh
-"Running fresh pipeline..."  // Implies wait
-```
-
-**Button state feedback:**
-```javascript
-// Before click
-"Regenerate Now"
-
-// During pipeline
-"Regenerating..." (disabled)
-
-// After complete
-"Regenerated ✓" (2 sec) → "Regenerate Now"
-```
-
-### Key Lessons
-
-**1. Default behavior should be fast**
-- Users expect instant feedback on navigation (tab clicks)
-- Slow operations require explicit action (button clicks)
-
-**2. Visual feedback critical for slow operations**
-- Spinner text: "Running pipeline" sets expectation
-- Button state: Disabled during operation prevents double-clicks
-- Success state: "✓" confirms completion
-
-**3. Parameter naming matters**
-- `refresh=true/false` clearer than `cache=true/false`
-- `forceRefresh` explicit about intent (override cache)
-
----
-
-## TypeError Prevention with Explicit None Checks (May 4, 2026)
-
-**Decision:** Always check `if value is None: continue` before comparison operators
-
-### Context
-
-HTTP 500 error on line 319 of server.py:
-```python
-TypeError: '>=' not supported between instances of 'NoneType' and 'int'
-```
-
-Caused by:
-```python
-for leg in upcoming_legs:
-    composite_score = leg.get("composite_score", 0)  # Returns None!
-    if composite_score >= 65:  # None >= 65 → TypeError
-        qualifying_legs.append(leg)
-```
-
-### Why .get() Didn't Help
-
-**Common misconception:**
-```python
-leg.get("composite_score", 0)  # "This returns 0 if missing, right?"
-```
-
-**Reality:**
-```python
-leg = {"composite_score": None}  # Key exists, value is None
-leg.get("composite_score", 0)    # Returns None (key exists!)
-leg.get("missing_key", 0)        # Returns 0 (key missing)
-```
-
-`.get(key, default)` only returns default if **key is missing**, not if **value is None**.
-
-### Root Cause
-
-**Database column allows NULL:**
-```sql
-CREATE TABLE mlb_scored_legs (
-    composite_score REAL,  -- NULL allowed
-    ...
-);
-```
-
-**Legs from old pipeline runs:**
-- Scored before ML model existed
-- `composite_score` column added later
-- Old rows have `composite_score = NULL`
-
-### Solution Pattern
-
-**Wrong (fails on None):**
-```python
-score = leg.get("composite_score", 0)
-if score >= 65:  # TypeError if score is None
-    ...
-```
-
-**Right (explicit None check):**
-```python
-score = leg.get("composite_score")
-if score is None:
-    continue  # Skip legs without scores
-if score >= 65:
-    qualifying_legs.append(leg)
-```
-
-**Alternative (coalesce with `or`):**
-```python
-score = leg.get("composite_score") or 0  # None → 0
-if score >= 65:
-    qualifying_legs.append(leg)
-```
-
-### Why Skip Instead of Default?
-
-**Option A: Skip None values** ✅ **CHOSEN**
-```python
-if score is None: continue
-```
-- Pros: Explicit about data quality issue
-- Cons: Fewer legs available
-- Rationale: Legs without ML scores shouldn't be in parlays
-
-**Option B: Default None to 0** ❌
-```python
-score = leg.get("composite_score") or 0
-```
-- Pros: More legs available
-- Cons: 0% confidence leg might get included (if threshold lowered)
-- Rationale: 0% is wrong data, not absence of data
-
-**Option C: Default None to 50** ❌
-```python
-score = leg.get("composite_score") or 50
-```
-- Pros: Neutral assumption (50% = coin flip)
-- Cons: 50% confidence without evidence is misleading
-- Rationale: Better to skip than guess
-
-### Prevention Strategy
-
-**At write time (ML scorer):**
-```python
-# Always set composite_score, never leave as None
-leg["composite_score"] = model.predict_proba(...) * 100
-
-# If prediction fails, set explicit 0 (not None)
-if error:
-    leg["composite_score"] = 0.0
-```
-
-**At read time (API endpoint):**
-```python
-# Defensive check even if write guarantees no None
-score = leg.get("composite_score")
-if score is None:
-    print(f"[WARNING] {leg['player_name']} has None score")
-    continue
-```
-
-### Key Lessons
-
-**1. None is not 0**
-- `None >= 65` → TypeError
-- `0 >= 65` → False
-- Always check `is None` before comparison
-
-**2. .get(key, default) doesn't handle None**
-- Only returns default if key missing
-- If key exists with None value, returns None
-
-**3. Explicit better than implicit**
-```python
-# Implicit (easy to miss None case)
-score = leg.get("composite_score", 0)
-
-# Explicit (clear intent)
-score = leg.get("composite_score")
-if score is None: continue
-```
-
-**4. Log warnings for None values**
-- Helps debug why None values appearing
-- Tracks data quality issues
-- Example: "WARNING: Player X has None score - old DB row?"
-
----
-
-## Summary of May 4 Architecture Decisions
+## Summary of May 4-5 Architecture Decisions
 
 ### 1. In-Memory Cache (Performance)
 - 30-min TTL, thread-safe
@@ -707,6 +414,16 @@ if score is None: continue
 - Skip rather than guess
 - **Philosophy:** Bad data should fail obviously, not silently
 
+### 7. Pass Full Objects Not IDs (Reliability)
+- Send complete parlay object to analysis
+- Backend supports both direct payload and DB lookup
+- **Philosophy:** When ID mapping is complex, pass the object
+
+### 8. Perpetual Data Loop - Option A (Quality Control)
+- Automate data collection and resolution
+- Manual model retraining and deployment
+- **Philosophy:** Trust automation for data, validate quality manually for models
+
 ---
 
 ## Architectural Principles Established
@@ -717,5 +434,7 @@ if score is None: continue
 4. **Math validates strategy** - Technical implementation must support user philosophy
 5. **Quality > Quantity** - 40 elite legs better than 270 mediocre legs
 6. **Separate concerns** - ML filters (gatekeeper), parlay builder optimizes
+7. **Pass objects when IDs ambiguous** - Avoid ID namespace collisions
+8. **Automate data, validate models** - Trust pipelines, verify intelligence
 
 These principles guide future architectural decisions and help evaluate proposed changes.
