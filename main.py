@@ -634,6 +634,21 @@ def run_pipeline(starts_after_override=None) -> tuple[list[dict], str]:
         abbr_to_team_id,
     )
 
+    # ── ML Scoring (all qualifying legs, before logging and parlay builder) ──────
+    from src.engine.ml_leg_scorer import score_legs_ml
+    score_legs_ml(qualifying_legs)
+    scored_count = sum(1 for l in qualifying_legs if l.get("composite_score") is not None)
+    avg_score = (
+        sum(l["composite_score"] for l in qualifying_legs if l.get("composite_score") is not None)
+        / scored_count
+        if scored_count else 0.0
+    )
+    above_65 = sum(1 for l in qualifying_legs if (l.get("composite_score") or 0) >= 65)
+    print(
+        f"  [ml_scorer] Scored {scored_count}/{len(qualifying_legs)} legs | "
+        f"avg={avg_score:.1f} | ≥65%: {above_65}"
+    )
+
     # ── Step 8: Build Hybrid Parlays ──────────────────────────────────────────
     tier_info  = _tier_params(len(schedule))
     tier_label = f"Tier {tier_info['tier']}" if tier_info else "Tier 4 (thin slate)"

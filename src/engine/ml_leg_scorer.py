@@ -131,7 +131,7 @@ def _extract_features(leg: dict) -> list[float]:
         pitcher_quality    = 0.0
         opponent_offense   = 0.0
 
-    line      = _f("line", 0.5)
+    line      = float(leg.get("line") or leg.get("best_line") or 0.5)
     direction = 1.0 if leg.get("direction") == "over" else 0.0
     stat_oh   = [1.0 if stat == cat else 0.0 for cat in _STAT_CATEGORIES]
 
@@ -154,19 +154,29 @@ def score_legs_ml(legs: list[dict]) -> list[dict]:
     Falls back to composite_score=50.0 for individual legs that fail.
     Returns the same list (mutated).
     """
+    if not legs:
+        return legs
     try:
         saved = _load_model()
+        print(f"  [ml_scorer] Loaded model from {os.path.abspath(MODEL_PATH)}")
         X     = np.array([_extract_features(leg) for leg in legs], dtype=np.float32)
         probs = saved["model"].predict_proba(X)[:, 1]
         for leg, p in zip(legs, probs):
             leg["composite_score"] = round(float(p) * 100, 2)
+        scores = [leg["composite_score"] for leg in legs]
+        print(
+            f"  [ml_scorer] Scored {len(legs)} legs | "
+            f"avg={sum(scores)/len(scores):.1f} | "
+            f"min={min(scores):.1f} | max={max(scores):.1f}"
+        )
     except FileNotFoundError as exc:
-        print(f"[ml_leg_scorer] {exc}")
+        print(f"  [ml_scorer] ERROR: {exc}")
         for leg in legs:
             leg.setdefault("composite_score", 50.0)
     except Exception as exc:
-        print(f"[ml_leg_scorer] Batch scoring failed ({exc}); falling back per-leg")
+        print(f"  [ml_scorer] Batch scoring failed ({exc}); falling back per-leg")
         saved = _load_model()
+        failures = 0
         for leg in legs:
             try:
                 features = np.array([_extract_features(leg)], dtype=np.float32)
@@ -174,4 +184,7 @@ def score_legs_ml(legs: list[dict]) -> list[dict]:
                 leg["composite_score"] = round(p * 100, 2)
             except Exception:
                 leg.setdefault("composite_score", 50.0)
+                failures += 1
+        if failures:
+            print(f"  [ml_scorer] {failures} legs fell back to composite_score=50.0")
     return legs

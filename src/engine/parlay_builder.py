@@ -19,10 +19,8 @@ Constraints:
 
 Public API unchanged: build_hybrid_parlays(...) and _tier_params(...).
 """
-import os
 import time
 from src.utils.odds_math import american_to_decimal
-from src.engine.leg_scorer import score_legs_composite
 
 _PITCHER_POSITIONS = frozenset({"SP", "RP", "P"})
 
@@ -152,14 +150,13 @@ def build_hybrid_parlays(
     if not eligible:
         return []
 
-    # Only score if composite_score is missing (avoid re-scoring during regeneration)
-    if not all(leg.get("composite_score") for leg in eligible):
-        use_ml = os.getenv("USE_ML_SCORING", "false").lower() == "true"
-        if use_ml:
-            from src.engine.ml_leg_scorer import score_legs_ml
-            score_legs_ml(eligible)
-        else:
-            score_legs_composite(eligible, team_to_blocked=team_to_blocked, role="swing")
+    # Scoring is performed upstream in main.py (ML model, all qualifying legs).
+    # Fallback: if any leg is still missing a score (e.g. regeneration path), score now.
+    unscored = [l for l in eligible if l.get("composite_score") is None]
+    if unscored:
+        from src.engine.ml_leg_scorer import score_legs_ml
+        score_legs_ml(unscored)
+        print(f"  [parlay_builder] Fallback-scored {len(unscored)} unscored legs with ML model")
 
     # Filter poison/non-qualifying overs; tag risky overs for B&B constraint.
     eligible = filter_and_tag_legs(eligible)
