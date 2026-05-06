@@ -1695,7 +1695,7 @@ def get_parlay_dashboard_data() -> dict:
             ROUND(AVG(coverage_pct)::numeric, 1)                                AS avg_coverage
         FROM mlb_scored_legs
         WHERE result IN ('won', 'lost')
-          AND run_date >= CURRENT_DATE - INTERVAL '30 days'
+          AND run_date::date >= CURRENT_DATE - INTERVAL '30 days'
         GROUP BY stat
         HAVING COUNT(*) >= 5
         ORDER BY win_rate DESC NULLS LAST, total DESC
@@ -1742,7 +1742,7 @@ def get_parlay_dashboard_data() -> dict:
             ROUND(AVG(composite_score)::numeric, 1)                             AS avg_score
         FROM mlb_scored_legs
         WHERE result IN ('won', 'lost')
-          AND run_date >= CURRENT_DATE - INTERVAL '30 days'
+          AND run_date::date >= CURRENT_DATE - INTERVAL '30 days'
         GROUP BY player_name, stat
         HAVING COUNT(*) >= 3
         ORDER BY win_rate DESC NULLS LAST, total DESC
