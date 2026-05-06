@@ -1,607 +1,591 @@
 # MLB Parlay Agent — Architecture Decisions
+**Last Updated:** May 6, 2026
 
-**Last Updated:** May 5, 2026
-
-This document tracks all major architectural decisions, their rationale, and lessons learned.
-
----
-
-## Move ML Scoring Upstream in Pipeline (May 5, 2026)
-
-**Decision:** Score ALL qualifying legs (≥55% coverage) in main.py BEFORE logging to database, instead of scoring only eligible legs (≥65% coverage) inside parlay_builder.py.
-
-### Context
-
-**The NULL Score Crisis:**
-- Database showed 378 legs, but only 170 had composite_score (55% NULL)
-- Logs claimed "374/374 scored successfully"
-- Disconnect between pipeline execution and database persistence
-
-**Root cause analysis:**
-```python
-# OLD FLOW (broken):
-main.py:
-  1. Filter to qualifying_legs (coverage ≥55%) → 374 legs
-  2. Log qualifying_legs to database → 374 rows inserted
-  
-parlay_builder.py:
-  3. Filter to eligible_legs (coverage ≥65%) → 170 legs
-  4. Score eligible_legs with ML model → 170 scored
-  5. Build parlays
-
-# RESULT: 374 logged, 170 scored = 204 NULL (55% NULL rate)
-```
-
-### Options Considered
-
-**Option A: Filter qualifying_legs to ≥65% before logging** ❌
-- Only log legs that will be scored
-- Cons: Lose data for ML training (55-65% legs useful for training)
-- Cons: Can't track performance of marginal legs
-- Not chosen: Too restrictive, limits dataset
-
-**Option B: Score inside log_scored_legs()** ❌
-- Add ML scoring call inside db.py logging function
-- Cons: Violates separation of concerns (DB layer shouldn't do ML)
-- Cons: Harder to test and debug
-- Not chosen: Poor architecture
-
-**Option C: Move scoring upstream to main.py** ✅ **CHOSEN**
-- Score ALL qualifying_legs before build_hybrid_parlays
-- Log already-scored legs to database
-- Pros: 100% scoring coverage, clean separation of concerns
-- Pros: Can still filter to ≥65% for parlay building
-- Cons: Minimal (scores legs that won't be used in parlays)
-
-### Implementation
-
-**Modified `main.py` (line 637-650):**
-```python
-# ── ML Scoring (all qualifying legs, before logging and parlay builder) ──
-from src.engine.ml_leg_scorer import score_legs_ml
-score_legs_ml(qualifying_legs)
-scored_count = sum(1 for l in qualifying_legs if l.get("composite_score") is not None)
-avg_score = (
-    sum(l["composite_score"] for l in qualifying_legs if l.get("composite_score") is not None)
-    / scored_count
-    if scored_count else 0.0
-)
-above_65 = sum(1 for l in qualifying_legs if (l.get("composite_score") or 0) >= 65)
-print(
-    f"  [ml_scorer] Scored {scored_count}/{len(qualifying_legs)} legs | "
-    f"avg={avg_score:.1f} | ≥65%: {above_65}"
-)
-```
-
-**Modified `parlay_builder.py`:**
-```python
-# Removed scoring block (lines 155-162 deleted)
-# Added lightweight fallback for edge cases:
-unscored = [l for l in eligible if l.get("composite_score") is None]
-if unscored:
-    from src.engine.ml_leg_scorer import score_legs_ml
-    score_legs_ml(unscored)
-    print(f"  [parlay_builder] Fallback-scored {len(unscored)} unscored legs")
-```
-
-### Impact
-
-**Before:**
-- Total legs: 378
-- Scored: 170 (45%)
-- NULL: 208 (55%)
-
-**After:**
-- Total legs: 376
-- Scored: 376 (100%)
-- NULL: 0 (0%)
-
-**Key metric:** 121% increase in scoring coverage, 100% reduction in NULL rate
-
-### Lessons Learned
-
-1. **Pipeline ordering matters** - The sequence of filter → score → log vs filter → log → score has massive impact on data quality
-2. **Logs can lie** - "374 scored" in logs but 170 in database means the logging and scoring are disconnected
-3. **Always score before persisting** - Don't log incomplete data and backfill later; complete it first
-4. **Separation of concerns** - Scoring belongs in orchestration layer (main.py), not builder layer (parlay_builder.py) or persistence layer (db.py)
+## Document Purpose
+This document records the key architectural decisions made during the development of the MLB Parlay Agent, including the rationale, alternatives considered, and lessons learned. Updated with insights from production deployment and crisis resolution.
 
 ---
 
-## ON CONFLICT DO UPDATE for Backfilling (May 5, 2026)
-
-**Decision:** Change database conflict resolution from `DO NOTHING` to `DO UPDATE SET composite_score = EXCLUDED.composite_score WHERE composite_score IS NULL`
-
-### Context
-
-**The Backfill Problem:**
-- Pipeline ran at 1:13 PM (before fix) → inserted 208 legs with NULL composite_score
-- Fix deployed at 2:48 PM
-- Pipeline ran at 2:53 PM (after fix) → tried to insert same legs with real scores
-- Database rejected updates silently due to `ON CONFLICT ... DO NOTHING`
-
-**Evidence:**
-```sql
--- Query run at 3:00 PM showed:
-total_legs: 378
-scored_legs: 170
-null_scores: 208
-
--- Even though logs at 2:53 PM showed:
-[ml_scorer] Scored 374/374 legs | avg=50.4
-```
-
-### Options Considered
-
-**Option A: Delete and re-insert** ❌
-- `DELETE FROM mlb_scored_legs WHERE run_date = today; INSERT ...`
-- Cons: Loses historical data if run multiple times per day
-- Cons: Race condition if multiple processes running
-- Not chosen: Too destructive
-
-**Option B: DO NOTHING (status quo)** ❌
-- Keep existing behavior, manually delete NULL rows
-- Cons: Requires manual intervention
-- Cons: Doesn't prevent future occurrences
-- Not chosen: Not sustainable
-
-**Option C: DO UPDATE unconditionally** ❌
-- `ON CONFLICT DO UPDATE SET composite_score = EXCLUDED.composite_score`
-- Cons: Overwrites good scores with potentially bad ones
-- Cons: Last-write-wins is dangerous
-- Not chosen: Too aggressive
-
-**Option D: DO UPDATE with WHERE clause** ✅ **CHOSEN**
-- `ON CONFLICT DO UPDATE SET composite_score = EXCLUDED.composite_score WHERE composite_score IS NULL`
-- Only updates NULL scores, preserves existing good scores
-- Pros: Safe backfilling, idempotent
-- Pros: Handles both initial insert and re-run scenarios
-- Cons: None
-
-### Implementation
-
-**Modified `src/utils/db.py` (line 775-777):**
-```python
-# OLD:
-ON CONFLICT (run_date, odd_id) DO NOTHING
-
-# NEW:
-ON CONFLICT (run_date, odd_id) DO UPDATE
-    SET composite_score = EXCLUDED.composite_score
-    WHERE mlb_scored_legs.composite_score IS NULL
-```
-
-### Impact
-
-**Test case:**
-1. Pipeline run 1: Inserts leg with composite_score = NULL
-2. Fix deployed
-3. Pipeline run 2: Tries to insert same leg with composite_score = 72.4
-4. Result: Row updated, composite_score changed from NULL → 72.4
-
-**Verification:**
-```sql
--- After regenerating picks:
-SELECT COUNT(*) as null_scores
-FROM mlb_scored_legs
-WHERE run_date = '2026-05-05' AND composite_score IS NULL;
-
--- Result: 0 (was 208)
-```
-
-### Lessons Learned
-
-1. **ON CONFLICT strategy matters** - `DO NOTHING` is rarely the right choice for data pipelines
-2. **Conditional updates are safe** - `WHERE composite_score IS NULL` protects good data while fixing bad
-3. **Idempotency is valuable** - Re-running the pipeline should be safe and fix issues, not break things
-4. **Test deployment scenarios** - Consider: first run, re-run after fix, re-run after code change
+## Table of Contents
+1. [Core Architecture](#core-architecture)
+2. [ML Model Design](#ml-model-design)
+3. [Data Pipeline](#data-pipeline)
+4. [Parlay Construction](#parlay-construction)
+5. [Outcome Resolution](#outcome-resolution)
+6. [Database Schema](#database-schema)
+7. [Deployment Strategy](#deployment-strategy)
+8. [Lessons Learned](#lessons-learned)
 
 ---
 
-## Two-Tier Outcome Resolution (May 5, 2026)
+## Core Architecture
 
-**Decision:** Implement separate resolution phases for individual legs (Tier 1) and parlays (Tier 2), running sequentially in morning pipeline.
+### **Decision: Scheduled Batch Processing**
+**Chosen:** Daily pipeline at 9:00 AM ET, resolves previous day outcomes
+**Why:**
+- Props don't change after games start
+- Outcomes resolve next morning (official stats available)
+- Reduces API costs (single bulk fetch vs continuous polling)
+- Simpler state management (no real-time updates)
 
-### Context
+**Alternatives Considered:**
+- Real-time streaming: Too complex, high API costs, limited value
+- Manual triggers only: Requires human intervention, prone to missed days
 
-**Requirements:**
-1. Track individual leg outcomes (did player X hit line Y?)
-2. Track parlay outcomes (did all legs in this parlay hit?)
-3. Resolve daily at 9 AM automatically
-4. Support historical queries (hit rate over time)
+**Trade-offs:**
+- ✅ Simplicity, cost efficiency, reliability
+- ❌ No live betting, ~12-hour delay in outcome resolution
 
-**Dependency:**
-- Can't resolve parlays without first resolving legs
-- Parlay outcome = function of leg outcomes
-
-### Options Considered
-
-**Option A: Single-tier (parlay only)** ❌
-- Only track parlay outcomes, not individual legs
-- Cons: Can't analyze which leg types perform best
-- Cons: Can't train ML model on outcomes
-- Not chosen: Insufficient granularity
-
-**Option B: Parallel resolution** ❌
-- Resolve legs and parlays simultaneously
-- Cons: Race condition (parlay resolver might run before leg resolver)
-- Cons: Complex error handling
-- Not chosen: Too fragile
-
-**Option C: Two-tier sequential** ✅ **CHOSEN**
-- Resolve legs first (Tier 1)
-- Then resolve parlays using leg results (Tier 2)
-- Pros: Clear dependency chain
-- Pros: Can validate each tier independently
-- Pros: Easy to debug (logs show each phase)
-
-### Implementation
-
-**Morning Pipeline Structure (`main.py` lines 793-818):**
-```python
-# Step 2a: Resolve scored legs (Tier 1)
-from src.tracker.outcome_resolver import resolve_all_legs
-leg_stats = resolve_all_legs(yesterday, verbose=True)
-print(f"  Scored legs: {leg_stats['won']} won, {leg_stats['lost']} lost")
-
-# Step 2b: Resolve training data (parallel to 2a, both Tier 1)
-from src.tracker.outcome_resolver import resolve_training_data
-resolution_stats = resolve_training_data(yesterday, verbose=True)
-print(f"  Training data: {resolution_stats['hit']} hits, {resolution_stats['miss']} misses")
-
-# Step 2c: Resolve parlay recommendations (Tier 2, depends on 2a)
-from src.tracker.parlay_outcome_resolver import resolve_parlay_recommendations
-parlay_stats = resolve_parlay_recommendations(yesterday, verbose=True)
-print(f"  Parlays: {parlay_stats['won']} won, {parlay_stats['lost']} lost")
-```
-
-**Tier 1 Logic (Legs):**
-1. Fetch box scores for yesterday's games
-2. Extract actual stat values
-3. Compare to line: `actual > line and direction='over' → 'won'`
-4. Handle edge cases: DNP → 'void', exact match → 'push'
-5. Update `mlb_scored_legs.result` and `actual_value`
-
-**Tier 2 Logic (Parlays):**
-1. Fetch all parlays where `recommendation_date = yesterday` and `bet_status = 'pending'`
-2. Bulk-fetch all leg results in one query
-3. Apply outcome logic:
-   ```python
-   if any(leg.result == 'void'):
-       parlay.bet_status = 'void'
-   elif any(leg.result == 'lost'):
-       parlay.bet_status = 'lost'
-   elif all(leg.result == 'won'):
-       parlay.bet_status = 'won'
-   else:
-       # Some legs still NULL - skip
-       continue
-   ```
-4. Update `mlb_parlay_recommendations.bet_status` and `resolved_at`
-
-### Design Choices
-
-**Conservative void handling:**
-- Decision: Any void leg → entire parlay voids
-- Rationale: Parlay is invalid if any leg didn't play
-- Alternative: Reduce payout proportionally (not implemented)
-
-**Skip unresolved legs:**
-- Decision: If any leg has NULL result, skip parlay resolution
-- Rationale: Wait for complete data rather than guess
-- Alternative: Mark as 'incomplete' status (not implemented)
-
-**Bulk query optimization:**
-```python
-# Inefficient (N queries):
-for parlay in parlays:
-    for odd_id in parlay.leg_odd_ids:
-        leg_result = query_leg(odd_id)
-
-# Efficient (1 query):
-all_odd_ids = set(id for p in parlays for id in p.leg_odd_ids)
-leg_results = query_all_legs(all_odd_ids)  # Single query
-```
-
-### Impact
-
-**Before:**
-- No leg outcome tracking
-- No parlay outcome tracking
-- No hit rate data
-- No validation of ML model predictions
-
-**After:**
-- ✅ Leg outcomes resolved daily
-- ✅ Parlay outcomes resolved daily
-- ✅ Historical hit rate queryable
-- 🎯 First data tomorrow 9 AM
-
-### Lessons Learned
-
-1. **Sequential > Parallel for dependencies** - Clear ordering prevents race conditions
-2. **Bulk queries matter** - 1 query for 50 legs beats 50 queries
-3. **Conservative error handling** - Void handling should favor data quality over payout
-4. **Separate concerns** - Legs and parlays are different enough to warrant separate resolvers
-5. **Log everything** - Each tier logs its stats separately for debugging
+**Status:** ✅ Working well, no issues
 
 ---
 
-## Single ML Pipeline (Removed Heuristic Fallback) (May 5, 2026)
+### **Decision: Monolithic Flask App**
+**Chosen:** Single Flask app with scheduler (APScheduler)
+**Why:**
+- Simple deployment (one Railway service)
+- Shared state (ML model, database connection)
+- Easy debugging (single log stream)
 
-**Decision:** Remove `USE_ML_SCORING` environment variable and heuristic scorer fallback, always use ML model.
+**Alternatives Considered:**
+- Microservices: Overkill for this scale, adds complexity
+- Separate workers: Requires message queue, more infrastructure
 
-### Context
+**Trade-offs:**
+- ✅ Simple, cost-effective, easy to reason about
+- ❌ Scaling limited to vertical (not a concern at current volume)
 
-**Dual System Problem:**
-```python
-# OLD CODE in parlay_builder.py:
-use_ml = os.getenv("USE_ML_SCORING", "false").lower() == "true"
-if use_ml:
-    from src.engine.ml_leg_scorer import score_legs_ml
-    score_legs_ml(eligible)
-else:
-    score_legs_composite(eligible, ...)  # Heuristic
-```
-
-**Issues:**
-1. Two code paths to maintain
-2. Confusion about which is active
-3. ML model deployed but could be disabled silently
-4. Heuristic scorer (`leg_scorer.py`) still in codebase but unused
-
-### Options Considered
-
-**Option A: Keep dual system** ❌
-- Maintain both scorers for flexibility
-- Cons: More code to maintain
-- Cons: Confusion about which is active
-- Cons: Can't consolidate improvements
-- Not chosen: Complexity outweighs benefits
-
-**Option B: Make heuristic the fallback** ❌
-- Use ML as primary, fall back to heuristic on errors
-- Cons: Masks ML model bugs
-- Cons: Silent degradation of quality
-- Not chosen: Better to fail loudly than degrade silently
-
-**Option C: ML only, remove heuristic** ✅ **CHOSEN**
-- Delete `USE_ML_SCORING` env var
-- Always call `score_legs_ml()`
-- Keep `leg_scorer.py` in repo but don't import it
-- Pros: Single code path, clear behavior
-- Pros: ML bugs surface immediately
-- Cons: No fallback if ML breaks (acceptable - fix the bug instead)
-
-### Implementation
-
-**Removed from `parlay_builder.py`:**
-```python
-# Deleted lines 155-162:
-if not all(leg.get("composite_score") for leg in eligible):
-    use_ml = os.getenv("USE_ML_SCORING", "false").lower() == "true"
-    if use_ml:
-        from src.engine.ml_leg_scorer import score_legs_ml
-        score_legs_ml(eligible)
-    else:
-        score_legs_composite(eligible, ...)
-```
-
-**Replaced with:**
-```python
-# Scoring is performed upstream in main.py (ML model, all qualifying legs).
-# Fallback: if any leg is still missing a score (e.g. regeneration path), score now.
-unscored = [l for l in eligible if l.get("composite_score") is None]
-if unscored:
-    from src.engine.ml_leg_scorer import score_legs_ml
-    score_legs_ml(unscored)
-    print(f"  [parlay_builder] Fallback-scored {len(unscored)} unscored legs with ML model")
-```
-
-**Removed imports:**
-```python
-import os  # No longer needed
-from src.engine.leg_scorer import score_legs_composite  # Dead code
-```
-
-**Deleted env var:**
-- `USE_ML_SCORING` removed from Railway environment variables
-
-### Impact
-
-**Code reduction:**
-- Deleted: 50+ lines across parlay_builder.py and related files
-- Simplified: Scoring logic now has one path, not two
-
-**Behavioral change:**
-- Before: Might use heuristic if env var missing or set wrong
-- After: Always uses ML, fails if ML unavailable (good - surfaces bugs)
-
-**Performance:**
-- No change (ML was already active via env var)
-
-### Lessons Learned
-
-1. **Feature flags are technical debt** - `USE_ML_SCORING` started as a safe toggle, became a maintenance burden
-2. **Single code path >> dual paths** - Simpler to reason about, test, and debug
-3. **Fail fast > silent fallback** - If ML breaks, we want to know immediately, not silently degrade to heuristic
-4. **Delete dead code** - Keeping `leg_scorer.py` in repo but not importing it is better than deleting (preserves history)
+**Status:** ✅ Proven reliable through production use
 
 ---
 
-## Parlay Persistence Strategy (May 5, 2026)
+## ML Model Design
 
-**Decision:** Auto-save all generated parlays to database when `/api/build-parlays` runs, using `ON CONFLICT (recommendation_date, rank) DO UPDATE`.
+### **Decision: Single Binary Classifier (Hit/Miss)**
+**Chosen:** Scikit-learn LogisticRegression, 15 features
+**Why:**
+- Simple, interpretable, fast inference
+- Good baseline (AUC: 0.8532)
+- No need for actual value prediction (just over/under)
 
-### Context
+**Alternatives Considered:**
+- Regression model: Harder to interpret, not needed for binary outcome
+- Deep learning: Overkill, requires more data, harder to debug
+- Multiple models per prop type: More complex, not enough data per type
 
-**Requirements:**
-1. Track all recommendations (not just ones user clicks)
-2. Allow regeneration without creating duplicates
-3. Support outcome resolution
-4. Enable historical analysis
+**Trade-offs:**
+- ✅ Fast, interpretable, sufficient accuracy
+- ❌ Treats all prop types equally (may miss type-specific patterns)
 
-**Challenge:**
-- User might click "Regenerate Now" multiple times per day
-- Each regeneration builds 5 new parlays
-- Need to track latest recommendation without duplicates
-
-### Options Considered
-
-**Option A: Only save on user action** ❌
-- Save parlay only when user clicks "Place Bet" button
-- Cons: Doesn't track all recommendations
-- Cons: Can't measure system hit rate (only user's choices)
-- Not chosen: Insufficient tracking
-
-**Option B: Create new row each regeneration** ❌
-- Each regeneration inserts 5 new rows (rank 1-5)
-- Timestamp tracks when generated
-- Cons: Duplicates (could have 20 rows for May 5 if regenerated 4 times)
-- Cons: Which one to resolve? Latest? All?
-- Not chosen: Too messy
-
-**Option C: ON CONFLICT DO UPDATE (timestamp)** ✅ **CHOSEN**
-- `UNIQUE (recommendation_date, rank)`
-- Each regeneration updates existing rows
-- Latest recommendation replaces previous
-- Pros: Always 5 rows per day (ranks 1-5)
-- Pros: Simple resolution (resolve the 5 that exist)
-- Pros: Tracks latest recommendation, not all iterations
-
-### Implementation
-
-**Modified `src/web/server.py` (lines 422-437):**
-```python
-# After building and caching parlays:
-from src.utils.db import save_parlay_recommendation
-run_time = datetime.now(timezone.utc)
-for parlay in top_5:
-    try:
-        save_parlay_recommendation({
-            "recommendation_date": date.today(),
-            "pipeline_run_time":   run_time,
-            "rank":                parlay["rank"],
-            "leg_odd_ids":         [leg["odd_id"] for leg in parlay.get("legs", [])],
-            "combined_odds":       parlay.get("combined_odds", 0),
-            "win_probability":     parlay.get("win_probability", 0.0),
-            "edge_pct":            parlay.get("edge_pct", 0.0),
-        })
-    except Exception as _save_err:
-        print(f"[build_parlays] Failed to save rank {parlay.get('rank')}: {_save_err}")
-```
-
-**Database function (`src/utils/db.py`):**
-```python
-def save_parlay_recommendation(rec):
-    """
-    Upsert parlay recommendation.
-    ON CONFLICT (recommendation_date, rank) DO UPDATE
-    ensures only latest recommendation per rank per day is kept.
-    """
-    # ... implementation details ...
-```
-
-### Design Choices
-
-**Track pipeline_run_time:**
-- Decision: Store when parlay was generated
-- Rationale: Distinguish morning vs afternoon recommendations
-- Use case: Debug if parlay quality varies by time of day
-
-**Store leg_odd_ids as array:**
-- Decision: `leg_odd_ids INT[]` instead of JSON
-- Rationale: Easier to query for resolution
-- Alternative: Full leg JSON (more data, harder to query)
-
-**Minimal fields:**
-- Decision: Only store what's needed for resolution + analysis
-- Fields: date, rank, leg IDs, odds, status, resolved_at
-- Not stored: Full leg details, Claude analysis text, etc.
-- Rationale: Keep table lean, join to `mlb_scored_legs` for details
-
-### Impact
-
-**Before:**
-- Parlays generated but not saved
-- No historical record
-- No way to track hit rate
-- Manual tracking required
-
-**After:**
-- ✅ All parlays saved automatically
-- ✅ 5 rows per day (ranks 1-5)
-- ✅ Latest recommendation always current
-- ✅ Ready for resolution
-
-**Verification:**
-```sql
-SELECT recommendation_date, rank, combined_odds, bet_status
-FROM mlb_parlay_recommendations
-WHERE recommendation_date >= '2026-05-02'
-ORDER BY recommendation_date DESC, rank;
-```
-
-Results:
-- May 5: 5 parlays (ranks 1-5, pending)
-- May 2-4: 7 parlays (pending, awaiting resolution)
-
-### Lessons Learned
-
-1. **ON CONFLICT is powerful** - Solves upsert pattern cleanly
-2. **Latest > all iterations** - Tracking every regeneration adds noise, not signal
-3. **Unique constraint as business rule** - `(recommendation_date, rank)` encodes "one top-5 list per day"
-4. **Minimal schema** - Store IDs, not full objects; join for details
-5. **Auto-save > manual save** - If it requires user action, it won't be consistent
+**Status:** ✅ Working but conservative (50.5% avg prediction)
 
 ---
 
-## Summary of May 5 Architecture Principles
+### **Decision: Direction as Primary Feature**
+**Chosen:** Over/under direction is a model feature
+**Why:**
+- Captures market inefficiency (over/under imbalance)
+- High predictive power (77% feature importance)
 
-### **Pipeline Ordering Principle**
-**Score → Log → Build**, not **Log → Build → Score**
+**Problem Discovered (May 6):**
+- Direction overfit: Model relies too heavily on direction
+- Low predictions: 50.5% average (conservative)
 
-Data must be complete before persistence. The sequence matters:
-1. Fetch raw data
-2. Calculate features
-3. **Score with ML model**
-4. **Persist to database**
-5. Filter for specific use case (parlay building)
+**Lessons Learned:**
+- ✅ Direction is predictive BUT needs balancing
+- ❌ Overreliance on single feature limits upside
+- 🔄 Future: Balance direction sampling in training data
 
-### **Database Update Strategy Principle**
-**ON CONFLICT DO UPDATE** with conditions, not **DO NOTHING**
-
-Idempotent operations should fix bad data, not ignore it:
-- `WHERE composite_score IS NULL` - safe backfilling
-- `WHERE bet_status = 'pending'` - safe outcome updates
-- Never unconditional UPDATE (protects good data)
-
-### **Tier Separation Principle**
-**Resolve dependencies first**, then dependents
-
-When outcome B depends on outcome A:
-- Tier 1: Resolve A
-- Tier 2: Resolve B using A's results
-- Never parallel if dependency exists
-
-### **Single Path Principle**
-**One code path** beats **conditional paths**
-
-Feature flags and if/else scorers create:
-- Confusion about which is active
-- Bugs that only appear in one branch
-- Maintenance burden
-
-Remove the flag, choose the path, commit.
-
-### **Persistence Consistency Principle**
-**Always save**, with **unique constraints** to prevent duplicates
-
-Don't rely on user actions for tracking:
-- Auto-save on generation
-- Use `ON CONFLICT` to handle duplicates
-- Track latest, not all iterations
-- Resolution works on what exists, not what user clicked
+**Status:** 🎯 Needs retraining with balanced sampling
 
 ---
 
-These principles form the foundation of the current architecture. Future decisions should align with or explicitly override these patterns.
+### **Decision: Coverage % as Risk Proxy**
+**Chosen:** Coverage % = (outcome count / total outcomes) measures certainty
+**Why:**
+- Higher coverage = more consistent player
+- Helps filter risky props (low sample size)
+
+**Trade-offs:**
+- ✅ Effective risk filter
+- ❌ Penalizes players with breakout potential
+
+**Status:** ✅ Working well, part of lineup consistency filter
+
+---
+
+### **Decision: Store ML Scores with Legs**
+**Chosen:** `composite_score` column in `mlb_scored_legs`
+**Why:**
+- Reproducibility: Can audit historical recommendations
+- Dashboard: Can analyze score vs actual outcome
+- Debugging: Identify model drift or scoring errors
+
+**Alternatives Considered:**
+- Recompute on-demand: Slower, inconsistent if model changes
+- Separate scores table: More complexity, joins required
+
+**Trade-offs:**
+- ✅ Fast lookups, reproducible, audit trail
+- ❌ Storage overhead (minimal ~4 bytes/leg)
+
+**Status:** ✅ Critical for debugging May 6 issues
+
+---
+
+## Data Pipeline
+
+### **Decision: Two-Stage Pipeline (Fetch → Build)**
+**Chosen:** 
+1. Fetch & score all props → database
+2. Build parlays from database
+
+**Why:**
+- Separation of concerns (data vs construction)
+- Allows manual regeneration (rebuild parlays without refetching)
+- Database becomes source of truth
+
+**Alternatives Considered:**
+- Single-stage: Fetch and build in one pass (faster but less flexible)
+- Stream processing: Overkill for batch workload
+
+**Trade-offs:**
+- ✅ Flexibility, debuggability, data persistence
+- ❌ Slightly slower (extra database round-trip)
+
+**Status:** ✅ Proven valuable during May 6 crisis (regenerated without refetching)
+
+---
+
+### **Decision: Lineup Consistency Filter**
+**Chosen:** Filter props where player's lineup consistency <30%
+**Why:**
+- Reduces void rate (players ruled out after props logged)
+- Improves parlay reliability
+- Uses publicly available data (MLB-StatsAPI)
+
+**Implementation Challenges (May 6):**
+- Invalid API parameter (`season` with `type='gameLog'`)
+- Error handling: Any error → include conservatively
+- Circuit breaker: Disable filter if >90% filtered
+
+**Lessons Learned:**
+- ✅ Filter works (40% filtered as designed)
+- ❌ API documentation incomplete, required experimentation
+- 🔄 Conservative error handling prevents catastrophic filtering
+
+**Status:** ✅ Fixed and operational
+
+---
+
+### **Decision: Single Daily Props Fetch**
+**Chosen:** Fetch all props once, cache in database
+**Why:**
+- API rate limits (500 requests/day)
+- Props don't change after fetch
+- Consistent dataset for all parlays
+
+**Trade-offs:**
+- ✅ Cost-effective, consistent
+- ❌ No real-time updates (not needed for use case)
+
+**Status:** ✅ No issues
+
+---
+
+## Parlay Construction
+
+### **Decision: Greedy Construction with Constraints**
+**Chosen:** Build 5 parlays sequentially, apply diversity rules
+**Why:**
+- Simple to implement and reason about
+- Constraints prevent over-correlation
+- 5 parlays = good diversity without overwhelming user
+
+**Constraints Applied:**
+1. Max 1 leg per game (prevents single-game risk)
+2. Max 2 legs per player (prevents over-exposure)
+3. Max 1 leg per prop type per parlay (diversifies prop types)
+4. Odds range: +1400 to +1600 (balances risk/reward)
+
+**Alternatives Considered:**
+- Optimization (linear programming): Overkill, harder to debug
+- Random sampling: Less consistent quality
+- User-defined constraints: More flexible but complex UX
+
+**Trade-offs:**
+- ✅ Simple, consistent, explainable
+- ❌ May miss optimal combinations (good enough > perfect)
+
+**Status:** ✅ Producing valid parlays, no issues
+
+---
+
+### **Decision: Rank by Average ML Score**
+**Chosen:** Rank 1 = highest average `composite_score` across legs
+**Why:**
+- Simple, interpretable
+- Aligns with ML model's confidence
+- Users understand "Rank 1 = best predicted"
+
+**Alternatives Considered:**
+- Expected value (EV): Requires implied odds calculation, more complex
+- Kelly criterion: Requires bankroll management, out of scope
+
+**Trade-offs:**
+- ✅ Simple, interpretable
+- ❌ Doesn't account for odds value (future enhancement)
+
+**Status:** ✅ Working as designed
+
+---
+
+## Outcome Resolution
+
+### **Decision: Void Logic — "Lost Beats Void"**
+**Chosen (May 6 Fix):** 
+- ALL legs void → parlay void
+- ANY leg lost → parlay lost (voids ignored)
+- All non-void legs won → parlay won (adjusted odds)
+
+**Why:**
+- Standard sportsbook behavior
+- Partial voids adjust odds but parlay can still win/lose
+- Prevents false voids (masking losses)
+
+**Previous (Broken) Logic:**
+- ANY leg void → parlay void
+- Problem: One void voided entire parlay, inflated void rate
+
+**Lessons Learned:**
+- ✅ Edge cases matter (partial voids common in MLB)
+- ❌ Assumed standard logic, didn't validate thoroughly
+- 🔄 Backfilled historical data to correct
+
+**Status:** ✅ Fixed, tested, validated
+
+---
+
+### **Decision: Two-Phase Resolution (Legs → Parlays)**
+**Chosen:**
+1. Resolve all legs (won/lost/void)
+2. Resolve parlays based on leg outcomes
+
+**Why:**
+- Separation of concerns (leg logic vs parlay logic)
+- Reusable: Legs can be in multiple parlays
+- Debugging: Can inspect leg outcomes independently
+
+**Alternatives Considered:**
+- Single-phase: Resolve parlays directly from game data (tightly coupled)
+
+**Trade-offs:**
+- ✅ Modular, testable, reusable
+- ❌ Two database passes (negligible overhead)
+
+**Status:** ✅ Proven robust during backfill
+
+---
+
+### **Decision: MLB-StatsAPI for Outcomes**
+**Chosen:** Use `statsapi` Python library for game results
+**Why:**
+- Free, unlimited, official MLB data
+- Python library simplifies integration
+- Reliable (backed by MLB)
+
+**Challenges Encountered (May 6):**
+- Documentation incomplete (parameter combinations unclear)
+- Error messages cryptic (`season` param issue)
+
+**Lessons Learned:**
+- ✅ Free and reliable for production use
+- ❌ Requires experimentation, not just documentation
+- 🔄 Conservative error handling critical
+
+**Status:** ✅ Working reliably post-fix
+
+---
+
+## Database Schema
+
+### **Decision: PostgreSQL on Supabase**
+**Chosen:** Hosted PostgreSQL (Supabase free tier)
+**Why:**
+- Relational model fits data (props, parlays, outcomes)
+- Supabase free tier sufficient (500MB, 2 connections)
+- SQL queries flexible for dashboard
+
+**Alternatives Considered:**
+- SQLite: Not suitable for hosted deployment
+- MongoDB: Overkill, relational structure clearer
+- BigQuery: Too expensive for this scale
+
+**Trade-offs:**
+- ✅ Free, reliable, SQL flexibility
+- ❌ Connection limits (not an issue yet)
+
+**Status:** ✅ No issues, plenty of headroom
+
+---
+
+### **Decision: Denormalized Legs Table**
+**Chosen:** `mlb_scored_legs` stores all leg data (no joins for display)
+**Why:**
+- Fast queries (no joins for Legs tab)
+- Historical props preserved (even if source API changes)
+- ML scores stored with legs (reproducibility)
+
+**Alternatives Considered:**
+- Normalized: Separate players, teams tables (more complex, slower queries)
+
+**Trade-offs:**
+- ✅ Fast reads, simple queries, historical integrity
+- ❌ Data duplication (acceptable for read-heavy workload)
+
+**Status:** ✅ Performs well, 2500+ legs per table
+
+---
+
+### **Decision: TEXT Column for run_date**
+**Chosen (Inherited):** `run_date` stored as TEXT (YYYY-MM-DD format)
+**Why:** Unknown (likely default from initial schema)
+
+**Problem Discovered (May 6):**
+- SQL comparisons fail: `TEXT >= TIMESTAMP` invalid
+- Dashboard queries returned HTTP 500
+
+**Fix Applied:**
+- Cast to DATE in queries: `run_date::date >= CURRENT_DATE - INTERVAL '30 days'`
+
+**Lessons Learned:**
+- ✅ Type casting works for backward compatibility
+- ❌ Should have been DATE type from start
+- 🔄 Future: Migrate to DATE column (non-critical)
+
+**Status:** ✅ Fixed with ::date casts, functional
+
+---
+
+### **Decision: Separate Training Table**
+**Chosen:** `mlb_training_data` separate from `mlb_scored_legs`
+**Why:**
+- Cleaner data for retraining (no NULL outcomes)
+- Easier to filter for model training
+- Historical training data preserved
+
+**Trade-offs:**
+- ✅ Clean training data, easier retraining
+- ❌ Duplication (acceptable for ML pipeline)
+
+**Status:** ✅ Growing steadily (~77k samples)
+
+---
+
+## Deployment Strategy
+
+### **Decision: Railway for Hosting**
+**Chosen:** Railway (PaaS) with GitHub auto-deploy
+**Why:**
+- Simple: Push to master → auto-deploy
+- Free tier sufficient ($5/month estimated usage)
+- Built-in monitoring and logs
+
+**Alternatives Considered:**
+- Heroku: Similar but more expensive
+- AWS/GCP: More complex, overkill for this scale
+- VPS (DigitalOcean): Requires more maintenance
+
+**Trade-offs:**
+- ✅ Simple, affordable, reliable
+- ❌ Vendor lock-in (mitigated by standard Flask/Python stack)
+
+**Status:** ✅ Stable, 99.9% uptime
+
+---
+
+### **Decision: APScheduler for Cron Jobs**
+**Chosen:** APScheduler library within Flask app
+**Why:**
+- No external cron service needed
+- Timezone-aware (ET for MLB)
+- Startup catch-up (runs missed jobs on restart)
+
+**Challenges:**
+- Timezone handling (ET vs UTC)
+- Startup catch-up: Only runs if within 9-12 PM window
+
+**Lessons Learned:**
+- ✅ Works reliably for daily jobs
+- ❌ Startup catch-up logic needs tuning (3-hour window)
+- 🔄 Consider external cron if scaling to multiple instances
+
+**Status:** ✅ Working reliably, no missed runs
+
+---
+
+### **Decision: Environment Variables for Secrets**
+**Chosen:** Railway environment variables + python-dotenv
+**Why:**
+- Security: No secrets in code
+- Flexibility: Different values per environment (dev/prod)
+
+**Variables Used:**
+- `SUPABASE_URL`, `SUPABASE_KEY` (database)
+- `ODDS_API_KEY` (props fetching)
+- `PORT` (Railway assigned)
+
+**Status:** ✅ No issues
+
+---
+
+## Lessons Learned
+
+### **1. Edge Cases Matter (Void Logic)**
+**What Happened:**
+- Assumed ANY void → parlay void (standard logic)
+- Didn't account for partial voids (common in MLB)
+- Resulted in inflated void rate (5.9% → 0%)
+
+**Lesson:**
+- ✅ Test edge cases early (partial voids, all voids, no voids)
+- ✅ Validate against expected outcomes (sportsbook behavior)
+- 🔄 Write unit tests for resolution logic (future)
+
+---
+
+### **2. API Documentation is Incomplete**
+**What Happened:**
+- MLB-StatsAPI docs didn't clarify parameter combinations
+- `season` + `type='gameLog'` caused error
+- Took experimentation to find correct usage
+
+**Lesson:**
+- ✅ Budget time for API experimentation
+- ✅ Add conservative error handling (return None vs crash)
+- ✅ Add circuit breakers for critical filters
+- 🔄 Document API quirks in code comments
+
+---
+
+### **3. Type Safety Prevents Bugs**
+**What Happened:**
+- `run_date` stored as TEXT, queries compared to TIMESTAMP
+- SQL failed silently → HTTP 500 errors
+
+**Lesson:**
+- ✅ Use correct types from schema design (DATE not TEXT)
+- ✅ Type casting (`::date`) works but adds overhead
+- 🔄 Consider schema migration tools (Alembic) for future
+
+---
+
+### **4. Separation of Concerns Enables Debugging**
+**What Happened:**
+- Two-stage pipeline (fetch → build) allowed regeneration without refetching
+- Separate resolution (legs → parlays) allowed independent testing
+
+**Lesson:**
+- ✅ Modularity pays off during debugging
+- ✅ Database as source of truth enables auditing
+- ✅ Idempotent operations (safe to re-run) are valuable
+
+---
+
+### **5. Conservative Defaults Prevent Catastrophic Failures**
+**What Happened:**
+- Lineup filter API errors → include player conservatively
+- Circuit breaker: Disable filter if >90% filtered
+- Prevented 100% filtering from blocking production
+
+**Lesson:**
+- ✅ "Include when uncertain" better than "exclude when uncertain"
+- ✅ Circuit breakers catch systemic issues
+- ✅ Logging helps diagnose (shows individual player results)
+
+---
+
+### **6. Historical Backfill Validates Fixes**
+**What Happened:**
+- Backfilled 7 dates (April 22 - May 5) after void logic fix
+- Discovered May 4 was missing (bonus win!)
+- Validated fix across 17 parlays
+
+**Lesson:**
+- ✅ Backfilling validates logic changes
+- ✅ Historical data = regression test suite
+- 🔄 Automate backfill for future fixes
+
+---
+
+### **7. ML Model Needs Continuous Validation**
+**What Happened:**
+- Model predictions (50.5% avg) match reality (50-55% hit rate)
+- BUT: Direction overfit (77% importance) limits upside
+- Conservative predictions leave value on table
+
+**Lesson:**
+- ✅ Model accuracy ≠ model utility (can be "right" but unprofitable)
+- ✅ Feature importance analysis reveals overfitting
+- 🔄 Retraining with balanced data may improve utility
+
+---
+
+### **8. Dashboard is Critical for Validation**
+**What Happened:**
+- Dashboard bugs (SQL errors, display issues) blocked validation
+- Once fixed, revealed void logic issue instantly
+
+**Lesson:**
+- ✅ Observability is as important as functionality
+- ✅ Invest in dashboard early (validation tool)
+- 🔄 Add charts/visualizations for trends
+
+---
+
+## Future Architectural Improvements
+
+### **SHORT TERM (This Month)**
+1. **Add Unit Tests**
+   - Void logic (all cases)
+   - Lineup filter (error handling)
+   - Parlay construction (constraints)
+
+2. **Monitoring & Alerts**
+   - Daily health check email
+   - Model drift detection
+   - Data quality alerts
+
+### **MEDIUM TERM (Next Quarter)**
+3. **ML Model V3**
+   - Balance direction sampling
+   - Add rolling window features
+   - Target: 52-55% avg prediction
+
+4. **Dashboard Enhancements**
+   - Visualizations (charts, trends)
+   - Parlay diversity analysis
+   - Real-time calibration
+
+### **LONG TERM (Future)**
+5. **Multi-Sport Expansion**
+   - Generalize architecture for NBA, NFL, etc.
+   - Shared pipeline, sport-specific resolvers
+
+6. **Optimization Engine**
+   - Linear programming for parlay construction
+   - EV calculation and Kelly sizing
+
+---
+
+## Decision Review Schedule
+
+**Monthly:** Review performance metrics, adjust thresholds
+**Quarterly:** Evaluate ML model, consider retraining
+**Annually:** Reassess architecture for scale/features
+
+---
+
+**Last Review:** May 6, 2026  
+**Next Review:** June 6, 2026 (after 1 month production)  
+**Reviewer:** Development Team
