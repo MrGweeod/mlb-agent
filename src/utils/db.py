@@ -1630,4 +1630,316 @@ def update_recommendation_analysis(recommendation_id: int, analysis: str) -> Non
     conn.close()
 
 
+def get_parlay_dashboard_data() -> dict:
+    """
+    Return parlay recommendation quality analytics for the new Dashboard tab.
+
+    Queries mlb_parlay_recommendations (win/loss tracking) and mlb_scored_legs
+    (individual leg performance). Returns last 30 days of data.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # ── Summary KPIs ──────────────────────────────────────────────────────────
+    cur.execute("""
+        SELECT
+            COUNT(*)                                                             AS total_parlays,
+            COUNT(*) FILTER (WHERE bet_status = 'won')                          AS won,
+            COUNT(*) FILTER (WHERE bet_status = 'lost')                         AS lost,
+            COUNT(*) FILTER (WHERE bet_status = 'void')                         AS voided,
+            COUNT(*) FILTER (WHERE bet_status = 'pending')                      AS pending,
+            ROUND(
+                100.0 * COUNT(*) FILTER (WHERE bet_status = 'won') /
+                NULLIF(COUNT(*) FILTER (WHERE bet_status IN ('won','lost')), 0),
+                1
+            )                                                                    AS parlay_win_rate,
+            ROUND(AVG(combined_odds) FILTER (WHERE bet_status IN ('won','lost')), 0) AS avg_odds
+        FROM mlb_parlay_recommendations
+        WHERE recommendation_date >= CURRENT_DATE - INTERVAL '30 days'
+    """)
+    summary = dict(cur.fetchone())
+
+    # ── Daily performance (last 14 days) ─────────────────────────────────────
+    cur.execute("""
+        SELECT
+            recommendation_date,
+            COUNT(*)                                                             AS total,
+            COUNT(*) FILTER (WHERE bet_status = 'won')                          AS won,
+            COUNT(*) FILTER (WHERE bet_status = 'lost')                         AS lost,
+            COUNT(*) FILTER (WHERE bet_status = 'void')                         AS voided,
+            ROUND(
+                100.0 * COUNT(*) FILTER (WHERE bet_status = 'won') /
+                NULLIF(COUNT(*) FILTER (WHERE bet_status IN ('won','lost')), 0),
+                1
+            )                                                                    AS win_rate
+        FROM mlb_parlay_recommendations
+        WHERE recommendation_date >= CURRENT_DATE - INTERVAL '14 days'
+        GROUP BY recommendation_date
+        ORDER BY recommendation_date DESC
+    """)
+    daily_performance = [dict(r) for r in cur.fetchall()]
+
+    # ── Leg win rate by stat (last 30 days, mlb_scored_legs) ─────────────────
+    cur.execute("""
+        SELECT
+            stat,
+            COUNT(*)                                                             AS total,
+            COUNT(*) FILTER (WHERE result = 'won')                              AS won,
+            COUNT(*) FILTER (WHERE result = 'lost')                             AS lost,
+            ROUND(
+                100.0 * COUNT(*) FILTER (WHERE result = 'won') /
+                NULLIF(COUNT(*) FILTER (WHERE result IN ('won','lost')), 0),
+                1
+            )                                                                    AS win_rate,
+            ROUND(AVG(composite_score)::numeric, 1)                             AS avg_score,
+            ROUND(AVG(coverage_pct)::numeric, 1)                                AS avg_coverage
+        FROM mlb_scored_legs
+        WHERE result IN ('won', 'lost')
+          AND run_date >= CURRENT_DATE - INTERVAL '30 days'
+        GROUP BY stat
+        HAVING COUNT(*) >= 5
+        ORDER BY win_rate DESC NULLS LAST, total DESC
+    """)
+    leg_by_stat = [dict(r) for r in cur.fetchall()]
+
+    # ── Score calibration: composite_score bucket vs actual win rate ──────────
+    cur.execute("""
+        SELECT
+            CASE
+                WHEN composite_score < 60 THEN '<60'
+                WHEN composite_score < 65 THEN '60-65'
+                WHEN composite_score < 70 THEN '65-70'
+                WHEN composite_score < 75 THEN '70-75'
+                ELSE '75+'
+            END                                                                  AS score_bucket,
+            COUNT(*)                                                             AS total,
+            COUNT(*) FILTER (WHERE result = 'won')                              AS won,
+            ROUND(
+                100.0 * COUNT(*) FILTER (WHERE result = 'won') /
+                NULLIF(COUNT(*) FILTER (WHERE result IN ('won','lost')), 0),
+                1
+            )                                                                    AS win_rate
+        FROM mlb_scored_legs
+        WHERE result IN ('won', 'lost')
+          AND composite_score IS NOT NULL
+        GROUP BY score_bucket
+        ORDER BY score_bucket
+    """)
+    score_calibration = [dict(r) for r in cur.fetchall()]
+
+    # ── Top performing legs (min 3 resolved, last 30 days) ───────────────────
+    cur.execute("""
+        SELECT
+            player_name,
+            stat,
+            COUNT(*)                                                             AS total,
+            COUNT(*) FILTER (WHERE result = 'won')                              AS won,
+            ROUND(
+                100.0 * COUNT(*) FILTER (WHERE result = 'won') /
+                NULLIF(COUNT(*) FILTER (WHERE result IN ('won','lost')), 0),
+                1
+            )                                                                    AS win_rate,
+            ROUND(AVG(composite_score)::numeric, 1)                             AS avg_score
+        FROM mlb_scored_legs
+        WHERE result IN ('won', 'lost')
+          AND run_date >= CURRENT_DATE - INTERVAL '30 days'
+        GROUP BY player_name, stat
+        HAVING COUNT(*) >= 3
+        ORDER BY win_rate DESC NULLS LAST, total DESC
+        LIMIT 10
+    """)
+    top_legs = [dict(r) for r in cur.fetchall()]
+
+    # ── Recent recommendations (last 20) ─────────────────────────────────────
+    cur.execute("""
+        SELECT
+            id,
+            recommendation_date,
+            rank,
+            combined_odds,
+            ROUND(win_probability::numeric, 1) AS win_probability,
+            ROUND(edge_pct::numeric, 1)        AS edge_pct,
+            bet_status,
+            resolved_at
+        FROM mlb_parlay_recommendations
+        ORDER BY recommendation_date DESC, rank ASC
+        LIMIT 20
+    """)
+    recent_recs = [dict(r) for r in cur.fetchall()]
+
+    cur.close()
+    conn.close()
+
+    return {
+        "summary":           summary,
+        "daily_performance": daily_performance,
+        "leg_by_stat":       leg_by_stat,
+        "score_calibration": score_calibration,
+        "top_legs":          top_legs,
+        "recent_recs":       recent_recs,
+    }
+
+
+def get_ml_health_data() -> dict:
+    """
+    Return ML model health data for the new Training tab.
+
+    Loads feature importance from models/leg_scorer_v2.pkl and queries
+    mlb_training_data for calibration drift and data quality.
+    """
+    import pathlib
+    import pickle
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # ── Model status from pkl file ────────────────────────────────────────────
+    model_path = pathlib.Path("models/leg_scorer_v2.pkl")
+    model_status: dict = {
+        "model_file": str(model_path),
+        "exists": model_path.exists(),
+        "file_size_kb": None,
+        "last_modified": None,
+        "feature_count": None,
+        "auc": None,
+        "samples": None,
+    }
+    feature_importance: list[dict] = []
+
+    if model_path.exists():
+        import datetime as _dt
+        stat = model_path.stat()
+        model_status["file_size_kb"] = round(stat.st_size / 1024, 1)
+        model_status["last_modified"] = _dt.datetime.fromtimestamp(
+            stat.st_mtime, tz=_dt.timezone.utc
+        ).strftime("%Y-%m-%d %H:%M UTC")
+        try:
+            with open(model_path, "rb") as f:
+                bundle = pickle.load(f)
+            clf = bundle.get("model") or bundle.get("clf")
+            features = bundle.get("features") or bundle.get("feature_names") or []
+            model_status["feature_count"] = len(features)
+            model_status["auc"] = bundle.get("auc")
+            model_status["samples"] = bundle.get("n_samples") or bundle.get("samples")
+            if clf is not None and hasattr(clf, "feature_importances_") and features:
+                imp = clf.feature_importances_
+                feature_importance = sorted(
+                    [{"feature": f, "importance": round(float(v) * 100, 2)}
+                     for f, v in zip(features, imp)],
+                    key=lambda x: x["importance"],
+                    reverse=True,
+                )[:15]
+        except Exception as e:
+            model_status["load_error"] = str(e)
+
+    # ── Calibration drift (training data, last 60 days) ───────────────────────
+    cur.execute("""
+        SELECT
+            CASE
+                WHEN coverage_pct < 55 THEN '<55%'
+                WHEN coverage_pct < 60 THEN '55-60%'
+                WHEN coverage_pct < 65 THEN '60-65%'
+                WHEN coverage_pct < 70 THEN '65-70%'
+                ELSE '70%+'
+            END                                                                  AS bucket,
+            COUNT(*)                                                             AS total,
+            COUNT(*) FILTER (WHERE result = 'hit')                              AS hits,
+            ROUND(
+                100.0 * COUNT(*) FILTER (WHERE result = 'hit') / COUNT(*),
+                1
+            )                                                                    AS actual_hit_rate,
+            ROUND(AVG(coverage_pct)::numeric, 1)                                AS avg_predicted,
+            ROUND(
+                (AVG(coverage_pct) -
+                 100.0 * COUNT(*) FILTER (WHERE result = 'hit') / COUNT(*))::numeric,
+                1
+            )                                                                    AS error_pp
+        FROM mlb_training_data
+        WHERE coverage_pct IS NOT NULL
+          AND result IN ('hit', 'miss')
+          AND game_date >= CURRENT_DATE - INTERVAL '60 days'
+        GROUP BY bucket
+        ORDER BY bucket
+    """)
+    calibration_drift = [dict(r) for r in cur.fetchall()]
+
+    # ── Data quality (last 14 days) ───────────────────────────────────────────
+    cur.execute("""
+        SELECT
+            game_date,
+            COUNT(*)                                                             AS total,
+            COUNT(*) FILTER (WHERE result = 'hit')                              AS hits,
+            COUNT(*) FILTER (WHERE result = 'miss')                             AS misses,
+            COUNT(*) FILTER (WHERE result IS NULL)                              AS pending,
+            ROUND(
+                100.0 * COUNT(*) FILTER (WHERE result = 'hit') /
+                NULLIF(COUNT(*) FILTER (WHERE result IN ('hit','miss')), 0),
+                1
+            )                                                                    AS hit_rate
+        FROM mlb_training_data
+        WHERE game_date >= CURRENT_DATE - INTERVAL '14 days'
+        GROUP BY game_date
+        ORDER BY game_date DESC
+    """)
+    data_quality = [dict(r) for r in cur.fetchall()]
+
+    # ── Overall training data summary ─────────────────────────────────────────
+    cur.execute("""
+        SELECT
+            COUNT(*)                                                             AS total_samples,
+            COUNT(*) FILTER (WHERE result IN ('hit','miss'))                    AS resolved,
+            COUNT(*) FILTER (WHERE result IS NULL)                              AS unresolved,
+            COUNT(DISTINCT game_date)                                           AS days_covered,
+            MIN(game_date)                                                       AS first_date,
+            MAX(game_date)                                                       AS last_date,
+            ROUND(
+                100.0 * COUNT(*) FILTER (WHERE result = 'hit') /
+                NULLIF(COUNT(*) FILTER (WHERE result IN ('hit','miss')), 0),
+                1
+            )                                                                    AS overall_hit_rate
+        FROM mlb_training_data
+    """)
+    training_summary = dict(cur.fetchone())
+
+    cur.close()
+    conn.close()
+
+    # ── Retrain triggers ──────────────────────────────────────────────────────
+    # Compute days since last model training from file mtime
+    retrain_triggers: list[dict] = []
+    if model_path.exists():
+        import datetime as _dt
+        mtime = model_path.stat().st_mtime
+        days_since = (_dt.datetime.now().timestamp() - mtime) / 86400
+        retrain_triggers.append({
+            "trigger": "Days since last retrain",
+            "value": f"{days_since:.0f} days",
+            "status": "warn" if days_since >= 7 else "ok",
+            "threshold": "retrain if ≥ 7 days",
+        })
+    new_samples = training_summary.get("resolved", 0)
+    retrain_triggers.append({
+        "trigger": "Total resolved samples",
+        "value": f"{new_samples:,}",
+        "status": "ok" if new_samples >= 1000 else "warn",
+        "threshold": "need ≥ 1000 resolved to retrain",
+    })
+    auc = model_status.get("auc")
+    retrain_triggers.append({
+        "trigger": "Current model AUC",
+        "value": f"{auc:.4f}" if auc else "unknown",
+        "status": "ok" if auc and auc >= 0.80 else "warn",
+        "threshold": "warn if AUC < 0.80",
+    })
+
+    return {
+        "model_status":       model_status,
+        "feature_importance": feature_importance,
+        "calibration_drift":  calibration_drift,
+        "data_quality":       data_quality,
+        "training_summary":   training_summary,
+        "retrain_triggers":   retrain_triggers,
+    }
+
+
 init_db()

@@ -48,6 +48,8 @@ from src.utils.db import (
     get_todays_recommendations,
     get_training_analytics_data,
     get_training_dashboard_data,
+    get_parlay_dashboard_data,
+    get_ml_health_data,
     update_recommendation_analysis,
 )
 from src.engine.claude_agent import analyze_parlays
@@ -124,7 +126,7 @@ async def handle_health(request: web.Request) -> web.Response:
 
 
 async def handle_dashboard(request: web.Request) -> web.Response:
-    """Return calibration and performance analytics for the dashboard view."""
+    """Return parlay recommendation quality tracking for the dashboard view."""
     if not _check_auth(request):
         return web.Response(
             text=json.dumps({"error": "Unauthorized"}),
@@ -132,7 +134,7 @@ async def handle_dashboard(request: web.Request) -> web.Response:
             status=401,
         )
     try:
-        data = get_training_dashboard_data()
+        data = get_parlay_dashboard_data()
         return web.Response(
             text=json.dumps(data, default=str),
             content_type="application/json",
@@ -146,7 +148,7 @@ async def handle_dashboard(request: web.Request) -> web.Response:
 
 
 async def handle_training_analytics(request: web.Request) -> web.Response:
-    """Return training data analytics for the Training Data tab."""
+    """Return ML model health data for the Training tab."""
     if not _check_auth(request):
         return web.Response(
             text=json.dumps({"error": "Unauthorized"}),
@@ -154,9 +156,56 @@ async def handle_training_analytics(request: web.Request) -> web.Response:
             status=401,
         )
     try:
-        data = get_training_analytics_data()
+        data = get_ml_health_data()
         return web.Response(
             text=json.dumps(data, default=str),
+            content_type="application/json",
+        )
+    except Exception as exc:
+        return web.Response(
+            text=json.dumps({"error": str(exc)}),
+            content_type="application/json",
+            status=500,
+        )
+
+
+async def handle_training_retrain(request: web.Request) -> web.Response:
+    """POST /api/training/retrain — trigger ML model retraining (requires ADMIN_SECRET)."""
+    if not _check_auth(request):
+        return web.Response(
+            text=json.dumps({"error": "Unauthorized"}),
+            content_type="application/json",
+            status=401,
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    secret = body.get("secret", "")
+    expected_secret = os.getenv("ADMIN_SECRET", "change_me_in_railway")
+    if secret != expected_secret:
+        return web.Response(
+            text=json.dumps({"error": "Invalid secret"}),
+            content_type="application/json",
+            status=403,
+        )
+
+    try:
+        from scripts.train_ml_model import train
+
+        def run_training():
+            train(retrain=True)
+
+        loop = asyncio.get_event_loop()
+        asyncio.ensure_future(loop.run_in_executor(None, run_training))
+
+        return web.Response(
+            text=json.dumps({
+                "status": "Training started",
+                "message": "Check Railway logs for progress. Training takes 2-5 minutes.",
+                "model_path": "models/leg_scorer_v2.pkl",
+            }),
             content_type="application/json",
         )
     except Exception as exc:
@@ -851,6 +900,7 @@ def create_app() -> web.Application:
     app.router.add_post("/api/analyze-recommendation", handle_analyze_recommendation)
     app.router.add_post("/api/refresh", handle_refresh)
     app.router.add_get("/api/train-model", handle_train_model)
+    app.router.add_post("/api/training/retrain", handle_training_retrain)
     return app
 
 

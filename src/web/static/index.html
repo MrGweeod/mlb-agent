@@ -934,109 +934,95 @@
 
   <!-- ── Dashboard view ── -->
   <div id="dashboard">
-    <!-- Dataset info header -->
-    <div style="padding:10px 12px 2px;font-size:12px;color:var(--muted);text-align:center">
-      Training Data: 66,174 props &nbsp;·&nbsp; March 28 – April 22, 2026 &nbsp;·&nbsp; 49,222 calibrated samples
-    </div>
-
-    <!-- Summary stats row -->
+    <!-- Summary KPIs -->
     <div class="dash-summary" id="dash-summary"></div>
 
-    <!-- Section 1: Score Calibration -->
+    <!-- Section 1: Daily Performance -->
     <div class="dash-section">
       <div class="dash-section-header">
-        Score Calibration
-        <span class="dash-section-sub" id="dash-calibration-sub">Composite score buckets · 49K samples</span>
+        Daily Parlay Performance
+        <span class="dash-section-sub">Last 14 days</span>
       </div>
-      <div id="dash-calibration"><div class="dash-empty">Loading…</div></div>
+      <div id="dash-daily-perf"><div class="dash-empty">Loading…</div></div>
     </div>
 
-    <!-- Section 2: Prop Type Performance -->
+    <!-- Section 2: Leg Performance by Stat -->
     <div class="dash-section">
       <div class="dash-section-header">
-        Prop Type Performance
-        <span class="dash-section-sub" id="dash-prop-sub">Hit rate by stat category</span>
+        Leg Performance by Stat
+        <span class="dash-section-sub">Win rate per stat type · min 5 legs</span>
       </div>
-      <div id="dash-by-prop"><div class="dash-empty">Loading…</div></div>
+      <div id="dash-leg-stat"><div class="dash-empty">Loading…</div></div>
     </div>
 
-    <!-- Section 3: Direction Analysis -->
+    <!-- Section 3: Score Calibration -->
     <div class="dash-section">
       <div class="dash-section-header">
-        Over vs Under
-        <span class="dash-section-sub" id="dash-dir-sub">Direction bias · market line shading</span>
+        Parlay Score Calibration
+        <span class="dash-section-sub">Composite score buckets vs actual parlay win rate</span>
       </div>
-      <div id="dash-direction"><div class="dash-empty">Loading…</div></div>
+      <div id="dash-score-cal"><div class="dash-empty">Loading…</div></div>
     </div>
 
-    <!-- Section 4: Coverage Accuracy -->
+    <!-- Section 4: Top Performing Legs -->
     <div class="dash-section">
       <div class="dash-section-header">
-        Coverage Accuracy
-        <span class="dash-section-sub" id="dash-cov-sub">Predicted coverage vs actual hit rate</span>
+        Top Performing Legs
+        <span class="dash-section-sub">Best leg win rates · last 30 days · min 3 resolved</span>
       </div>
-      <div id="dash-trend"><div class="dash-empty">Loading…</div></div>
+      <div id="dash-top-legs"><div class="dash-empty">Loading…</div></div>
     </div>
 
-    <!-- Section 5: Trend Validation -->
+    <!-- Section 5: Recent Recommendations -->
     <div class="dash-section">
       <div class="dash-section-header">
-        Trend Validation
-        <span class="dash-section-sub" id="dash-trend-sub">HOT / NEUTRAL / COLD by trend score</span>
+        Recent Recommendations
+        <span class="dash-section-sub">Last 20 parlay recommendations</span>
       </div>
-      <div id="dash-top"><div class="dash-empty">Loading…</div></div>
-    </div>
-
-    <!-- Section 6: Recent Legs -->
-    <div class="dash-section">
-      <div class="dash-section-header">
-        Recent Legs
-        <span class="dash-section-sub">Last 50 resolved props</span>
-      </div>
-      <div id="dash-ev"><div class="dash-empty">Loading…</div></div>
+      <div id="dash-recent-recs"><div class="dash-empty">Loading…</div></div>
     </div>
   </div>
 </div>
 
   <!-- ── Training Data view ── -->
   <div id="training">
-    <!-- Summary cards -->
+    <!-- Model Status KPIs -->
     <div class="dash-summary" id="train-summary"></div>
 
-    <!-- Section 1: Daily Collection Health -->
+    <!-- Section 1: Retrain Triggers -->
     <div class="dash-section">
       <div class="dash-section-header">
-        Daily Collection Health
-        <span class="dash-section-sub">Last 14 days — props logged per day</span>
+        Retrain Status
+        <span class="dash-section-sub">Automated retrain checks</span>
       </div>
-      <div id="train-daily"><div class="dash-empty">Loading…</div></div>
+      <div id="train-retrain"><div class="dash-empty">Loading…</div></div>
     </div>
 
-    <!-- Section 2: Direction Bias -->
+    <!-- Section 2: Feature Importance -->
     <div class="dash-section">
       <div class="dash-section-header">
-        Direction Bias
-        <span class="dash-section-sub">Hit rate by stat + direction · last 30 days · ≥20 samples</span>
+        Feature Importance
+        <span class="dash-section-sub">Top 15 ML model features</span>
       </div>
-      <div id="train-direction"><div class="dash-empty">Loading…</div></div>
+      <div id="train-features"><div class="dash-empty">Loading…</div></div>
     </div>
 
-    <!-- Section 3: Coverage Calibration -->
+    <!-- Section 3: Calibration Drift -->
     <div class="dash-section">
       <div class="dash-section-header">
-        Coverage Calibration
-        <span class="dash-section-sub">Predicted coverage vs actual hit rate by bucket</span>
+        Calibration Drift
+        <span class="dash-section-sub">Predicted coverage vs actual hit rate · last 60 days</span>
       </div>
       <div id="train-calibration"><div class="dash-empty">Loading…</div></div>
     </div>
 
-    <!-- Section 4: Feature Health -->
+    <!-- Section 4: Data Quality -->
     <div class="dash-section">
       <div class="dash-section-header">
-        Feature Health
-        <span class="dash-section-sub">ML feature completeness % · last 7 days</span>
+        Daily Data Quality
+        <span class="dash-section-sub">Last 14 days — training props logged</span>
       </div>
-      <div id="train-features"><div class="dash-empty">Loading…</div></div>
+      <div id="train-daily"><div class="dash-empty">Loading…</div></div>
     </div>
   </div>
 </div>
@@ -1811,215 +1797,159 @@ function fmtNum(val) {
 }
 
 function renderDashboard(d) {
-  renderSummary(d.summary);
-  renderCalibration(d.calibration);
-  renderByProp(d.by_prop);
-  renderDirection(d.by_direction);
-  renderCoverageAccuracy(d.coverage_accuracy);
-  renderTrendValidation(d.trend_validation);
-  renderRecentLegs(d.recent_legs);
+  renderDashSummary(d.summary);
+  renderDashDailyPerf(d.daily_performance);
+  renderDashLegStat(d.leg_by_stat);
+  renderDashScoreCal(d.score_calibration);
+  renderDashTopLegs(d.top_legs);
+  renderDashRecentRecs(d.recent_recs);
 }
 
-function renderSummary(s) {
+function renderDashSummary(s) {
   if (!s) return;
-  const hr = s.overall_hit_rate;
-  const hrCls = hr >= 60 ? 'green' : hr >= 50 ? 'yellow' : 'red';
+  const wr = s.parlay_win_rate;
+  const wrCls = wr >= 50 ? 'green' : wr >= 35 ? 'yellow' : 'red';
   document.getElementById('dash-summary').innerHTML = `
     <div class="dash-stat">
-      <div class="dash-stat-label">Total Props</div>
-      <div class="dash-stat-value">${fmtNum(s.total_props)}</div>
+      <div class="dash-stat-label">Total Parlays</div>
+      <div class="dash-stat-value">${fmtNum(s.total_parlays)}</div>
     </div>
     <div class="dash-stat">
-      <div class="dash-stat-label">Calibrated</div>
-      <div class="dash-stat-value">${fmtNum(s.calibrated_samples)}</div>
+      <div class="dash-stat-label">Won</div>
+      <div class="dash-stat-value green">${fmtNum(s.won)}</div>
     </div>
     <div class="dash-stat">
-      <div class="dash-stat-label">Overall Hit Rate</div>
-      <div class="dash-stat-value ${hrCls}">${hr != null ? parseFloat(hr).toFixed(1) + '%' : '—'}</div>
+      <div class="dash-stat-label">Lost</div>
+      <div class="dash-stat-value red">${fmtNum(s.lost)}</div>
     </div>
     <div class="dash-stat">
-      <div class="dash-stat-label">Total Hits</div>
-      <div class="dash-stat-value green">${fmtNum(s.total_hits)}</div>
+      <div class="dash-stat-label">Win Rate</div>
+      <div class="dash-stat-value ${wrCls}">${wr != null ? parseFloat(wr).toFixed(1) + '%' : '—'}</div>
+    </div>
+    <div class="dash-stat">
+      <div class="dash-stat-label">Avg Odds</div>
+      <div class="dash-stat-value">${s.avg_odds != null ? '+' + Math.round(s.avg_odds) : '—'}</div>
+    </div>
+    <div class="dash-stat">
+      <div class="dash-stat-label">Pending</div>
+      <div class="dash-stat-value yellow">${fmtNum(s.pending)}</div>
     </div>
   `;
 }
 
-function renderCalibration(rows) {
-  const el = document.getElementById('dash-calibration');
-  if (!rows || !rows.length) { el.innerHTML = '<div class="dash-empty">No calibration data.</div>'; return; }
-
-  const order = ['<25', '25-35', '35-45', '45-55', '55-65', '65+'];
-  rows = [...rows].sort((a, b) => order.indexOf(a.score_bucket) - order.indexOf(b.score_bucket));
-
-  const total = rows.reduce((s, r) => s + (r.total || 0), 0);
-  document.getElementById('dash-calibration-sub').textContent =
-    `Composite score buckets · ${total.toLocaleString()} samples`;
-
+function renderDashDailyPerf(rows) {
+  const el = document.getElementById('dash-daily-perf');
+  if (!rows || !rows.length) { el.innerHTML = '<div class="dash-empty">No daily data yet.</div>'; return; }
   el.innerHTML = `<div style="overflow-x:auto"><table class="dash-table">
     <thead><tr>
-      <th>Score Bucket</th>
-      <th class="num">Count</th>
-      <th class="num">Hits</th>
-      <th class="num">Hit %</th>
-      <th class="num">Avg Predicted Cov</th>
+      <th>Date</th>
+      <th class="num">Won</th>
+      <th class="num">Lost</th>
+      <th class="num">Voided</th>
+      <th class="num">Win Rate</th>
     </tr></thead>
-    <tbody>${rows.map(r => `<tr>
-      <td><strong>${esc(r.score_bucket)}</strong></td>
-      <td class="num">${fmtNum(r.total)}</td>
-      <td class="num" style="color:var(--green)">${fmtNum(r.hits)}</td>
-      <td class="num" ${hitRateColor(r.hit_rate_pct)}>${fmtHitRate(r.hit_rate_pct)}</td>
-      <td class="num">${r.avg_predicted_coverage != null ? parseFloat(r.avg_predicted_coverage).toFixed(1) + '%' : '—'}</td>
-    </tr>`).join('')}</tbody>
+    <tbody>${rows.map(r => {
+      const wr = r.win_rate;
+      return `<tr>
+        <td>${esc(r.recommendation_date ? String(r.recommendation_date).slice(0,10) : '—')}</td>
+        <td class="num" style="color:var(--green)">${fmtNum(r.won)}</td>
+        <td class="num" style="color:var(--red)">${fmtNum(r.lost)}</td>
+        <td class="num" style="color:var(--muted)">${fmtNum(r.voided)}</td>
+        <td class="num" ${hitRateColor(wr)}>${wr != null ? parseFloat(wr).toFixed(1) + '%' : '—'}</td>
+      </tr>`;
+    }).join('')}</tbody>
   </table></div>`;
 }
 
-function renderByProp(rows) {
-  const el = document.getElementById('dash-by-prop');
-  if (!rows || !rows.length) { el.innerHTML = '<div class="dash-empty">No data.</div>'; return; }
-
-  const total = rows.reduce((s, r) => s + (r.total || 0), 0);
-  document.getElementById('dash-prop-sub').textContent =
-    `Hit rate by stat category · ${total.toLocaleString()} props`;
-
+function renderDashLegStat(rows) {
+  const el = document.getElementById('dash-leg-stat');
+  if (!rows || !rows.length) { el.innerHTML = '<div class="dash-empty">No leg data yet (need 5+ resolved legs per stat).</div>'; return; }
   el.innerHTML = `<div style="overflow-x:auto"><table class="dash-table">
     <thead><tr>
       <th>Stat</th>
       <th class="num">Total</th>
-      <th class="num">Hits</th>
-      <th class="num">Hit %</th>
-      <th class="num">Avg Composite</th>
+      <th class="num">Won</th>
+      <th class="num">Lost</th>
+      <th class="num">Win Rate</th>
+      <th class="num">Avg Score</th>
+      <th class="num">Avg Coverage</th>
     </tr></thead>
     <tbody>${rows.map(r => `<tr>
-      <td>${esc(r.stat)}</td>
+      <td><strong>${esc(r.stat || '—')}</strong></td>
       <td class="num">${fmtNum(r.total)}</td>
-      <td class="num" style="color:var(--green)">${fmtNum(r.hits)}</td>
-      <td class="num" ${hitRateColor(r.hit_rate_pct)}>${fmtHitRate(r.hit_rate_pct)}</td>
-      <td class="num">${r.avg_composite != null ? parseFloat(r.avg_composite).toFixed(1) : '—'}</td>
+      <td class="num" style="color:var(--green)">${fmtNum(r.won)}</td>
+      <td class="num" style="color:var(--red)">${fmtNum(r.lost)}</td>
+      <td class="num" ${hitRateColor(r.win_rate)}>${r.win_rate != null ? parseFloat(r.win_rate).toFixed(1) + '%' : '—'}</td>
+      <td class="num">${r.avg_score != null ? parseFloat(r.avg_score).toFixed(1) : '—'}</td>
+      <td class="num">${r.avg_coverage != null ? parseFloat(r.avg_coverage).toFixed(1) + '%' : '—'}</td>
     </tr>`).join('')}</tbody>
   </table></div>`;
 }
 
-function renderDirection(rows) {
-  const el = document.getElementById('dash-direction');
-  if (!rows || !rows.length) { el.innerHTML = '<div class="dash-empty">No data.</div>'; return; }
-
-  const total = rows.reduce((s, r) => s + (r.total || 0), 0);
-  document.getElementById('dash-dir-sub').textContent =
-    `Direction bias · ${total.toLocaleString()} resolved props`;
-
+function renderDashScoreCal(rows) {
+  const el = document.getElementById('dash-score-cal');
+  if (!rows || !rows.length) { el.innerHTML = '<div class="dash-empty">No calibration data yet.</div>'; return; }
+  const order = ['<60', '60-65', '65-70', '70-75', '75+'];
+  rows = [...rows].sort((a, b) => order.indexOf(a.score_bucket) - order.indexOf(b.score_bucket));
   el.innerHTML = `<div style="overflow-x:auto"><table class="dash-table">
     <thead><tr>
-      <th>Direction</th>
-      <th class="num">Count</th>
-      <th class="num">Hits</th>
-      <th class="num">Hit %</th>
+      <th>Score Bucket</th>
+      <th class="num">Parlays</th>
+      <th class="num">Won</th>
+      <th class="num">Win Rate</th>
     </tr></thead>
     <tbody>${rows.map(r => `<tr>
-      <td><strong>${esc(r.direction || '—')}</strong></td>
+      <td><strong>${esc(r.score_bucket)}</strong></td>
       <td class="num">${fmtNum(r.total)}</td>
-      <td class="num" style="color:var(--green)">${fmtNum(r.hits)}</td>
-      <td class="num" ${hitRateColor(r.hit_rate_pct)}>${fmtHitRate(r.hit_rate_pct)}</td>
+      <td class="num" style="color:var(--green)">${fmtNum(r.won)}</td>
+      <td class="num" ${hitRateColor(r.win_rate)}>${r.win_rate != null ? parseFloat(r.win_rate).toFixed(1) + '%' : '—'}</td>
     </tr>`).join('')}</tbody>
   </table></div>`;
 }
 
-function renderCoverageAccuracy(rows) {
-  const el = document.getElementById('dash-trend');
-  if (!rows || !rows.length) { el.innerHTML = '<div class="dash-empty">No coverage data.</div>'; return; }
-
-  const total = rows.reduce((s, r) => s + (r.total || 0), 0);
-  document.getElementById('dash-cov-sub').textContent =
-    `Predicted coverage vs actual hit rate · ${total.toLocaleString()} samples`;
-
-  const covOrder = ['<30%', '30-40%', '40-50%', '50-60%', '60-70%', '70%+'];
-  rows = [...rows].sort((a, b) => covOrder.indexOf(a.coverage_bucket) - covOrder.indexOf(b.coverage_bucket));
-
+function renderDashTopLegs(rows) {
+  const el = document.getElementById('dash-top-legs');
+  if (!rows || !rows.length) { el.innerHTML = '<div class="dash-empty">No top legs yet (need 3+ resolved per player+stat).</div>'; return; }
   el.innerHTML = `<div style="overflow-x:auto"><table class="dash-table">
     <thead><tr>
-      <th>Coverage Bucket</th>
-      <th class="num">Count</th>
-      <th class="num">Hits</th>
-      <th class="num">Actual Hit %</th>
-      <th class="num">Avg Predicted</th>
-      <th class="num">Overconf</th>
+      <th>Player / Stat</th>
+      <th class="num">Total</th>
+      <th class="num">Won</th>
+      <th class="num">Win Rate</th>
     </tr></thead>
-    <tbody>${rows.map(r => {
-      const pred = r.predicted_coverage != null ? parseFloat(r.predicted_coverage) : null;
-      const actual = r.actual_hit_rate != null ? parseFloat(r.actual_hit_rate) : null;
-      const diff = pred !== null && actual !== null ? pred - actual : null;
-      const diffStr = diff !== null ? (diff > 0 ? '+' : '') + diff.toFixed(1) + 'pp' : '—';
-      const diffCls = diff === null ? '' : diff > 5 ? 'cal-err-bad' : diff > 0 ? 'cal-err-warn' : 'cal-err-good';
-      return `<tr>
-        <td><strong>${esc(r.coverage_bucket)}</strong></td>
-        <td class="num">${fmtNum(r.total)}</td>
-        <td class="num" style="color:var(--green)">${fmtNum(r.hits)}</td>
-        <td class="num" ${hitRateColor(r.actual_hit_rate)}>${fmtHitRate(r.actual_hit_rate)}</td>
-        <td class="num">${pred !== null ? pred.toFixed(1) + '%' : '—'}</td>
-        <td class="num"><span class="${diffCls}">${diffStr}</span></td>
-      </tr>`;
-    }).join('')}</tbody>
+    <tbody>${rows.map(r => `<tr>
+      <td>${esc(r.player_stat || '—')}</td>
+      <td class="num">${fmtNum(r.total)}</td>
+      <td class="num" style="color:var(--green)">${fmtNum(r.won)}</td>
+      <td class="num" ${hitRateColor(r.win_rate)}>${r.win_rate != null ? parseFloat(r.win_rate).toFixed(1) + '%' : '—'}</td>
+    </tr>`).join('')}</tbody>
   </table></div>`;
 }
 
-function renderTrendValidation(rows) {
-  const el = document.getElementById('dash-top');
-  if (!rows || !rows.length) { el.innerHTML = '<div class="dash-empty">No trend data.</div>'; return; }
-
-  const total = rows.reduce((s, r) => s + (r.total || 0), 0);
-  document.getElementById('dash-trend-sub').textContent =
-    `HOT / NEUTRAL / COLD by trend score · ${total.toLocaleString()} samples`;
-
-  const trendOrder = ['COLD', 'NEUTRAL', 'HOT'];
-  rows = [...rows].sort((a, b) => trendOrder.indexOf(a.trend_category) - trendOrder.indexOf(b.trend_category));
-
-  el.innerHTML = `<div style="overflow-x:auto"><table class="dash-table">
-    <thead><tr>
-      <th>Trend Category</th>
-      <th class="num">Count</th>
-      <th class="num">Hits</th>
-      <th class="num">Hit %</th>
-    </tr></thead>
-    <tbody>${rows.map(r => {
-      const catStyle = r.trend_category === 'HOT' ? 'style="color:var(--green)"'
-                     : r.trend_category === 'COLD' ? 'style="color:var(--red)"' : '';
-      return `<tr>
-        <td><strong ${catStyle}>${esc(r.trend_category || '—')}</strong></td>
-        <td class="num">${fmtNum(r.total)}</td>
-        <td class="num" style="color:var(--green)">${fmtNum(r.hits)}</td>
-        <td class="num" ${hitRateColor(r.hit_rate_pct)}>${fmtHitRate(r.hit_rate_pct)}</td>
-      </tr>`;
-    }).join('')}</tbody>
-  </table></div>`;
-}
-
-function renderRecentLegs(rows) {
-  const el = document.getElementById('dash-ev');
-  if (!rows || !rows.length) { el.innerHTML = '<div class="dash-empty">No recent legs.</div>'; return; }
+function renderDashRecentRecs(rows) {
+  const el = document.getElementById('dash-recent-recs');
+  if (!rows || !rows.length) { el.innerHTML = '<div class="dash-empty">No recommendations yet.</div>'; return; }
   el.innerHTML = `<div style="overflow-x:auto"><table class="dash-table">
     <thead><tr>
       <th>Date</th>
-      <th>Player</th>
-      <th>Stat</th>
-      <th>Dir</th>
-      <th class="num">Line</th>
-      <th class="num">Score</th>
-      <th class="num">Cov</th>
-      <th class="num">Result</th>
-      <th class="num">Actual</th>
+      <th class="num">Rank</th>
+      <th class="num">Odds</th>
+      <th class="num">Win Prob</th>
+      <th class="num">Edge</th>
+      <th>Status</th>
     </tr></thead>
     <tbody>${rows.map(r => {
-      const resultStyle = r.result === 'hit' ? 'style="color:var(--green);font-weight:700"'
-                        : r.result === 'miss' ? 'style="color:var(--red)"' : '';
+      const st = r.bet_status || 'pending';
+      const stStyle = st === 'won' ? 'style="color:var(--green);font-weight:700"'
+                    : st === 'lost' ? 'style="color:var(--red)"'
+                    : st === 'void' ? 'style="color:var(--muted)"' : 'style="color:var(--yellow)"';
       return `<tr>
-        <td>${esc(r.game_date != null ? String(r.game_date).slice(0, 10) : '—')}</td>
-        <td>${esc(r.player_name || '—')}</td>
-        <td>${esc(r.stat || '—')}</td>
-        <td>${esc(r.direction || '—')}</td>
-        <td class="num">${r.line != null ? r.line : '—'}</td>
-        <td class="num">${r.composite_score != null ? parseFloat(r.composite_score).toFixed(1) : '—'}</td>
-        <td class="num">${r.coverage_pct != null ? parseFloat(r.coverage_pct).toFixed(1) + '%' : '—'}</td>
-        <td class="num" ${resultStyle}>${esc(r.result || '—')}</td>
-        <td class="num">${r.actual_stat != null ? r.actual_stat : '—'}</td>
+        <td>${esc(r.recommendation_date ? String(r.recommendation_date).slice(0,10) : '—')}</td>
+        <td class="num">${fmtNum(r.rank)}</td>
+        <td class="num">${r.combined_odds != null ? '+' + Math.round(r.combined_odds) : '—'}</td>
+        <td class="num">${r.win_probability != null ? parseFloat(r.win_probability).toFixed(1) + '%' : '—'}</td>
+        <td class="num">${r.edge_pct != null ? (r.edge_pct >= 0 ? '+' : '') + parseFloat(r.edge_pct).toFixed(1) + '%' : '—'}</td>
+        <td ${stStyle}>${esc(st.toUpperCase())}</td>
       </tr>`;
     }).join('')}</tbody>
   </table></div>`;
@@ -2049,132 +1979,98 @@ setInterval(() => {
 }, 60 * 1000);
 
 function renderTrainingAnalytics(d) {
-  renderTrainSummary(d.summary);
-  renderTrainDaily(d.daily_health);
-  renderTrainDirection(d.direction_bias);
-  renderTrainCalibration(d.calibration);
-  renderTrainFeatures(d.feature_health);
+  renderTrainModelStatus(d.model_status);
+  renderTrainRetriggers(d.retrain_triggers);
+  renderTrainFeatureImportance(d.feature_importance);
+  renderTrainCalibrationDrift(d.calibration_drift);
+  renderTrainDataQuality(d.data_quality);
 }
 
-function renderTrainSummary(s) {
+function renderTrainModelStatus(s) {
   if (!s) return;
-  const hr = s.overall_hit_rate;
-  const hrCls = hr >= 50 ? 'green' : hr >= 40 ? 'yellow' : 'red';
-  const unresClass = s.unresolved_count > 500 ? 'red' : s.unresolved_count > 0 ? 'yellow' : 'green';
-  const lastUpdated = s.last_updated ? s.last_updated.slice(0, 16).replace('T', ' ') + ' UTC' : '—';
+  const aucCls = s.auc >= 0.85 ? 'green' : s.auc >= 0.80 ? 'yellow' : 'red';
+  const modifiedStr = s.last_modified ? s.last_modified.slice(0, 16).replace('T', ' ') + ' UTC' : '—';
   document.getElementById('train-summary').innerHTML = `
     <div class="dash-stat">
-      <div class="dash-stat-label">Total Props</div>
-      <div class="dash-stat-value">${fmtNum(s.total_props)}</div>
+      <div class="dash-stat-label">Model AUC</div>
+      <div class="dash-stat-value ${aucCls}">${s.auc != null ? parseFloat(s.auc).toFixed(4) : '—'}</div>
     </div>
     <div class="dash-stat">
-      <div class="dash-stat-label">Days Covered</div>
-      <div class="dash-stat-value">${fmtNum(s.days_covered)}</div>
+      <div class="dash-stat-label">Training Samples</div>
+      <div class="dash-stat-value">${s.samples != null ? Number(s.samples).toLocaleString() : '—'}</div>
     </div>
     <div class="dash-stat">
-      <div class="dash-stat-label">Hit Rate (all)</div>
-      <div class="dash-stat-value ${hrCls}">${hr != null ? parseFloat(hr).toFixed(1) + '%' : '—'}</div>
+      <div class="dash-stat-label">Features</div>
+      <div class="dash-stat-value">${s.feature_count != null ? s.feature_count : '—'}</div>
     </div>
     <div class="dash-stat">
-      <div class="dash-stat-label">Unresolved</div>
-      <div class="dash-stat-value ${unresClass}">${fmtNum(s.unresolved_count)}</div>
+      <div class="dash-stat-label">Model Size</div>
+      <div class="dash-stat-value">${s.file_size_kb != null ? Math.round(s.file_size_kb) + ' KB' : '—'}</div>
+    </div>
+    <div class="dash-stat" style="flex:2 1 180px">
+      <div class="dash-stat-label">Last Trained</div>
+      <div class="dash-stat-value" style="font-size:12px">${esc(modifiedStr)}</div>
     </div>
   `;
 }
 
-function renderTrainDaily(rows) {
-  const el = document.getElementById('train-daily');
-  if (!rows || !rows.length) { el.innerHTML = '<div class="dash-empty">No daily data.</div>'; return; }
+function renderTrainRetriggers(rows) {
+  const el = document.getElementById('train-retrain');
+  if (!rows || !rows.length) { el.innerHTML = '<div class="dash-empty">No retrain checks available.</div>'; return; }
   el.innerHTML = `<div style="overflow-x:auto"><table class="dash-table">
     <thead><tr>
-      <th>Date</th>
-      <th class="num">Total</th>
-      <th class="num">Resolved</th>
-      <th class="num">Pending</th>
-      <th class="num">Hit Rate</th>
-      <th class="num">Cov≥60</th>
+      <th>Check</th>
+      <th class="num">Current Value</th>
+      <th class="num">Threshold</th>
+      <th>Status</th>
     </tr></thead>
     <tbody>${rows.map(r => {
-      const resolved = (r.hits || 0) + (r.misses || 0);
-      const pending = r.pending || 0;
-      const total = r.total || 0;
-      let dot;
-      if (pending === 0 && resolved > 0)       dot = '<span class="train-health-dot dot-green"></span>';
-      else if (pending > 0 && resolved > 0)     dot = '<span class="train-health-dot dot-yellow"></span>';
-      else if (total < 50 && total > 0)         dot = '<span class="train-health-dot dot-red"></span>';
-      else                                       dot = '<span class="train-health-dot dot-yellow"></span>';
+      const st = r.status || 'ok';
+      const stStyle = st === 'warning' ? 'style="color:var(--yellow);font-weight:700"'
+                    : st === 'critical' ? 'style="color:var(--red);font-weight:700"'
+                    : 'style="color:var(--green)"';
       return `<tr>
-        <td>${dot}${esc(r.game_date)}</td>
-        <td class="num">${fmtNum(total)}</td>
-        <td class="num" style="color:var(--muted)">${fmtNum(resolved)}</td>
-        <td class="num" style="color:${pending > 0 ? 'var(--yellow)' : 'var(--muted)'}">${fmtNum(pending)}</td>
-        <td class="num" ${hitRateColor(r.hit_rate)}>${r.hit_rate != null ? parseFloat(r.hit_rate).toFixed(1) + '%' : '—'}</td>
-        <td class="num">${fmtNum(r.high_coverage)}</td>
+        <td>${esc(r.trigger || '—')}</td>
+        <td class="num">${r.value != null ? r.value : '—'}</td>
+        <td class="num" style="color:var(--muted)">${r.threshold != null ? r.threshold : '—'}</td>
+        <td ${stStyle}>${esc(st.toUpperCase())}</td>
       </tr>`;
     }).join('')}</tbody>
   </table></div>`;
 }
 
-function renderTrainDirection(rows) {
-  const el = document.getElementById('train-direction');
-  if (!rows || !rows.length) { el.innerHTML = '<div class="dash-empty">No direction data (need ≥20 samples per stat+direction).</div>'; return; }
-
-  // Group by stat, show over/under side by side with delta
-  const byStatDir = {};
-  for (const r of rows) {
-    if (!byStatDir[r.stat]) byStatDir[r.stat] = {};
-    byStatDir[r.stat][r.direction] = r;
-  }
-  const stats = Object.keys(byStatDir).sort();
-
-  const dirClass = val => {
-    const v = parseFloat(val);
-    if (isNaN(v)) return '';
-    if (v >= 55) return 'dir-cell-high';
-    if (v >= 40) return 'dir-cell-mid';
-    return 'dir-cell-low';
-  };
-
+function renderTrainFeatureImportance(rows) {
+  const el = document.getElementById('train-features');
+  if (!rows || !rows.length) { el.innerHTML = '<div class="dash-empty">No feature importance data.</div>'; return; }
+  const maxImp = Math.max(...rows.map(r => r.importance || 0));
   el.innerHTML = `<div style="overflow-x:auto"><table class="dash-table">
     <thead><tr>
-      <th>Stat</th>
-      <th class="num">Over %</th>
-      <th class="num">Over n</th>
-      <th class="num">Under %</th>
-      <th class="num">Under n</th>
-      <th class="num">Delta (U−O)</th>
+      <th>Feature</th>
+      <th class="num">Importance</th>
+      <th>Bar</th>
     </tr></thead>
-    <tbody>${stats.map(stat => {
-      const ov = byStatDir[stat]['over'];
-      const un = byStatDir[stat]['under'];
-      const ovRate = ov ? parseFloat(ov.hit_rate) : null;
-      const unRate = un ? parseFloat(un.hit_rate) : null;
-      const delta = ovRate !== null && unRate !== null ? (unRate - ovRate).toFixed(1) : null;
-      const deltaCls = delta !== null ? (parseFloat(delta) > 5 ? 'dir-cell-high' : parseFloat(delta) < -5 ? 'dir-cell-low' : '') : '';
+    <tbody>${rows.map(r => {
+      const imp = r.importance != null ? parseFloat(r.importance) : 0;
+      const pct = maxImp > 0 ? (imp / maxImp) * 100 : 0;
+      const color = imp >= 0.2 ? 'var(--red)' : imp >= 0.1 ? 'var(--yellow)' : 'var(--accent)';
       return `<tr>
-        <td><strong>${esc(stat)}</strong></td>
-        <td class="num ${dirClass(ovRate)}">${ovRate !== null ? ovRate.toFixed(1) + '%' : '—'}</td>
-        <td class="num" style="color:var(--muted)">${ov ? fmtNum(ov.total) : '—'}</td>
-        <td class="num ${dirClass(unRate)}">${unRate !== null ? unRate.toFixed(1) + '%' : '—'}</td>
-        <td class="num" style="color:var(--muted)">${un ? fmtNum(un.total) : '—'}</td>
-        <td class="num ${deltaCls}">${delta !== null ? (parseFloat(delta) > 0 ? '+' : '') + delta + 'pp' : '—'}</td>
+        <td>${esc(r.feature || '—')}</td>
+        <td class="num">${(imp * 100).toFixed(1)}%</td>
+        <td><span class="feat-bar" style="width:${Math.max(2, pct * 0.8)}px;background:${color}"></span></td>
       </tr>`;
     }).join('')}</tbody>
   </table></div>`;
 }
 
-function renderTrainCalibration(rows) {
+function renderTrainCalibrationDrift(rows) {
   const el = document.getElementById('train-calibration');
-  if (!rows || !rows.length) { el.innerHTML = '<div class="dash-empty">No calibration data.</div>'; return; }
-
+  if (!rows || !rows.length) { el.innerHTML = '<div class="dash-empty">No calibration drift data (need 60 days of resolved training data).</div>'; return; }
   const bucketOrder = ['<55%', '55-60%', '60-65%', '65-70%', '70%+'];
   rows = [...rows].sort((a, b) => bucketOrder.indexOf(a.bucket) - bucketOrder.indexOf(b.bucket));
-
   el.innerHTML = `<div style="overflow-x:auto"><table class="dash-table">
     <thead><tr>
       <th>Coverage Bucket</th>
       <th class="num">Count</th>
-      <th class="num">Hits</th>
       <th class="num">Actual Hit%</th>
       <th class="num">Avg Predicted</th>
       <th class="num">Error (pred−actual)</th>
@@ -2186,7 +2082,6 @@ function renderTrainCalibration(rows) {
       return `<tr>
         <td><strong>${esc(r.bucket)}</strong></td>
         <td class="num">${fmtNum(r.total)}</td>
-        <td class="num" style="color:var(--green)">${fmtNum(r.hits)}</td>
         <td class="num" ${hitRateColor(r.actual_hit_rate)}>${r.actual_hit_rate != null ? parseFloat(r.actual_hit_rate).toFixed(1) + '%' : '—'}</td>
         <td class="num">${r.avg_predicted != null ? parseFloat(r.avg_predicted).toFixed(1) + '%' : '—'}</td>
         <td class="num"><span class="${errCls}">${errStr}</span></td>
@@ -2195,33 +2090,34 @@ function renderTrainCalibration(rows) {
   </table></div>`;
 }
 
-function renderTrainFeatures(rows) {
-  const el = document.getElementById('train-features');
-  if (!rows || !rows.length) { el.innerHTML = '<div class="dash-empty">No feature health data.</div>'; return; }
-
-  const bar = pct => {
-    const p = pct != null ? parseFloat(pct) : 0;
-    const color = p >= 90 ? 'var(--green)' : p >= 70 ? 'var(--yellow)' : 'var(--red)';
-    return `<span class="feat-bar" style="width:${Math.max(2, p * 0.6)}px;background:${color}"></span>${p.toFixed(0)}%`;
-  };
-
+function renderTrainDataQuality(rows) {
+  const el = document.getElementById('train-daily');
+  if (!rows || !rows.length) { el.innerHTML = '<div class="dash-empty">No daily data.</div>'; return; }
   el.innerHTML = `<div style="overflow-x:auto"><table class="dash-table">
     <thead><tr>
       <th>Date</th>
       <th class="num">Total</th>
-      <th class="num">Coverage</th>
-      <th class="num">Score</th>
-      <th class="num">Opp Adj</th>
-      <th class="num">Trend</th>
+      <th class="num">Hits</th>
+      <th class="num">Misses</th>
+      <th class="num">Pending</th>
+      <th class="num">Hit Rate</th>
     </tr></thead>
-    <tbody>${rows.map(r => `<tr>
-      <td>${esc(r.game_date)}</td>
-      <td class="num">${fmtNum(r.total)}</td>
-      <td class="num">${bar(r.coverage_pct)}</td>
-      <td class="num">${bar(r.score_pct)}</td>
-      <td class="num">${bar(r.opponent_pct)}</td>
-      <td class="num">${bar(r.trend_pct)}</td>
-    </tr>`).join('')}</tbody>
+    <tbody>${rows.map(r => {
+      const pending = r.pending || 0;
+      const total = r.total || 0;
+      let dot;
+      if (pending === 0 && total > 0)         dot = '<span class="train-health-dot dot-green"></span>';
+      else if (pending > 0 && pending < total) dot = '<span class="train-health-dot dot-yellow"></span>';
+      else                                     dot = '<span class="train-health-dot dot-yellow"></span>';
+      return `<tr>
+        <td>${dot}${esc(r.game_date ? String(r.game_date).slice(0,10) : '—')}</td>
+        <td class="num">${fmtNum(total)}</td>
+        <td class="num" style="color:var(--green)">${fmtNum(r.hits)}</td>
+        <td class="num" style="color:var(--red)">${fmtNum(r.misses)}</td>
+        <td class="num" style="color:${pending > 0 ? 'var(--yellow)' : 'var(--muted)'}">${fmtNum(pending)}</td>
+        <td class="num" ${hitRateColor(r.hit_rate)}>${r.hit_rate != null ? parseFloat(r.hit_rate).toFixed(1) + '%' : '—'}</td>
+      </tr>`;
+    }).join('')}</tbody>
   </table></div>`;
 }
 

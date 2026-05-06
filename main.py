@@ -579,6 +579,38 @@ def run_pipeline(starts_after_override=None) -> tuple[list[dict], str]:
     qualifying_legs = clean_legs
     print(f"  {len(qualifying_legs)} legs remaining")
 
+    # ── Step 5b: Lineup Consistency Filter ────────────────────────────────────
+    print("\n[5b] Filtering low lineup-consistency legs...")
+    try:
+        from src.utils.lineup_consistency import calculate_lineup_consistency
+        from src.utils.injury_context import check_expanded_role_due_to_injury
+        _PITCHER_STATS = {"inningsPitched", "hitsAllowed", "earnedRuns"}
+        _lc_kept, _lc_removed = [], 0
+        for _leg in qualifying_legs:
+            _pid = _leg.get("player_id")
+            _stat = _leg.get("stat", "")
+            if not _pid or _stat in _PITCHER_STATS:
+                _leg["lineup_consistency"] = 1.0
+                _lc_kept.append(_leg)
+                continue
+            _lc = calculate_lineup_consistency(_pid, _stat, season)
+            _leg["lineup_consistency"] = _lc
+            if _lc >= 0.3:
+                _lc_kept.append(_leg)
+            else:
+                _expanded = check_expanded_role_due_to_injury(_pid, _leg.get("team", ""), today)
+                if _expanded.get("has_expanded_role"):
+                    print(f"    Kept {_leg.get('player_name')} (lc={_lc:.2f}) — {_expanded.get('reason','expanded role')}")
+                    _lc_kept.append(_leg)
+                else:
+                    _lc_removed += 1
+        if _lc_removed:
+            print(f"  Removed {_lc_removed} low-consistency leg(s)")
+        qualifying_legs = _lc_kept
+        print(f"  {len(qualifying_legs)} legs remaining after lineup consistency filter")
+    except Exception as _lc_err:
+        print(f"  WARNING: Lineup consistency filter failed: {_lc_err}. Skipping.")
+
     if not qualifying_legs:
         print("  No legs after injury filter. Exiting.")
         return [], ""
