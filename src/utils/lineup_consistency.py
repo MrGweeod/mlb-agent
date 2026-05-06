@@ -28,7 +28,6 @@ def started_last_n_games(player_id: int, season: int, n: int = 10) -> Optional[f
             player_id,
             group="hitting",
             type="gameLog",
-            season=season,
         )
         games = logs.get("stats", [])
         if not games:

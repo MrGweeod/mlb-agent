@@ -140,6 +140,9 @@ async def handle_dashboard(request: web.Request) -> web.Response:
             content_type="application/json",
         )
     except Exception as exc:
+        import traceback
+        print(f"[handle_dashboard] ERROR: {exc}")
+        traceback.print_exc()
         return web.Response(
             text=json.dumps({"error": str(exc)}),
             content_type="application/json",
@@ -919,12 +922,30 @@ async def _pipeline_scheduler() -> None:
     Computes the next scheduled time on each iteration, sleeps until then,
     then runs the pipeline in a thread executor (it's synchronous/blocking).
 
+    On startup, if it's between 9 AM–12 PM ET (the resolution window), runs
+    immediately to catch up on any run missed due to a Railway redeploy.
+
     Live recommendations are served on-demand via /api/build-parlays?refresh=true.
     """
     from main import run_morning_pipeline
 
     print("[scheduler] Morning pipeline scheduled at 9:00 AM ET (resolution only)")
     print("[scheduler] Live recommendations via /api/build-parlays?refresh=true")
+
+    # ── Startup catch-up: run immediately if we're in the resolution window ──
+    now_startup = datetime.now(_ET)
+    startup_hour = now_startup.hour
+    if 9 <= startup_hour < 12:
+        print(
+            f"[scheduler] Startup at {now_startup.strftime('%H:%M ET')} — "
+            "within resolution window (9-12 AM ET), running catch-up resolution now..."
+        )
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, run_morning_pipeline)
+            print("[scheduler] Startup catch-up resolution complete")
+        except Exception as exc:
+            print(f"[scheduler] Startup catch-up error: {exc}")
 
     while True:
         now = datetime.now(_ET)
