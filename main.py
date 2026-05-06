@@ -885,6 +885,255 @@ def run_morning_pipeline() -> None:
     print("  For live recommendations, use /api/build-parlays?refresh=true")
 
 
+def run_targeted_pipeline(buffer_minutes: int = 15) -> None:
+    """
+    Midday/evening targeted refresh — fetches fresh SGO odds for eligible players.
+
+    Steps:
+      1. IL check (transaction wire)
+      2. Load today's scored legs from DB
+      3. Filter composite_score >= MIN_COVERAGE_PCT (55)
+      4. Remove IL-blocked players
+      5. Remove started/imminent games (cutoff = now + buffer_minutes)
+      6. Fetch fresh SGO odds for eligible players
+      7. Check confirmed lineups; remove scratched players
+      8. Re-run lineup consistency filter
+      9. Rebuild parlay recommendations
+
+    SGO objects consumed: ~12-16 (one /events call for the day's slate).
+    """
+    from src.utils.db import get_scored_legs, save_parlay_recommendation
+    from src.utils.lineup_consistency import calculate_lineup_consistency
+    from src.utils.injury_context import check_expanded_role_due_to_injury
+    from src.apis.sportsgameodds import fetch_props_for_players
+    import statsapi as _statsapi
+
+    today  = str(date.today())
+    season = date.today().year
+    et_tz  = pytz.timezone("America/New_York")
+    now_et = datetime.now(et_tz)
+    cutoff = now_et + timedelta(minutes=buffer_minutes)
+
+    _PITCHER_STATS = {"inningsPitched", "hitsAllowed", "earnedRuns"}
+
+    print("\nMLB Parlay Agent — Targeted Refresh Pipeline")
+    print("=" * 50)
+    print(f"  Date: {today}  |  Buffer: {buffer_minutes} min  |  Cutoff: {cutoff.strftime('%H:%M ET')}")
+
+    # ── Step 1: IL check ─────────────────────────────────────────────────────
+    print("\n[1/8] Fetching transaction wire (IL/DFA)...")
+    blocked_names = _get_blocked_players(today)
+    print(f"  {len(blocked_names)} player(s) blocked from today's transactions")
+
+    # ── Step 2: Load today's scored legs from DB ──────────────────────────────
+    print("\n[2/8] Loading today's scored legs from DB...")
+    all_legs = get_scored_legs(today)
+    print(f"  {len(all_legs)} total legs in DB for {today}")
+
+    if not all_legs:
+        print("  No legs in DB. Exiting targeted pipeline.")
+        return
+
+    # ── Step 3: Filter composite_score >= MIN_COVERAGE_PCT (55) ──────────────
+    eligible = [l for l in all_legs if (l.get("composite_score") or 0) >= MIN_COVERAGE_PCT]
+    print(f"  {len(eligible)} legs with composite_score >= {MIN_COVERAGE_PCT}")
+
+    if not eligible:
+        print("  No eligible legs. Exiting targeted pipeline.")
+        return
+
+    # ── Step 4: Remove IL-blocked players ────────────────────────────────────
+    pre_il = len(eligible)
+    eligible = [l for l in eligible if l.get("player_name", "").lower() not in blocked_names]
+    if pre_il - len(eligible):
+        print(f"  Removed {pre_il - len(eligible)} IL-blocked leg(s)")
+
+    # ── Step 5: Remove started/imminent games ────────────────────────────────
+    upcoming = []
+    started_count = 0
+    for leg in eligible:
+        gst = leg.get("game_start_time")
+        if not gst:
+            upcoming.append(leg)
+            continue
+        try:
+            gt = datetime.strptime(str(gst), "%Y-%m-%d %H:%M:%S")
+            if et_tz.localize(gt) > cutoff:
+                upcoming.append(leg)
+            else:
+                started_count += 1
+        except Exception:
+            upcoming.append(leg)
+
+    print(f"\n[3/8] Game-start filter: {len(eligible)} legs → {len(upcoming)} upcoming"
+          + (f" (removed {started_count} started)" if started_count else ""))
+
+    if not upcoming:
+        print("  No upcoming legs after game-start filter. Exiting.")
+        return
+
+    # ── Step 6: Fetch fresh SGO odds for eligible players ────────────────────
+    print(f"\n[4/8] Fetching fresh SGO odds for {len(upcoming)} eligible legs...")
+    player_ids = list({leg.get("player_id") for leg in upcoming if leg.get("player_id")})
+    print(f"  {len(player_ids)} unique player(s)")
+
+    try:
+        fresh_props = fetch_props_for_players(today, player_ids=player_ids)
+        print(f"  Received {len(fresh_props)} prop(s) from SGO")
+
+        # Build lookup: (player_id, stat, direction) → {line → odds}
+        prop_lookup: dict[tuple, dict[float, int | str]] = {}
+        for prop in fresh_props:
+            key = (prop.get("player_id"), prop.get("stat"), prop.get("direction", "over"))
+            if key not in prop_lookup:
+                prop_lookup[key] = {}
+            for entry in prop.get("all_lines", []):
+                ln = entry.get("line")
+                od = entry.get("odds")
+                if ln is not None and od is not None:
+                    prop_lookup[key][float(ln)] = od
+
+        updated_count = 0
+        for leg in upcoming:
+            key = (leg.get("player_id"), leg.get("stat"), leg.get("direction", "over"))
+            line_map = prop_lookup.get(key, {})
+            db_line = leg.get("line")
+            if db_line is not None:
+                fresh_odds = line_map.get(float(db_line))
+                if fresh_odds is not None:
+                    leg["odds"] = fresh_odds
+                    updated_count += 1
+        print(f"  Updated odds for {updated_count}/{len(upcoming)} leg(s)")
+    except Exception as _sgo_err:
+        print(f"  WARNING: SGO fetch failed ({_sgo_err}) — keeping 9 AM odds")
+
+    # ── Step 7: Check confirmed lineups; remove scratched players ────────────
+    print(f"\n[5/8] Checking confirmed lineups...")
+
+    # Group by game_pk
+    by_game: dict[int, list[dict]] = {}
+    for leg in upcoming:
+        gpk = leg.get("game_pk")
+        if gpk:
+            by_game.setdefault(gpk, []).append(leg)
+
+    scratched_count = 0
+    for game_pk, game_legs in by_game.items():
+        try:
+            boxscore = _statsapi.boxscore_data(game_pk)
+            starters: set[int] = set()
+            for side in ("away", "home"):
+                team_data = boxscore.get(side, {})
+                for pid_str in team_data.get("battingOrder", []):
+                    try:
+                        starters.add(int(pid_str))
+                    except (ValueError, TypeError):
+                        pass
+            for leg in game_legs:
+                stat = leg.get("stat", "")
+                pid = leg.get("player_id")
+                # Pitchers aren't in the batting order — skip lineup check for them
+                if stat in _PITCHER_STATS or not pid:
+                    leg["lineup_status"] = "confirmed"
+                elif int(pid) in starters:
+                    leg["lineup_status"] = "confirmed"
+                else:
+                    leg["lineup_status"] = "scratched"
+                    scratched_count += 1
+                    print(f"    SCRATCHED: {leg.get('player_name')} not in lineup for game {game_pk}")
+        except Exception as _lu_err:
+            print(f"    Lineup check failed for game {game_pk}: {_lu_err} — including conservatively")
+            for leg in game_legs:
+                leg["lineup_status"] = "unknown"
+
+    print(f"  Marked {scratched_count} player(s) as scratched")
+    pre_scratch = len(upcoming)
+    upcoming = [leg for leg in upcoming if leg.get("lineup_status") != "scratched"]
+    if pre_scratch - len(upcoming):
+        print(f"  Removed {pre_scratch - len(upcoming)} scratched leg(s)")
+
+    if not upcoming:
+        print("  No legs after lineup check. Exiting.")
+        return
+
+    # ── Step 8: Re-run lineup consistency filter ──────────────────────────────
+    print(f"\n[6/8] Re-running lineup consistency filter...")
+    _lc_kept, _lc_removed, _lc_errors = [], 0, 0
+    _legs_before = len(upcoming)
+    for _leg in upcoming:
+        _pid  = _leg.get("player_id")
+        _stat = _leg.get("stat", "")
+        if not _pid or _stat in _PITCHER_STATS:
+            _leg["lineup_consistency"] = 1.0
+            _lc_kept.append(_leg)
+            continue
+        _lc = calculate_lineup_consistency(_pid, _stat, season)
+        _leg["lineup_consistency"] = _lc
+        if _lc is None:
+            _lc_errors += 1
+            _lc_kept.append(_leg)
+        elif _lc >= 0.70:
+            _lc_kept.append(_leg)
+        else:
+            _expanded = check_expanded_role_due_to_injury(_pid, _leg.get("team", ""), today)
+            if _expanded.get("has_expanded_role"):
+                print(f"    Kept {_leg.get('player_name')} (lc={_lc:.2f}) — {_expanded.get('reason','expanded role')}")
+                _lc_kept.append(_leg)
+            else:
+                _lc_removed += 1
+    if _lc_removed:
+        print(f"  Removed {_lc_removed} low-consistency leg(s)")
+    if _lc_errors:
+        print(f"  {_lc_errors} legs had API errors — included conservatively")
+    # Safety circuit-breaker: if >90% removed, something is wrong — skip filter
+    if _legs_before > 0 and len(_lc_kept) < _legs_before * 0.10:
+        print(f"  WARNING: filter removed >90% of legs — disabling for this run.")
+        for _leg in upcoming:
+            _leg.setdefault("lineup_consistency", None)
+    else:
+        upcoming = _lc_kept
+    print(f"  {len(upcoming)} legs remaining after lineup consistency filter")
+
+    if not upcoming:
+        print("  No legs after lineup filter. Exiting.")
+        return
+
+    # ── Bridge field names for generate_recommendations ───────────────────────
+    qualified = [
+        {**leg, "best_odds": leg.get("odds"), "best_line": leg.get("line")}
+        for leg in upcoming
+    ]
+
+    # ── Step 9: Build and save recommendations ────────────────────────────────
+    print(f"\n[7/8] Building parlay recommendations from {len(qualified)} legs...")
+    recommendations = generate_recommendations(qualified)
+    print(f"  Built {len(recommendations)} recommendation(s)")
+
+    if not recommendations:
+        print("  No recommendations generated. Exiting.")
+        return
+
+    saved = 0
+    for rank, rec in enumerate(recommendations, start=1):
+        rec_row = {
+            "recommendation_date": today,
+            "rank":                rank,
+            "legs":                rec["legs"],
+            "combined_odds":       rec["combined_odds"],
+            "win_probability":     rec["win_probability"],
+            "edge_pct":            rec["edge_pct"],
+        }
+        try:
+            save_parlay_recommendation(rec_row)
+            saved += 1
+        except Exception as _save_err:
+            print(f"  WARNING: failed to save rank {rank}: {_save_err}")
+
+    best_edge = recommendations[0]["edge_pct"] if recommendations else 0
+    print(f"\n[8/8] Saved {saved} recommendation(s) (rank 1 edge: {best_edge}%)")
+    print("\nTargeted refresh pipeline complete.")
+
+
 def run():
     """CLI entry point — calls run_pipeline() and prints output."""
     run_pipeline()

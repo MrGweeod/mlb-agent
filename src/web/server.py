@@ -908,77 +908,97 @@ def create_app() -> web.Application:
 
 
 _ET = ZoneInfo("America/New_York")
-# Morning resolution pipeline runs once at 9 AM ET.
-# Live recommendations are served on-demand via /api/build-parlays?refresh=true.
+# Three daily pipeline runs (label, time-ET, function):
+#   morning  9:00 AM — resolution only (run_morning_pipeline)
+#   midday  12:00 PM — targeted refresh, no SGO (run_targeted_pipeline)
+#   evening  5:30 PM — targeted refresh, no SGO (run_targeted_pipeline)
 _PIPELINE_SCHEDULE = [
-    dtime(9, 0),    # 9:00 AM ET — resolution only
+    (dtime(9,  0),  "morning"),   # 9:00 AM ET — resolution only
+    (dtime(12, 0),  "midday"),    # 12:00 PM ET — fresh props + scoring
+    (dtime(17, 30), "evening"),   # 5:30 PM ET — final lineup refresh
 ]
+
+# Startup catch-up window: run if we restart within N minutes after a slot
+_CATCHUP_WINDOW_MINS = 120
 
 
 async def _pipeline_scheduler() -> None:
     """
-    Background task that runs run_morning_pipeline() at 9 AM ET (resolution only).
+    Background task that runs scheduled pipelines at 9 AM, 12 PM, and 5:30 PM ET.
 
-    Computes the next scheduled time on each iteration, sleeps until then,
-    then runs the pipeline in a thread executor (it's synchronous/blocking).
+    9 AM    → run_morning_pipeline()   (resolution only — no SGO)
+    12 PM   → run_targeted_pipeline()  (targeted SGO fetch + lineup check)
+    5:30 PM → run_targeted_pipeline()  (targeted SGO fetch + lineup check)
 
-    On startup, if it's between 9 AM–12 PM ET (the resolution window), runs
-    immediately to catch up on any run missed due to a Railway redeploy.
-
-    Live recommendations are served on-demand via /api/build-parlays?refresh=true.
+    On startup, if we're within _CATCHUP_WINDOW_MINS of a missed slot, runs
+    that slot's pipeline immediately (Railway redeploy recovery).
     """
-    from main import run_morning_pipeline
+    from main import run_morning_pipeline, run_targeted_pipeline
 
     print("[scheduler] Morning pipeline scheduled at 9:00 AM ET (resolution only)")
-    print("[scheduler] Live recommendations via /api/build-parlays?refresh=true")
+    print("[scheduler] Midday pipeline scheduled at 12:00 PM ET (targeted SGO fetch + lineup check)")
+    print("[scheduler] Evening pipeline scheduled at 5:30 PM ET (targeted SGO fetch + lineup check)")
 
-    # ── Startup catch-up: run immediately if we're in the resolution window ──
+    # ── Startup catch-up ──────────────────────────────────────────────────────
     now_startup = datetime.now(_ET)
-    startup_hour = now_startup.hour
-    if 9 <= startup_hour < 12:
-        print(
-            f"[scheduler] Startup at {now_startup.strftime('%H:%M ET')} — "
-            "within resolution window (9-12 AM ET), running catch-up resolution now..."
-        )
-        try:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, run_morning_pipeline)
-            print("[scheduler] Startup catch-up resolution complete")
-        except Exception as exc:
-            print(f"[scheduler] Startup catch-up error: {exc}")
+    startup_total_mins = now_startup.hour * 60 + now_startup.minute
+
+    for slot_time, slot_label in _PIPELINE_SCHEDULE:
+        slot_mins = slot_time.hour * 60 + slot_time.minute
+        if slot_mins <= startup_total_mins < slot_mins + _CATCHUP_WINDOW_MINS:
+            print(
+                f"[scheduler] Startup at {now_startup.strftime('%H:%M ET')} — "
+                f"within {slot_label} catch-up window, running now..."
+            )
+            try:
+                loop = asyncio.get_event_loop()
+                if slot_label == "morning":
+                    await loop.run_in_executor(None, run_morning_pipeline)
+                else:
+                    await loop.run_in_executor(None, run_targeted_pipeline)
+                print(f"[scheduler] Startup catch-up ({slot_label}) complete")
+            except Exception as exc:
+                print(f"[scheduler] Startup catch-up ({slot_label}) error: {exc}")
+            break  # only one catch-up per startup
 
     while True:
         now = datetime.now(_ET)
         today = now.date()
 
-        # Find the next scheduled time today that hasn't passed yet
+        # Find the next scheduled slot that hasn't passed yet
         next_run = None
-        for t in _PIPELINE_SCHEDULE:
-            candidate = datetime.combine(today, t, tzinfo=_ET)
+        next_label = None
+        for slot_time, slot_label in _PIPELINE_SCHEDULE:
+            candidate = datetime.combine(today, slot_time, tzinfo=_ET)
             if candidate > now:
                 next_run = candidate
+                next_label = slot_label
                 break
 
         # All today's slots passed — schedule first slot tomorrow
         if next_run is None:
             import datetime as _dt
             tomorrow = today + _dt.timedelta(days=1)
-            next_run = datetime.combine(tomorrow, _PIPELINE_SCHEDULE[0], tzinfo=_ET)
+            next_run = datetime.combine(tomorrow, _PIPELINE_SCHEDULE[0][0], tzinfo=_ET)
+            next_label = _PIPELINE_SCHEDULE[0][1]
 
         sleep_secs = (next_run - datetime.now(_ET)).total_seconds()
         print(
-            f"[scheduler] next morning pipeline at "
+            f"[scheduler] next {next_label} pipeline at "
             f"{next_run.strftime('%Y-%m-%d %H:%M ET')} "
             f"(in {sleep_secs / 3600:.1f}h)"
         )
         await asyncio.sleep(max(sleep_secs, 1))
 
-        print(f"[scheduler] running morning pipeline at {datetime.now(_ET).strftime('%H:%M ET')}")
+        print(f"[scheduler] running {next_label} pipeline at {datetime.now(_ET).strftime('%H:%M ET')}")
         try:
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, run_morning_pipeline)
+            if next_label == "morning":
+                await loop.run_in_executor(None, run_morning_pipeline)
+            else:
+                await loop.run_in_executor(None, run_targeted_pipeline)
         except Exception as exc:
-            print(f"[scheduler] morning pipeline error: {exc}")
+            print(f"[scheduler] {next_label} pipeline error: {exc}")
 
 
 async def start_server() -> web.AppRunner:
@@ -996,7 +1016,7 @@ async def start_server() -> web.AppRunner:
 
     # Start the background pipeline scheduler
     asyncio.ensure_future(_pipeline_scheduler())
-    print("[web] Morning pipeline scheduler started (9:00 AM ET — resolution only)")
+    print("[web] Pipeline scheduler started (9 AM resolution, 12 PM + 5:30 PM full pipeline)")
 
     return runner
 

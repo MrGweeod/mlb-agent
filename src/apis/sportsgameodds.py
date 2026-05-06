@@ -471,3 +471,36 @@ def get_player_props(game, include_unders=True):
         set_props_cache(str(date_type.today()), team_key, props)
 
     return props
+
+
+def fetch_props_for_players(date_str: str, player_ids: list[int] | None = None) -> list[dict]:
+    """
+    Fetch fresh player props for a given date, optionally filtering to specific players.
+
+    SGO embeds all odds in game-event objects — there is no per-player API endpoint,
+    so this always fetches the full day's events and parses props locally.  Filtering
+    by player_ids reduces downstream work but does not reduce API objects consumed.
+
+    Args:
+        date_str:   Game date (YYYY-MM-DD).
+        player_ids: Optional list of MLB player IDs to restrict results.
+
+    Returns:
+        List of prop dicts (same shape as get_player_props output).
+    """
+    games = get_todays_games(date=date_str)
+    print(f"[SGO] Fetched {len(games)} game event(s) for {date_str}")
+
+    all_props: list[dict] = []
+    for game in games:
+        all_props.extend(get_player_props(game))
+
+    print(f"[SGO] Parsed {len(all_props)} player props across all games")
+
+    if player_ids:
+        player_set = set(player_ids)
+        filtered = [p for p in all_props if p.get('player_id') in player_set]
+        print(f"[SGO] Filtered to {len(filtered)} props for {len(player_ids)} target players")
+        return filtered
+
+    return all_props
