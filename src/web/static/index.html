@@ -1759,8 +1759,11 @@ async function fetchDashboard() {
     dashData = await res.json();
     renderDashboard(dashData);
   } catch (err) {
-    document.getElementById('dash-calibration').innerHTML =
-      `<div class="dash-empty" style="color:var(--red)">${esc(err.message)}</div>`;
+    const errHtml = `<div class="dash-empty" style="color:var(--red)">${esc(err.message)}</div>`;
+    ['dash-daily-perf','dash-leg-stat','dash-calibration','dash-top-legs','dash-recent-recs'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.innerHTML = errHtml;
+    });
   }
 }
 
@@ -1966,8 +1969,11 @@ async function fetchTrainingAnalytics() {
     trainData = await res.json();
     renderTrainingAnalytics(trainData);
   } catch (err) {
-    document.getElementById('train-daily').innerHTML =
-      `<div class="dash-empty" style="color:var(--red)">${esc(err.message)}</div>`;
+    const errHtml = `<div class="dash-empty" style="color:var(--red)">${esc(err.message)}</div>`;
+    ['train-retrain','train-features','train-calibration','train-daily'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.innerHTML = errHtml;
+    });
   }
 }
 

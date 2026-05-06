@@ -585,7 +585,8 @@ def run_pipeline(starts_after_override=None) -> tuple[list[dict], str]:
         from src.utils.lineup_consistency import calculate_lineup_consistency
         from src.utils.injury_context import check_expanded_role_due_to_injury
         _PITCHER_STATS = {"inningsPitched", "hitsAllowed", "earnedRuns"}
-        _lc_kept, _lc_removed = [], 0
+        _lc_kept, _lc_removed, _lc_errors = [], 0, 0
+        _legs_before_lc = len(qualifying_legs)
         for _leg in qualifying_legs:
             _pid = _leg.get("player_id")
             _stat = _leg.get("stat", "")
@@ -595,7 +596,11 @@ def run_pipeline(starts_after_override=None) -> tuple[list[dict], str]:
                 continue
             _lc = calculate_lineup_consistency(_pid, _stat, season)
             _leg["lineup_consistency"] = _lc
-            if _lc >= 0.3:
+            if _lc is None:
+                # API failed — include conservatively, don't penalise unknown players
+                _lc_errors += 1
+                _lc_kept.append(_leg)
+            elif _lc >= 0.3:
                 _lc_kept.append(_leg)
             else:
                 _expanded = check_expanded_role_due_to_injury(_pid, _leg.get("team", ""), today)
@@ -606,7 +611,17 @@ def run_pipeline(starts_after_override=None) -> tuple[list[dict], str]:
                     _lc_removed += 1
         if _lc_removed:
             print(f"  Removed {_lc_removed} low-consistency leg(s)")
-        qualifying_legs = _lc_kept
+        if _lc_errors:
+            print(f"  {_lc_errors} legs had API errors — included conservatively")
+        # Safety circuit-breaker: if filter removed >90% of legs, something is wrong
+        if _legs_before_lc > 0 and len(_lc_kept) < _legs_before_lc * 0.10:
+            print(f"  WARNING: filter removed {_legs_before_lc - len(_lc_kept)}/{_legs_before_lc} legs (>90%).")
+            print(f"  WARNING: This looks broken — disabling lineup consistency filter for this run.")
+            # Restore original scores without filtering
+            for _leg in qualifying_legs:
+                _leg.setdefault("lineup_consistency", None)
+        else:
+            qualifying_legs = _lc_kept
         print(f"  {len(qualifying_legs)} legs remaining after lineup consistency filter")
     except Exception as _lc_err:
         print(f"  WARNING: Lineup consistency filter failed: {_lc_err}. Skipping.")
