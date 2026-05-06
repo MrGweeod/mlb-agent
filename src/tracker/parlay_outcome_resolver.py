@@ -5,9 +5,9 @@ Depends on mlb_scored_legs already having result populated for the target date
 (run resolve_all_legs() first via outcome_resolver.py).
 
 Logic:
-  - If ANY leg = 'void'  → parlay = 'void'
-  - If ANY leg = 'lost'  → parlay = 'lost'
-  - If ALL legs = 'won'  → parlay = 'won'
+  - If ALL legs = 'void' → parlay = 'void'
+  - If ANY leg = 'lost'  → parlay = 'lost' (void legs ignored)
+  - If remaining legs won (some may be void) → parlay = 'won' (adjusted odds)
   - If any leg still NULL → skip (not all legs resolved yet)
 
 Run standalone:
@@ -98,10 +98,14 @@ def resolve_parlay_recommendations(date: str, verbose: bool = True) -> dict:
             counts["skipped"] += 1
             continue
 
-        # Determine parlay outcome (conservative: void beats lost beats won)
-        if any(r == "void" for r in results):
+        # Determine parlay outcome
+        # void only if ALL legs void; partial voids adjust odds but parlay can still win
+        void_count = sum(1 for r in results if r == "void")
+        lost_count = sum(1 for r in results if r == "lost")
+
+        if void_count == len(results):
             outcome = "void"
-        elif any(r == "lost" for r in results):
+        elif lost_count > 0:
             outcome = "lost"
         else:
             outcome = "won"
@@ -125,7 +129,8 @@ def resolve_parlay_recommendations(date: str, verbose: bool = True) -> dict:
         if verbose:
             icon = "✓" if outcome == "won" else ("○" if outcome == "void" else "✗")
             leg_summary = ", ".join(str(r) for r in results)
-            print(f"  [{icon}] Rank {rank}: [{leg_summary}] → {outcome.upper()}")
+            void_note = f" (adjusted odds, {void_count} void)" if outcome == "won" and void_count > 0 else ""
+            print(f"  [{icon}] Rank {rank}: [{leg_summary}] → {outcome.upper()}{void_note}")
 
     total = sum(counts.values())
     if verbose:

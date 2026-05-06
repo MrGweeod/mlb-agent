@@ -1921,7 +1921,7 @@ function renderDashTopLegs(rows) {
       <th class="num">Win Rate</th>
     </tr></thead>
     <tbody>${rows.map(r => `<tr>
-      <td>${esc(r.player_stat || '—')}</td>
+      <td>${esc(r.player_name && r.stat ? r.player_name + ' / ' + r.stat : r.player_stat || '—')}</td>
       <td class="num">${fmtNum(r.total)}</td>
       <td class="num" style="color:var(--green)">${fmtNum(r.won)}</td>
       <td class="num" ${hitRateColor(r.win_rate)}>${r.win_rate != null ? parseFloat(r.win_rate).toFixed(1) + '%' : '—'}</td>
