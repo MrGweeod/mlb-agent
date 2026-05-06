@@ -15,6 +15,7 @@ BACKFILL_DATES = [
     '2026-05-01',
     '2026-05-02',
     '2026-05-03',
+    '2026-05-05',  # Add this - has incorrect VOID that should be WON
 ]
 
 
