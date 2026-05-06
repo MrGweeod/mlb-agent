@@ -1,8 +1,8 @@
 # MLB Parlay Agent — Architecture Decisions
-**Last Updated:** May 6, 2026
+**Last Updated:** May 6, 2026 (Post-Optimization)
 
 ## Document Purpose
-This document records the key architectural decisions made during the development of the MLB Parlay Agent, including the rationale, alternatives considered, and lessons learned. Updated with insights from production deployment and crisis resolution.
+This document records the key architectural decisions made during the development of the MLB Parlay Agent, including the rationale, alternatives considered, and lessons learned. Updated with insights from production deployment and May 6 optimization work.
 
 ---
 
@@ -10,22 +10,51 @@ This document records the key architectural decisions made during the developmen
 1. [Core Architecture](#core-architecture)
 2. [ML Model Design](#ml-model-design)
 3. [Data Pipeline](#data-pipeline)
-4. [Parlay Construction](#parlay-construction)
-5. [Outcome Resolution](#outcome-resolution)
-6. [Database Schema](#database-schema)
-7. [Deployment Strategy](#deployment-strategy)
-8. [Lessons Learned](#lessons-learned)
+4. [API Usage Optimization](#api-usage-optimization)
+5. [Parlay Construction](#parlay-construction)
+6. [Outcome Resolution](#outcome-resolution)
+7. [Database Schema](#database-schema)
+8. [Deployment Strategy](#deployment-strategy)
+9. [Lessons Learned](#lessons-learned)
 
 ---
 
 ## Core Architecture
 
+### **Decision: Three Daily Pipeline Runs**
+**Chosen:** 9 AM (full), 12 PM (targeted), 5:30 PM (targeted)
+
+**Why:**
+- Props/odds change throughout the day
+- Lineups confirm between 12-5 PM
+- Late scratches happen before first pitch
+- 3 runs provide comprehensive daily coverage
+
+**Timeline:**
+- **Originally:** 3 runs designed in Blueprint (April 2026)
+- **April-May:** Reduced to 1 run (9 AM) when Discord bot removed
+- **May 6:** Restored to 3 runs with optimization
+
+**Alternatives Considered:**
+- 1 run/day: Too infrequent, stale data by evening
+- 5+ runs/day: Excessive API usage, minimal value gain
+- Real-time streaming: Too complex, high API costs
+
+**Trade-offs:**
+- ✅ Fresh data 3x/day, automatic lineup checking
+- ❌ Higher API usage (mitigated by targeted fetching)
+
+**Status:** ✅ Implemented and tested May 6
+
+---
+
 ### **Decision: Scheduled Batch Processing**
-**Chosen:** Daily pipeline at 9:00 AM ET, resolves previous day outcomes
+**Chosen:** Daily pipeline at fixed times (not real-time)
+
 **Why:**
 - Props don't change after games start
 - Outcomes resolve next morning (official stats available)
-- Reduces API costs (single bulk fetch vs continuous polling)
+- Reduces API costs (scheduled fetches vs continuous polling)
 - Simpler state management (no real-time updates)
 
 **Alternatives Considered:**
@@ -41,7 +70,8 @@ This document records the key architectural decisions made during the developmen
 ---
 
 ### **Decision: Monolithic Flask App**
-**Chosen:** Single Flask app with scheduler (APScheduler)
+**Chosen:** Single Flask app with asyncio scheduler
+
 **Why:**
 - Simple deployment (one Railway service)
 - Shared state (ML model, database connection)
@@ -50,6 +80,7 @@ This document records the key architectural decisions made during the developmen
 **Alternatives Considered:**
 - Microservices: Overkill for this scale, adds complexity
 - Separate workers: Requires message queue, more infrastructure
+- APScheduler: Originally used, switched to asyncio for better control
 
 **Trade-offs:**
 - ✅ Simple, cost-effective, easy to reason about
@@ -63,6 +94,7 @@ This document records the key architectural decisions made during the developmen
 
 ### **Decision: Single Binary Classifier (Hit/Miss)**
 **Chosen:** Scikit-learn LogisticRegression, 15 features
+
 **Why:**
 - Simple, interpretable, fast inference
 - Good baseline (AUC: 0.8532)
@@ -83,6 +115,7 @@ This document records the key architectural decisions made during the developmen
 
 ### **Decision: Direction as Primary Feature**
 **Chosen:** Over/under direction is a model feature
+
 **Why:**
 - Captures market inefficiency (over/under imbalance)
 - High predictive power (77% feature importance)
@@ -100,22 +133,9 @@ This document records the key architectural decisions made during the developmen
 
 ---
 
-### **Decision: Coverage % as Risk Proxy**
-**Chosen:** Coverage % = (outcome count / total outcomes) measures certainty
-**Why:**
-- Higher coverage = more consistent player
-- Helps filter risky props (low sample size)
-
-**Trade-offs:**
-- ✅ Effective risk filter
-- ❌ Penalizes players with breakout potential
-
-**Status:** ✅ Working well, part of lineup consistency filter
-
----
-
 ### **Decision: Store ML Scores with Legs**
 **Chosen:** `composite_score` column in `mlb_scored_legs`
+
 **Why:**
 - Reproducibility: Can audit historical recommendations
 - Dashboard: Can analyze score vs actual outcome
@@ -153,43 +173,168 @@ This document records the key architectural decisions made during the developmen
 - ✅ Flexibility, debuggability, data persistence
 - ❌ Slightly slower (extra database round-trip)
 
-**Status:** ✅ Proven valuable during May 6 crisis (regenerated without refetching)
+**Status:** ✅ Proven valuable during May 6 optimization
 
 ---
 
 ### **Decision: Lineup Consistency Filter**
-**Chosen:** Filter props where player's lineup consistency <30%
+**Chosen:** Filter props where player's lineup consistency <70%
+
 **Why:**
 - Reduces void rate (players ruled out after props logged)
 - Improves parlay reliability
 - Uses publicly available data (MLB-StatsAPI)
 
+**Evolution:**
+- **April Design:** Check `batting_order` field (1-9 = starter)
+- **April-May 5:** Broken (field doesn't exist reliably)
+- **May 6 Fix:** Check `ab >= 3` (at-bats proxy for starter)
+
 **Implementation Challenges (May 6):**
-- Invalid API parameter (`season` with `type='gameLog'`)
-- Error handling: Any error → include conservatively
-- Circuit breaker: Disable filter if >90% filtered
+- Original field (`batting_order`) unreliable
+- Switched to `ab >= 3` as starter proxy
+- Threshold: 0.70 (7+ games out of 10)
 
 **Lessons Learned:**
-- ✅ Filter works (40% filtered as designed)
-- ❌ API documentation incomplete, required experimentation
+- ✅ Filter concept works (reduces voids)
+- ❌ MLB-StatsAPI field names require experimentation
 - 🔄 Conservative error handling prevents catastrophic filtering
 
 **Status:** ✅ Fixed and operational
 
 ---
 
-### **Decision: Single Daily Props Fetch**
-**Chosen:** Fetch all props once, cache in database
-**Why:**
-- API rate limits (500 requests/day)
-- Props don't change after fetch
-- Consistent dataset for all parlays
+### **Decision: Single Daily Props Fetch → Three Daily Fetches**
+**Evolution:**
+
+**Original (April):** 3 fetches/day (9 AM / 12 PM / 5:30 PM)
+**April-May 5:** 1 fetch/day (9 AM only)
+**May 6:** 3 fetches/day with targeted optimization
+
+**Why the change back:**
+- Odds move throughout the day
+- Lineups confirm between 12-5 PM
+- Late scratches happen before games
+- User requested full day coverage
+
+**Optimization Applied (May 6):**
+- 9 AM: Fetch full slate (wide net)
+- 12 PM: Fetch targeted (eligible players only)
+- 5:30 PM: Fetch targeted (upcoming games only)
 
 **Trade-offs:**
-- ✅ Cost-effective, consistent
-- ❌ No real-time updates (not needed for use case)
+- ✅ Fresh odds 3x/day, automatic lineup checks
+- ✅ Still under API quota (40 objects/day vs 100K/month limit)
 
-**Status:** ✅ No issues
+**Status:** ✅ Implemented May 6
+
+---
+
+## API Usage Optimization
+
+### **Decision: Targeted SGO Fetching**
+**Chosen:** Fetch all games, filter props locally to eligible players
+
+**Why:**
+- SGO API charges per game-event, not per prop
+- No per-player endpoint exists
+- Fetching 15 games = 15 objects (regardless of props parsed)
+- Filtering locally saves processing time
+
+**Discovery (May 6):**
+- Original concern: "3 full fetches = 4500 objects/day = 135K/month (35% over)"
+- Actual reality: "3 fetches = 40 objects/day = 1.2K/month (99% under!)"
+- Key insight: SGO embeds props in game-event objects
+
+**Implementation:**
+```python
+def fetch_props_for_players(date_str, player_ids=None):
+    games = get_todays_games(date=date_str)  # 15 games = 15 objects
+    all_props = [get_player_props(g) for g in games]  # Parse locally
+    if player_ids:
+        return [p for p in all_props if p['player_id'] in player_ids]
+    return all_props
+```
+
+**Alternatives Considered:**
+- Per-player API endpoint: Doesn't exist in SGO
+- Caching games across runs: Complex state management
+- Reducing to 2 runs/day: Less fresh data
+
+**Trade-offs:**
+- ✅ 99% under free tier (1.2K vs 100K limit)
+- ✅ Fresh odds 3x/day
+- ❌ Can't reduce below ~15 objects per fetch
+
+**Status:** ✅ Implemented and validated May 6
+
+---
+
+### **Decision: Automatic Lineup Checking**
+**Chosen:** Check confirmed lineups at 12 PM and 5:30 PM via MLB-StatsAPI
+
+**Why:**
+- Late scratches are common in MLB
+- Manual checking not scalable
+- `statsapi.boxscore_data()` provides confirmed lineups
+- Integrates naturally into targeted pipeline runs
+
+**Implementation (May 6):**
+```python
+boxscore = statsapi.boxscore_data(game_pk)
+starters = set(boxscore['away']['battingOrder'] + boxscore['home']['battingOrder'])
+for leg in legs:
+    if leg['player_id'] not in starters:
+        leg['lineup_status'] = 'scratched'
+```
+
+**Edge Cases Handled:**
+- Pitcher props skip lineup check (not in batting order)
+- API failures → mark 'unknown', include conservatively
+- Game postponed → still shows in lineup
+
+**Alternatives Considered:**
+- Manual checking: Not scalable
+- Third-party lineup APIs: Additional cost, complexity
+- Wait for post-game resolution: Too late (bets already placed)
+
+**Trade-offs:**
+- ✅ Automatic scratch detection
+- ✅ Free API (MLB-StatsAPI)
+- ❌ Requires game to be "live" (lineups posted)
+
+**Status:** ✅ Implemented May 6
+
+---
+
+### **Decision: Game Start Filtering**
+**Chosen:** Exclude games starting within next 15 minutes
+
+**Why:**
+- Prevents recommendations for imminent games
+- Gives user time to review and place bets
+- Integrates with targeted pipeline (12 PM / 5:30 PM)
+
+**Implementation (May 6):**
+```python
+cutoff = now_et + timedelta(minutes=15)
+upcoming = [leg for leg in legs if leg['game_start_time'] > cutoff]
+```
+
+**Bug Fixed (May 6):**
+- Original: `cutoff = now_et - buffer_minutes` (backwards!)
+- Fixed: `cutoff = now_et + buffer_minutes`
+
+**Alternatives Considered:**
+- No buffer: Risk recommending games about to start
+- Longer buffer (30-60 min): Removes too many legs
+- Per-user buffer: Complex, unnecessary
+
+**Trade-offs:**
+- ✅ Gives user time to act
+- ❌ Reduces leg pool slightly (minimal impact)
+
+**Status:** ✅ Fixed and working
 
 ---
 
@@ -197,6 +342,7 @@ This document records the key architectural decisions made during the developmen
 
 ### **Decision: Greedy Construction with Constraints**
 **Chosen:** Build 5 parlays sequentially, apply diversity rules
+
 **Why:**
 - Simple to implement and reason about
 - Constraints prevent over-correlation
@@ -206,7 +352,7 @@ This document records the key architectural decisions made during the developmen
 1. Max 1 leg per game (prevents single-game risk)
 2. Max 2 legs per player (prevents over-exposure)
 3. Max 1 leg per prop type per parlay (diversifies prop types)
-4. Odds range: +1400 to +1600 (balances risk/reward)
+4. Odds range: +600 to +1500 (balances risk/reward)
 
 **Alternatives Considered:**
 - Optimization (linear programming): Overkill, harder to debug
@@ -223,6 +369,7 @@ This document records the key architectural decisions made during the developmen
 
 ### **Decision: Rank by Average ML Score**
 **Chosen:** Rank 1 = highest average `composite_score` across legs
+
 **Why:**
 - Simple, interpretable
 - Aligns with ML model's confidence
@@ -289,6 +436,7 @@ This document records the key architectural decisions made during the developmen
 
 ### **Decision: MLB-StatsAPI for Outcomes**
 **Chosen:** Use `statsapi` Python library for game results
+
 **Why:**
 - Free, unlimited, official MLB data
 - Python library simplifies integration
@@ -296,7 +444,8 @@ This document records the key architectural decisions made during the developmen
 
 **Challenges Encountered (May 6):**
 - Documentation incomplete (parameter combinations unclear)
-- Error messages cryptic (`season` param issue)
+- Error messages cryptic (`season` param issue in lineup filter)
+- Field names inconsistent (`batting_order` unreliable)
 
 **Lessons Learned:**
 - ✅ Free and reliable for production use
@@ -311,6 +460,7 @@ This document records the key architectural decisions made during the developmen
 
 ### **Decision: PostgreSQL on Supabase**
 **Chosen:** Hosted PostgreSQL (Supabase free tier)
+
 **Why:**
 - Relational model fits data (props, parlays, outcomes)
 - Supabase free tier sufficient (500MB, 2 connections)
@@ -331,6 +481,7 @@ This document records the key architectural decisions made during the developmen
 
 ### **Decision: Denormalized Legs Table**
 **Chosen:** `mlb_scored_legs` stores all leg data (no joins for display)
+
 **Why:**
 - Fast queries (no joins for Legs tab)
 - Historical props preserved (even if source API changes)
@@ -349,6 +500,7 @@ This document records the key architectural decisions made during the developmen
 
 ### **Decision: TEXT Column for run_date**
 **Chosen (Inherited):** `run_date` stored as TEXT (YYYY-MM-DD format)
+
 **Why:** Unknown (likely default from initial schema)
 
 **Problem Discovered (May 6):**
@@ -367,18 +519,29 @@ This document records the key architectural decisions made during the developmen
 
 ---
 
-### **Decision: Separate Training Table**
-**Chosen:** `mlb_training_data` separate from `mlb_scored_legs`
+### **Decision: No New Tables for Lineup Status**
+**Chosen:** Add columns to existing `mlb_scored_legs` table
+
 **Why:**
-- Cleaner data for retraining (no NULL outcomes)
-- Easier to filter for model training
-- Historical training data preserved
+- Simple schema (no new tables)
+- Lineup status tied to specific leg instance
+- Query performance sufficient
+
+**Columns NOT Added (May 6):**
+- Initially planned: `lineup_status`, `game_status` columns
+- Actual: Computed on-the-fly in pipeline, not persisted
+- Reason: Status changes during day, database updates complex
+
+**Alternative (Chosen):**
+- Compute status in memory during pipeline runs
+- Filter before parlay construction
+- Don't persist transient state
 
 **Trade-offs:**
-- ✅ Clean training data, easier retraining
-- ❌ Duplication (acceptable for ML pipeline)
+- ✅ Simple, no schema changes needed
+- ❌ Can't query historical lineup statuses (acceptable)
 
-**Status:** ✅ Growing steadily (~77k samples)
+**Status:** ✅ Working without database changes
 
 ---
 
@@ -386,6 +549,7 @@ This document records the key architectural decisions made during the developmen
 
 ### **Decision: Railway for Hosting**
 **Chosen:** Railway (PaaS) with GitHub auto-deploy
+
 **Why:**
 - Simple: Push to master → auto-deploy
 - Free tier sufficient ($5/month estimated usage)
@@ -404,21 +568,33 @@ This document records the key architectural decisions made during the developmen
 
 ---
 
-### **Decision: APScheduler for Cron Jobs**
-**Chosen:** APScheduler library within Flask app
+### **Decision: Asyncio Scheduler (Not APScheduler)**
+**Chosen:** Custom asyncio-based scheduler in Flask app
+
 **Why:**
-- No external cron service needed
+- Better control over startup catch-up logic
 - Timezone-aware (ET for MLB)
-- Startup catch-up (runs missed jobs on restart)
+- No external dependencies (APScheduler removed)
+
+**Implementation:**
+```python
+async def _pipeline_scheduler():
+    # Startup catch-up within 2-hour window per slot
+    # Main loop: calculate next run, sleep, execute
+    while True:
+        next_run = find_next_scheduled_time()
+        await asyncio.sleep(seconds_until(next_run))
+        await run_pipeline_for_slot()
+```
 
 **Challenges:**
 - Timezone handling (ET vs UTC)
-- Startup catch-up: Only runs if within 9-12 PM window
+- Startup catch-up: Only runs if within 2-hour window
 
 **Lessons Learned:**
 - ✅ Works reliably for daily jobs
-- ❌ Startup catch-up logic needs tuning (3-hour window)
-- 🔄 Consider external cron if scaling to multiple instances
+- ✅ Startup catch-up crucial for Railway redeploys
+- 🔄 2-hour window chosen empirically (works well)
 
 **Status:** ✅ Working reliably, no missed runs
 
@@ -426,13 +602,15 @@ This document records the key architectural decisions made during the developmen
 
 ### **Decision: Environment Variables for Secrets**
 **Chosen:** Railway environment variables + python-dotenv
+
 **Why:**
 - Security: No secrets in code
 - Flexibility: Different values per environment (dev/prod)
 
 **Variables Used:**
 - `SUPABASE_URL`, `SUPABASE_KEY` (database)
-- `ODDS_API_KEY` (props fetching)
+- `ODDS_API_KEY` (morning props fetch)
+- `SPORTSGAMEODDS_API_KEY` (all SGO fetches)
 - `PORT` (Railway assigned)
 
 **Status:** ✅ No issues
@@ -441,9 +619,46 @@ This document records the key architectural decisions made during the developmen
 
 ## Lessons Learned
 
-### **1. Edge Cases Matter (Void Logic)**
+### **1. API Documentation is Incomplete — Experiment!**
 **What Happened:**
-- Assumed ANY void → parlay void (standard logic)
+- MLB-StatsAPI docs didn't clarify field availability
+- `batting_order` field assumed to exist (didn't reliably)
+- `season` + `type='gameLog'` parameter combo caused errors
+
+**Lesson:**
+- ✅ Budget time for API experimentation
+- ✅ Add conservative error handling (return None vs crash)
+- ✅ Add circuit breakers for critical filters
+- 🔄 Document API quirks in code comments
+
+**Applied:**
+- Switched `batting_order` → `ab >= 3` check
+- Added error handling in lineup consistency filter
+- Circuit breaker disables filter if >90% removed
+
+---
+
+### **2. Understand API Pricing Models Before Optimization**
+**What Happened:**
+- Assumed SGO charged per prop (~1500 objects per fetch)
+- Discovered SGO charges per game-event (~15 objects per fetch)
+- "Optimization" already achieved by API design!
+
+**Lesson:**
+- ✅ Read pricing docs carefully
+- ✅ Test API to understand actual object consumption
+- ✅ Don't over-optimize based on assumptions
+
+**Applied:**
+- Validated SGO charges per game-event, not per prop
+- Realized 3 fetches/day = 40 objects (not 4500)
+- Moved forward with confidence (99% under quota)
+
+---
+
+### **3. Edge Cases Matter (Void Logic)**
+**What Happened:**
+- Assumed ANY void → parlay void (seemed logical)
 - Didn't account for partial voids (common in MLB)
 - Resulted in inflated void rate (5.9% → 0%)
 
@@ -452,47 +667,14 @@ This document records the key architectural decisions made during the developmen
 - ✅ Validate against expected outcomes (sportsbook behavior)
 - 🔄 Write unit tests for resolution logic (future)
 
----
-
-### **2. API Documentation is Incomplete**
-**What Happened:**
-- MLB-StatsAPI docs didn't clarify parameter combinations
-- `season` + `type='gameLog'` caused error
-- Took experimentation to find correct usage
-
-**Lesson:**
-- ✅ Budget time for API experimentation
-- ✅ Add conservative error handling (return None vs crash)
-- ✅ Add circuit breakers for critical filters
-- 🔄 Document API quirks in code comments
+**Applied:**
+- Fixed void logic to match sportsbook standard
+- Backfilled historical data to correct
+- Documented edge cases in code
 
 ---
 
-### **3. Type Safety Prevents Bugs**
-**What Happened:**
-- `run_date` stored as TEXT, queries compared to TIMESTAMP
-- SQL failed silently → HTTP 500 errors
-
-**Lesson:**
-- ✅ Use correct types from schema design (DATE not TEXT)
-- ✅ Type casting (`::date`) works but adds overhead
-- 🔄 Consider schema migration tools (Alembic) for future
-
----
-
-### **4. Separation of Concerns Enables Debugging**
-**What Happened:**
-- Two-stage pipeline (fetch → build) allowed regeneration without refetching
-- Separate resolution (legs → parlays) allowed independent testing
-
-**Lesson:**
-- ✅ Modularity pays off during debugging
-- ✅ Database as source of truth enables auditing
-- ✅ Idempotent operations (safe to re-run) are valuable
-
----
-
-### **5. Conservative Defaults Prevent Catastrophic Failures**
+### **4. Conservative Defaults Prevent Catastrophic Failures**
 **What Happened:**
 - Lineup filter API errors → include player conservatively
 - Circuit breaker: Disable filter if >90% filtered
@@ -503,43 +685,80 @@ This document records the key architectural decisions made during the developmen
 - ✅ Circuit breakers catch systemic issues
 - ✅ Logging helps diagnose (shows individual player results)
 
----
-
-### **6. Historical Backfill Validates Fixes**
-**What Happened:**
-- Backfilled 7 dates (April 22 - May 5) after void logic fix
-- Discovered May 4 was missing (bonus win!)
-- Validated fix across 17 parlays
-
-**Lesson:**
-- ✅ Backfilling validates logic changes
-- ✅ Historical data = regression test suite
-- 🔄 Automate backfill for future fixes
+**Applied:**
+- Error handling includes player (doesn't filter)
+- Circuit breaker at 90% threshold
+- Detailed logging for debugging
 
 ---
 
-### **7. ML Model Needs Continuous Validation**
+### **5. Separation of Concerns Enables Debugging**
 **What Happened:**
-- Model predictions (50.5% avg) match reality (50-55% hit rate)
-- BUT: Direction overfit (77% importance) limits upside
-- Conservative predictions leave value on table
+- Two-stage pipeline (fetch → build) allowed regeneration without refetching
+- Separate resolution (legs → parlays) allowed independent testing
 
 **Lesson:**
-- ✅ Model accuracy ≠ model utility (can be "right" but unprofitable)
-- ✅ Feature importance analysis reveals overfitting
-- 🔄 Retraining with balanced data may improve utility
+- ✅ Modularity pays off during debugging
+- ✅ Database as source of truth enables auditing
+- ✅ Idempotent operations (safe to re-run) are valuable
+
+**Applied:**
+- Maintained two-stage pipeline structure
+- Kept resolution phases separate
+- All operations idempotent (can re-run safely)
 
 ---
 
-### **8. Dashboard is Critical for Validation**
+### **6. User Product Vision Trumps Technical Assumptions**
 **What Happened:**
-- Dashboard bugs (SQL errors, display issues) blocked validation
-- Once fixed, revealed void logic issue instantly
+- Removed 12 PM and 5:30 PM runs (assumed 1 run sufficient)
+- User expected 3 runs with fresh odds throughout day
+- Gap between implementation and user expectations
 
 **Lesson:**
-- ✅ Observability is as important as functionality
-- ✅ Invest in dashboard early (validation tool)
-- 🔄 Add charts/visualizations for trends
+- ✅ Clarify product requirements before optimizing
+- ✅ Don't assume efficiency = better user experience
+- ✅ Ask "what does the user want" not "what's simplest"
+
+**Applied:**
+- Restored 3 daily runs with user's vision
+- Implemented targeted fetching to balance cost/freshness
+- Product requirements drove technical solution
+
+---
+
+### **7. Optimization Reveals Hidden Efficiency**
+**What Happened:**
+- Designed "targeted fetching" to reduce API usage
+- Discovered SGO already optimized (charges per game, not prop)
+- "Optimization" validated API was efficient all along
+
+**Lesson:**
+- ✅ Optimization exercises reveal system behavior
+- ✅ Sometimes "optimizing" means discovering it's already optimal
+- ✅ Validation is as valuable as optimization
+
+**Applied:**
+- Documented SGO pricing model in code
+- Moved forward with 3 runs/day confidently
+- Removed API usage as a concern
+
+---
+
+### **8. Type Safety Prevents Silent Bugs**
+**What Happened:**
+- `run_date` stored as TEXT, queries compared to TIMESTAMP
+- SQL failed silently → HTTP 500 errors
+
+**Lesson:**
+- ✅ Use correct types from schema design (DATE not TEXT)
+- ✅ Type casting (`::date`) works but adds overhead
+- 🔄 Consider schema migration tools (Alembic) for future
+
+**Applied:**
+- Fixed with ::date casts in all queries
+- Documented issue for future schema review
+- Working but not ideal (future migration candidate)
 
 ---
 
@@ -553,6 +772,7 @@ This document records the key architectural decisions made during the developmen
 
 2. **Monitoring & Alerts**
    - Daily health check email
+   - SGO quota tracking
    - Model drift detection
    - Data quality alerts
 
@@ -567,24 +787,40 @@ This document records the key architectural decisions made during the developmen
    - Parlay diversity analysis
    - Real-time calibration
 
+5. **Schema Migration**
+   - Change `run_date` from TEXT to DATE
+   - Add indexes for common queries
+   - Consider partitioning by date
+
 ### **LONG TERM (Future)**
-5. **Multi-Sport Expansion**
+6. **Multi-Sport Expansion**
    - Generalize architecture for NBA, NFL, etc.
    - Shared pipeline, sport-specific resolvers
 
-6. **Optimization Engine**
+7. **Optimization Engine**
    - Linear programming for parlay construction
    - EV calculation and Kelly sizing
+
+8. **Manual Button Improvements**
+   - "Refresh" fetches fresh odds on-demand
+   - "Regenerate Now" triggers mini-pipeline
+   - User-configurable buffer times
 
 ---
 
 ## Decision Review Schedule
 
+**Weekly:** Review SGO usage, pipeline success rate
 **Monthly:** Review performance metrics, adjust thresholds
 **Quarterly:** Evaluate ML model, consider retraining
 **Annually:** Reassess architecture for scale/features
 
 ---
+
+**Last Review:** May 6, 2026  
+**Next Review:** June 6, 2026 (after 1 month of 3-run production)  
+**Reviewer:** Development Team
+
 
 **Last Review:** May 6, 2026  
 **Next Review:** June 6, 2026 (after 1 month production)  
