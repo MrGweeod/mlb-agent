@@ -1,402 +1,295 @@
-MLB Parlay Agent — Project Instructions (Updated April 23, 2026)
-Repository: github.com/MrGweeod/mlb-agent
-Stack: Python 3.10, PostgreSQL (Supabase), Railway, Discord bot, MLB-StatsAPI
-Full Technical Blueprint: MLB_Parlay_Agent_Blueprint_v1.docx (read for architecture, data sources, build order)
+# MLB Parlay Agent — Project Instructions
+**Last Updated:** May 6, 2026  
+**Repository:** github.com/MrGweeod/mlb-agent  
+**Stack:** Python 3.10, PostgreSQL (Supabase), Railway, MLB-StatsAPI
 
-Project Overview
-AI-powered MLB parlay recommendation system adapted from NBA Parlay Agent v6.0. Uses Branch-and-Bound parlay construction, composite five-factor leg scoring (transitioning to ML-based prediction), and pitcher-aware matchup logic to generate 4-8 leg parlays targeting +600 to +1500 odds.
-Single-Pool Strategy (Updated April 18, 2026)
+---
 
-All legs ≥55% coverage scored with composite formula
-Top 20 legs by composite score enter parlay builder
-Branch-and-Bound finds 4-8 leg combinations in +600 to +1500 odds range
-Constraints: Max 1 batter leg per player, max 3 legs per game
+## 📋 LIVING DOCUMENTS (Source of Truth)
 
-ML Pivot (In Progress — April 23, 2026)
-Decision: Transition from hand-coded composite scoring to machine learning model.
+**These three documents are the ONLY up-to-date references:**
 
-Phase 1 (COMPLETE): Historical training data collection — 66,174 resolved samples (March 28 - April 22)
-Phase 2 (NEXT): Feature engineering — populate NULL feature columns for all training samples
-Phase 3 (FUTURE): Train gradient boosting classifier to predict P(hit), replace heuristic leg_scorer.py
-Phase 4 (FUTURE): A/B test ML vs heuristic scoring, roll out ML-based production pipeline
+1. **SESSION_HANDOFF.md** — What was built in the last session, current status, next priorities
+2. **BUILD_STATUS.md** — Component health, operational status, known issues
+3. **ARCHITECTURE_DECISIONS.md** — Design rationale, lessons learned, trade-offs
 
-Current production pipeline still uses heuristic composite scoring (coverage 70%, opponent 20%, stability 10%).
+**When in doubt, trust this priority order:**
+1. SESSION_HANDOFF.md (current state)
+2. BUILD_STATUS.md (what's working/broken)
+3. ARCHITECTURE_DECISIONS.md (why things are the way they are)
+4. Railway logs (ground truth of actual behavior)
+5. Conversation history (may be outdated)
 
-Daily Schedule (9AM/12PM/5:30PM ET)
+---
 
-9:00 AM: Resolve last night's games + fresh pipeline with overnight transactions
-12:00 PM: Updated transactions, refreshed odds, afternoon slate recommendations
-5:30 PM: Final pipeline before first pitches (most lineup cards confirmed by this run)
+## 🚨 CRITICAL RULE: Claude Chat NEVER Edits Project Files Directly
 
+**If you ask Claude Chat to update a project file:**
+- ❌ Claude Chat does NOT edit files in the GitHub repo
+- ❌ Claude Chat does NOT attempt to commit/push changes
+- ✅ Claude Chat generates an **Artifact** (downloadable file)
+- ✅ You download the Artifact and manually add it to the repo
+- ✅ You manually commit and push to GitHub
 
-Discord Commands
+**Why:** This prevents Claude Chat from making changes without your review and keeps you in control of the codebase.
 
-/run — Trigger full pipeline manually
-/resolve — Run outcome resolver on pending bets
-/status — Show pending recommendations
-/calibration — Show calibration report on resolved legs
-/dashboard — Performance dashboard (hit rates, P&L, trends)
+**For code changes:** Use Claude Code (separate tool) with explicit prompts generated here in Claude Chat.
 
+---
 
-Current Status (Updated: April 23, 2026)
+## 🎯 Project Overview
 
-## Major Architecture Changes (April 29, 2026)
+AI-powered MLB parlay recommendation system. Uses ML-based leg scoring, Branch-and-Bound parlay construction, and pitcher-aware matchup logic to generate daily recommendations.
 
-**⚠️ CRITICAL: The system was completely rebuilt April 29. The blueprint is now outdated.**
+**Current Strategy (as of April 29, 2026):**
+- Single scored pool (no anchor/swing buckets)
+- All legs ≥55% ML score eligible
+- Branch-and-Bound finds optimal 4-8 leg combinations
+- Target odds: +600 to +1500
+- Constraints: Max 1 batter leg per player, max 3 legs per game
 
-### What Changed
+---
 
-**1. Coverage Calculation - COMPLETE REWRITE**
-- **Old:** Single smooshed coverage value with penalties
-- **New:** 3 separate signals for hitters, 2 for pitchers
-- **File:** `src/engine/coverage.py` (218 lines added, 266 removed)
+## 📅 Daily Schedule
 
-**2. Composite Scoring - COMPLETE REWRITE**
-- **Old:** 5 factors (coverage 70%, EV 25%, trend 15%, opponent 15%, PA stability 5%)
-- **New:** Pure coverage-based (hitters: 3 signals, pitchers: 4 signals including pitcher quality)
-- **File:** `src/engine/leg_scorer.py` (158 lines added, 237 removed)
+**Current (May 6, 2026):**
+| Time (ET) | Action | Status |
+|-----------|--------|--------|
+| 9:00 AM | Morning pipeline (resolve + fresh props + score + build) | ✅ Active |
+| 12:00 PM | Midday pipeline (refresh props + score + build) | ❌ Disabled (needs re-enabling) |
+| 5:30 PM | Evening pipeline (final props + score + build) | ❌ Disabled (needs re-enabling) |
 
-**3. Pitcher Quality Signals - NEW**
-- **Added:** ERA/K9/WHIP rankings for pitchers
-- **Added:** Team K%/BA/RPG rankings for opponent offense
-- **Files:** `src/apis/pitcher_stats.py` (142 lines), `src/apis/team_stats.py` (128 lines)
+**Note:** 12 PM and 5:30 PM runs were removed when Discord bot was deleted. See SESSION_HANDOFF.md for status on re-enabling them.
 
-**4. Recommendations System - NEW**
-- **Added:** Backend generation (Step 9 in `main.py`)
-- **Added:** Database table `mlb_parlay_recommendations` (schema created, not run yet)
-- **Added:** API endpoints (`/api/recommendations`, `/api/analyze-recommendation`)
-- **Added:** Frontend "Picks" tab with Claude analysis
-- **Files:** `main.py` (+126 lines), `src/web/server.py` (+147 lines), `src/web/static/index.html` (+257 lines)
+---
 
-**5. Discord Bot - REMOVED**
-- **Deleted:** `bot.py`, `src/bot/*`
-- **Moved:** Pipeline scheduler to `src/web/server.py`
-- **Impact:** Web app is now single source of truth
+## 🏗️ System Architecture (High Level)
 
-**6. Data Pipeline - FIXED**
-- **Fixed:** Database CHECK constraint (now allows 'void')
-- **Fixed:** Player ID lookup (SGO string IDs → MLB numeric IDs)
-- **Impact:** 10K unresolved backlog cleared
+### **Data Pipeline (8 Steps)**
+1. Fetch transaction wire (IL/DFA via MLB-StatsAPI)
+2. Build schedule and pitcher maps
+3. Fetch props from SportsGameOdds API
+4. Compute coverage (handedness-split aware)
+5. Filter blocked players (IL, low consistency)
+6. Enrich with pitcher matchup profiles
+7. Compute trend signals
+8. Score with ML model → Build parlays
 
-### Current Scoring Formulas
+### **ML Model**
+- **File:** `leg_scorer_v2.pkl` (trained April 30, 2026)
+- **Type:** Scikit-learn LogisticRegression
+- **Features:** 15 (direction, coverage, trends, opponent adjustment, etc.)
+- **AUC:** 0.8532
+- **Known Issue:** Direction overfit (77% feature importance)
 
-**Hitters:**
-```python
-composite_score = (
-    coverage_overall × 0.40 +
-    coverage_vs_hand × 0.30 +
-    coverage_recent_10 × 0.30
-)
+### **Web App (4 Tabs)**
+1. **Legs** — Browse all scored legs, filter by stat/player/team
+2. **Dashboard** — 6-section performance analytics
+3. **Training** — ML data quality monitoring
+4. **Picks** — 5 daily parlay recommendations
+
+---
+
+## 🔄 Workflow Rules (Cost Optimization)
+
+### **Use Manual Actions When:**
+- Updating environment variables (Railway, Supabase)
+- Checking Railway logs or deployment status
+- Git operations: `git pull`, `git status`, `git commit`, `git push`
+- Reading small files: `cat README.md`
+- Installing packages: `pip install -r requirements.txt`
+- Supabase: Table Editor, SQL Editor
+- Discord Developer Portal: bot setup, tokens
+
+### **Use Claude Chat (This Session) When:**
+- Architecture decisions, debugging strategy
+- Reviewing pasted code (< 100 lines)
+- Writing SQL queries, config snippets
+- Explaining errors, suggesting fixes
+- Planning workflows before execution
+- **Generating Artifacts** for project file updates
+
+### **Use Claude Code When:**
+- Writing/editing Python files (> 20 lines)
+- Refactoring modules, adding features
+- Running tests, linters, formatters
+- Debugging across multiple files
+- Building new pipelines or integrations
+
+**Decision Rule:**
+1. Can I do this manually in < 5 minutes? → Do it yourself (free)
+2. Can I paste code here and get a fix? → Claude Chat (minimal cost)
+3. Need to edit multiple Python files? → Claude Code (necessary cost)
+
+---
+
+## 🗂️ Key Files & Directories
+
 ```
-
-**Pitchers:**
-```python
-composite_score = (
-    coverage_overall × 0.35 +
-    coverage_recent_5 × 0.25 +
-    pitcher_quality × 0.20 +
-    opponent_offense × 0.20
-)
-```
-
-**Note:** These are NEW formulas as of April 29. Training data collected before this date used the old formula.
-
-### Web App Structure (4 Tabs)
-
-1. **Legs** - Interactive parlay builder
-2. **Dashboard** - Performance analytics (6 sections)
-3. **Training** - ML data quality monitoring (5 sections)
-4. **Picks** - Daily recommendations with Claude analysis (NEW)
-
-### Deployment Status
-
-**Railway:** ⚠️ Needs PYTHONPATH=/app environment variable (user fixing manually)
-**Database:** ⚠️ Run `sql/create_recommendations_table.sql` in Supabase SQL Editor
-
-✅ Infrastructure Running
-
-Railway deployment: Live (mlb-agent project, 3 daily scheduled runs)
-Discord bot: Connected (slash commands synced, automated posts working)
-Web app: Deployed at Railway URL (interactive parlay builder + 6-section analytics dashboard)
-Supabase: All mlb_* tables created and active
-Environment variables: Set in Railway
-
-✅ What Works
-
-Discord bot posts AI recommendations 3x/day (9AM/12PM/5:30PM ET)
-Web app allows manual parlay building with real-time odds calculation
-Lineup poller rescores legs every 30min from 6-8PM ET when lineups confirm
-Full 8-step pipeline with pitcher-aware matchup logic
-Single scored pool producing 4-8 leg parlays on 10+ game slates
-Historical training data collection: 66,174 resolved samples in mlb_training_data table
-
-⚠️ Known Issues (Production Pipeline)
-
-Coverage overconfidence: Systematically 12-23pp too high in 60%+ buckets (614 production legs, April 17-22)
-Direction bias: Unders underperform (44.3% win rate vs 50.0% overs)
-Overall production win rate: 47.7% (293/614 legs hit)
-
-📊 Training Data Status (NEW)
-MetricCountTotal props logged73,942Resolved (hit/miss)66,174 (89.5%)Hits31,450 (47.5%)Misses34,724 (52.5%)NULL (DNP/scratched)7,768 (excluded from training)Date rangeMarch 28 - April 22, 2026 (26 days)
-File: scripts/backfill_training_data.py (410 lines)
-Database table: mlb_training_data (ready for feature engineering)
-
-Workflow Rules — Cost & Efficiency Optimization
-When to Use Manual Actions (You)
-Always prefer manual actions when possible — they're free and often faster than spinning up Claude Code.
-✅ Use Terminal/Web UI For:
-
-Updating environment variables (Railway, Discord Developer Portal, Supabase)
-Checking Railway logs, deployment status
-Git operations: git pull, git status, git commit, git push
-Reading small files: cat README.md, less bot.py
-Installing packages: pip install -r requirements.txt
-Running the bot locally: python bot.py
-Supabase: Table Editor for schema inspection, SQL Editor for queries
-GitHub: Creating repos, branches, reviewing diffs
-Discord Developer Portal: Creating bots, copying tokens, generating invite URLs
-
-When to Use Claude Chat (This Session)
-Use Claude Chat for strategy, planning, and small code reviews.
-✅ Use Claude Chat For:
-
-Architecture decisions, debugging strategy, interpreting error logs
-Reviewing pasted code snippets (< 100 lines) — paste code here instead of asking Claude Code to view it
-Writing SQL queries, environment variable templates, config snippets
-Explaining errors or suggesting targeted fixes
-Planning multi-step workflows before execution
-Cost-benefit analysis on whether a task needs Claude Code at all
-
-When to Use Claude Code
-Use Claude Code only for actual coding work that requires file editing.
-✅ Use Claude Code For:
-
-Writing or editing Python files (> 20 lines of changes)
-Refactoring modules, adding new features
-Running tests, linters, formatters across the codebase
-Debugging errors that require reading multiple interconnected files
-Building new pipelines, data models, or API integrations
-
-Decision Tree — Which Tool?
-Before starting any task, ask:
-
-Can I do this manually in < 5 minutes? → Do it yourself (free)
-Can I paste the code here and get a fix in chat? → Use Claude Chat (minimal cost)
-Does this require editing/creating multiple Python files? → Use Claude Code (necessary cost)
-
-
-API Key & Token Hygiene
-
-❌ Never paste raw API keys or tokens in chat or Claude Code sessions
-✅ Use placeholders: ANTHROPIC_API_KEY=your_key_here
-✅ Store all secrets in Railway Variables, never in .env files committed to GitHub
-✅ Use .env.example as a template with placeholder values only
-
-
-Git Workflow
-
-Always git pull origin main before starting work
-Commit small, logical units: "Add pitcher handedness split logic" not "Updates"
-Push after every working session: git push origin main
-Use branches only for experimental features, not for daily work
-
-
-Railway Workflow
-
-Check logs in Railway UI before asking for help
-Redeploy after environment variable changes (Railway → Deployments → Redeploy)
-Monitor build times — if builds take > 3 minutes, investigate dependency caching
-
-
-Supabase Workflow
-
-Use Table Editor (web UI) for schema inspection — no code needed
-Use SQL Editor for complex queries or bulk updates
-Export table data as CSV for local analysis before writing code to process it
-
-
-Web App — Interactive Parlay Builder
-Access: Railway deployment URL → Enter WEB_APP_PASSWORD when prompted
-Purpose: Manual parlay building with real-time feedback (Discord bot only posts AI recommendations)
-Features:
-
-Browse today's scored legs with coverage %, composite score, lineup status
-Tap legs to select 4-8 for a parlay
-Real-time combined odds calculation
-Correlation blocking (pitcher/batter same game, max 3 legs per game)
-"Reaches target" filter (highlights legs bringing odds into +600-1500 range)
-Auto-polls /api/legs every 5min for lineup updates
-Mobile-first responsive design
-NEW: 6-section analytics dashboard (calibration, prop performance, direction bias, coverage accuracy, trend validation, recent legs)
-
-Technical:
-
-Runs on same Railway service as Discord bot (no extra cost)
-Single-file HTML app (~20 KB, vanilla JS, no build step)
-Backend: src/web/server.py (aiohttp server)
-Frontend: src/web/static/index.html
-Data: Fetches from Supabase via /api/legs endpoint
-
-
-Key MLB-Specific Differences from NBA Agent
-If you're familiar with the NBA agent, these are the critical changes:
-ComponentNBA AgentMLB AgentStats APInba_apiMLB-StatsAPI (pip install MLB-StatsAPI)Injury dataOfficial NBA injury PDFMLB Transaction Wire via statsapi.get('transactions')Matchup logicTeam DEF_RATING, paint/3P suppressionPitcher ERA/K9/WHIP profilesCoverage calculationOverall season hit rateSplit by opposing pitcher handedness (RHP vs LHP)Trend windows5/10/15 game rolling windows10/20 game rolling windowsStability metricMinutes stability (last 5 vs prior 10)Plate appearance stability + batting order positionLineup confirmationNBA injury PDF at 5:30 PM ETStarting lineups posted ~3.5 hours before first pitchParlay strategyTwo-pool anchor/swing (legacy)Single scored pool (current)
-Most Important: Every batter's coverage rate must be calculated separately for games vs RHP and vs LHP. A .280 hitter vs RHP but .320 vs LHP facing a LHP tonight has a different edge than overall season average suggests.
-
-Build Order Reference
-See Section 10 of MLB_Parlay_Agent_Blueprint_v1.docx for full build order.
-
-Phase 1: Direct copies from NBA agent (Discord bot, database, parlay builder, Claude agent) — ✅ COMPLETE
-Phase 2: MLB adaptations (MLB-StatsAPI, coverage calculator, pitcher matchup logic, leg scorer) — ✅ COMPLETE
-Phase 3: New modules (Transaction Wire, lineup confirmation, main pipeline, web app) — ✅ COMPLETE
-Phase 4: Training data collection (historical backfill, database table) — ✅ COMPLETE
-Phase 5: ML model training (feature engineering, GradientBoostingClassifier, ML-based scorer) — ⏳ NEXT
-
-Before building each module: Check if it already exists in the repo. Don't rebuild what's already there.
-
-Validation Checklist Before Building
-Complete these before writing any Phase 5 code:
-
-✅ Verify SportsGameOdds API returns MLB props with fairOdds field (tested with sport='MLB')
-✅ Verify pitcher prop markets (Strikeouts, Innings Pitched) are available on DraftKings in Massachusetts
-✅ Verify MLB-StatsAPI provides real-time box scores for same-day outcome resolution
-✅ Test that alt lines are available for MLB pitcher props on SGO
-✅ Confirm all environment variables are set in Railway: SPORTSGAMEODDS_API_KEY, ODDS_API_KEY, ANTHROPIC_API_KEY, DATABASE_URL, DISCORD_BOT_TOKEN, DISCORD_GUILD_ID, SCHEDULE_CHANNEL_ID, WEB_APP_PASSWORD
-✅ Verify historical training data collection works (66,174 samples collected March 28 - April 22)
-
-
-Current Scoring Weights (Heuristic — Pre-ML)
-Production pipeline still uses hand-coded composite scoring:
-
-Coverage: 70%
-Opponent adjustment: 20%
-PA stability: 10%
-Trend: 0% (no predictive value found)
-EV: 0% (dropped — not useful for parlay construction, see ARCHITECTURE_DECISIONS.md)
-
-Note: These weights will be replaced by ML model predictions in Phase 5.
-
-For Claude Code Sessions
-When starting a Claude Code session:
-Always read these files first:
-
-PROJECT_INSTRUCTIONS.md (this file)
-SESSION_HANDOFF.md (tracks what was done in the last session)
-ARCHITECTURE_DECISIONS.md (tracks major architectural decisions)
-BUILD_STATUS.md (tracks what's built vs what's missing)
-
-Best practices:
-
-Check existing code before suggesting changes — use view or git log to see what's already there
-Prefer targeted fixes over rewrites — if a function works, don't rewrite it just to match a different style
-Commit and push at the end of every logical unit of work — don't wait until the end of the session
-Update SESSION_HANDOFF.md before ending the session — document what was built, what's next, any blockers
-
-
-For Claude Chat Sessions
-When working in Claude Chat (Desktop Project):
-
-This session has access to uploaded files only — if you need to reference code, paste it here or upload the file
-Before asking for code changes, paste the relevant code here first — saves Claude Code tokens
-Use this session for planning, strategy, and small fixes — escalate to Claude Code only when you need to edit multiple files
-Document decisions in ARCHITECTURE_DECISIONS.md — if we decide on an architectural approach, add it to the notes so Claude Code sessions can reference it
-
-
-Common Commands Reference
-Local Development
-bash# Start bot locally
-python bot.py
-
-# Run a manual pipeline test
-python -c "from main import run_pipeline; run_pipeline()"
-
-# Run historical backfill (training data collection)
-python scripts/backfill_training_data.py
-
-# Check what's been built
-ls -la src/apis/
-ls -la src/engine/
-ls -la src/pipelines/
-
-# View recent commits
-git log --oneline -10
-Railway
-bash# View logs (web UI is easier)
-railway logs
-
-# Redeploy
-railway up
-API Testing
-python# Test SportsGameOdds API for MLB props
-import requests
-api_key = "YOUR_KEY"
-response = requests.get(
-    "https://api.sportsgameodds.com/v1/props",
-    params={"sport": "MLB", "apiKey": api_key}
-)
-print(response.json()[:2])
-
-When You Get Stuck
-
-Check Railway logs first — 90% of deployment issues show up there
-Paste error messages in Claude Chat — get a diagnosis before spinning up Claude Code
-Verify environment variables — missing or misnamed vars cause silent failures
-Check Discord Developer Portal — bot permissions issues are common and easy to fix manually
-Review SESSION_HANDOFF.md — previous sessions may have documented known issues
-
-
-Next Session Priorities (from SESSION_HANDOFF.md)
-HIGH PRIORITY
-
-Add prospective collection to daily pipeline — log today's props to training_data each run
-Build feature calculation module — populate NULL feature columns for all 66K rows
-Train initial ML model — sklearn GradientBoostingClassifier with 66K samples
-A/B test ML vs heuristic scoring — compare parlay quality over 3-5 days
-
-MEDIUM PRIORITY
-
-Investigate why coverage is systematically overconfident (global 0.85× deflation?)
-Filter unders more aggressively (44.3% vs 50.0% overs)
-Add ballpark factors, weather signals to feature set
-
-LOW PRIORITY
-
-Parlay-level ML optimizer (learns which leg combinations work best)
-Reinforcement learning approach for parlay construction
-
-
-Key Files & Directories
 mlb-agent/
-├── bot.py                              # Discord bot entry point
-├── main.py                             # Main pipeline orchestrator
-├── scripts/
-│   └── backfill_training_data.py      # Historical training data collection (410 lines)
+├── main.py                          # Pipeline orchestrator
 ├── src/
 │   ├── apis/
-│   │   ├── mlb_stats.py               # MLB-StatsAPI wrapper
-│   │   ├── sportsgameodds.py          # SGO props fetcher
-│   │   ├── injuries.py                # Transaction Wire poller
-│   │   └── lineup_confirmation.py     # Lineup card confirmation gate
+│   │   ├── mlb_stats.py            # MLB-StatsAPI wrapper
+│   │   ├── sportsgameodds.py       # Props fetcher
+│   │   ├── pitcher_stats.py        # ERA/K9/WHIP rankings
+│   │   └── team_stats.py           # Team offensive rankings
 │   ├── engine/
-│   │   ├── coverage.py                # Handedness-split coverage calculator
-│   │   ├── leg_scorer.py              # Heuristic composite scorer (to be replaced by ML)
-│   │   └── parlay_builder.py          # Branch-and-Bound optimizer
-│   ├── pipelines/
-│   │   ├── enrich_legs.py             # Pitcher matchup profiles
-│   │   └── trend_analysis.py          # HOT/COLD/NEUTRAL rolling windows
+│   │   ├── coverage.py             # Handedness-split coverage
+│   │   ├── leg_scorer_v2.pkl       # ML model (trained Apr 30)
+│   │   └── parlay_builder.py      # Branch-and-Bound optimizer
+│   ├── utils/
+│   │   ├── db.py                   # Supabase PostgreSQL
+│   │   └── lineup_consistency.py   # 3+ AB filter (fixed May 6)
 │   ├── tracker/
-│   │   ├── outcome_resolver.py        # Box score outcome resolution
-│   │   └── calibration.py             # Coverage accuracy tracking
+│   │   ├── outcome_resolver.py     # Box score resolution
+│   │   └── parlay_outcome_resolver.py
 │   └── web/
-│       ├── server.py                  # aiohttp web server
-│       └── static/index.html          # Interactive parlay builder + dashboard
+│       ├── server.py               # Flask app + scheduler
+│       └── static/index.html       # 4-tab web UI
 └── docs/
-    ├── PROJECT_INSTRUCTIONS.md        # This file
-    ├── SESSION_HANDOFF.md             # Last session summary
-    ├── ARCHITECTURE_DECISIONS.md      # Major design decisions
-    └── BUILD_STATUS.md                # What's built vs what's missing
+    ├── SESSION_HANDOFF.md          # ✅ CURRENT STATE
+    ├── BUILD_STATUS.md             # ✅ CURRENT HEALTH
+    └── ARCHITECTURE_DECISIONS.md   # ✅ CURRENT RATIONALE
+```
 
-Database Tables (Supabase PostgreSQL)
-TablePurposeRow Countmlb_scored_legsProduction legs from daily pipeline614 (April 17-22)mlb_training_dataHistorical props + outcomes for ML training73,942 (March 28 - April 22)mlb_recommendationsAI-generated parlay recommendations~50mlb_calibrationCoverage accuracy trackingAggregated from scored_legs
+---
 
-For full technical details, architecture diagrams, and MLB-specific implementation notes, see MLB_Parlay_Agent_Blueprint_v1.docx.
+## 🗄️ Database (Supabase PostgreSQL)
+
+**Active Tables:**
+| Table | Purpose | Row Count (May 6) |
+|-------|---------|-------------------|
+| `mlb_scored_legs` | Daily props with ML scores | ~2,500 |
+| `mlb_training_data` | Historical outcomes for retraining | 77,619 |
+| `mlb_parlay_recommendations` | Daily parlays tracked | 23 |
+| `mlb_calibration` | Predicted vs actual bucketed | Aggregated |
+
+---
+
+## 🚀 Deployment (Railway)
+
+**Platform:** Railway (PaaS)  
+**Deployment:** Auto-deploy from `master` branch  
+**Scheduler:** APScheduler (within Flask app)  
+**Uptime:** 99.9%  
+
+**Environment Variables:**
+- `SUPABASE_URL`
+- `SUPABASE_KEY`
+- `ODDS_API_KEY` (TheOddsAPI for props)
+- `PORT` (Railway assigned)
+
+---
+
+## 📊 Current Performance Metrics (May 4-6)
+
+**Parlays:**
+- Total Recommended: 23
+- Resolved: 17 (74%)
+- Won: 1 (5.9% hit rate) ✅ Within 5-10% expected range
+- Lost: 16 (94.1%)
+- Void: 0 (0% after May 6 fix)
+
+**Legs (Last 7 Days):**
+| Stat Type | Total | Won | Hit % | Void % |
+|-----------|-------|-----|-------|--------|
+| Strikeouts | 402 | 230 | 57.2% | 0% |
+| Hits | 871 | 436 | 50.1% | 2.3% |
+| RBI | 48 | 24 | 50.0% | 4.2% |
+| Total Bases | 75 | 37 | 49.3% | 5.3% |
+| Walks | 59 | 28 | 47.5% | 3.4% |
+
+---
+
+## 🔧 Common Operations
+
+### **Check System Health**
+```bash
+# Railway logs
+https://railway.app → mlb-agent → Deployments → View Logs
+
+# Database
+Supabase → SQL Editor
+
+# Web app
+https://[railway-url].up.railway.app
+```
+
+### **Trigger Manual Pipeline**
+Web app → Picks tab → "Regenerate Now" button
+
+### **Resolve Outcomes Manually**
+```bash
+python3 -c "
+from src.tracker.outcome_resolver import resolve_all_legs
+from src.tracker.parlay_outcome_resolver import resolve_parlay_recommendations
+
+date = '2026-05-06'
+resolve_all_legs(date, verbose=True)
+resolve_parlay_recommendations(date, verbose=True)
+"
+```
+
+---
+
+## 🐛 Recent Critical Fixes (May 6, 2026)
+
+**See SESSION_HANDOFF.md for full details:**
+1. ✅ Lineup consistency filter API parameter error (fixed)
+2. ✅ Dashboard SQL type mismatch (fixed)
+3. ✅ Parlay void logic (partial voids now handled correctly)
+4. ✅ Historical backfill complete (April 22 - May 5)
+
+---
+
+## 📈 Next Priorities
+
+**See SESSION_HANDOFF.md for current priorities.**
+
+**As of May 6:**
+- Monitor 7 days of clean data
+- Validate ML model performance
+- Analyze lineup filter effectiveness
+- Consider ML model retraining (after 500+ more samples)
+
+---
+
+## 🔐 Security
+
+- Never paste raw API keys in chat or Claude Code
+- Store secrets in Railway Variables only
+- Use `.env.example` with placeholders
+
+---
+
+## 📚 Historical Documents (Archive)
+
+**These documents are outdated — do not reference them for current state:**
+- ❌ `MLB_Parlay_Agent_Blueprint_v1.docx` (April 2026 design) — Original architecture, many details outdated
+- ❌ Old `PROJECT_INSTRUCTIONS.md` (April 18-29) — Replaced by this document
+
+**Use the three living documents instead:** SESSION_HANDOFF.md, BUILD_STATUS.md, ARCHITECTURE_DECISIONS.md
+
+---
+
+## 🆘 When Things Break
+
+1. **Check SESSION_HANDOFF.md** — Known issues section
+2. **Check Railway logs** — 90% of issues show up there
+3. **Paste error in Claude Chat** — Get diagnosis before coding
+4. **Verify environment variables** — Missing vars cause silent failures
+
+---
+
+## 📞 Resources
+
+- **Railway Dashboard:** https://railway.app
+- **Supabase Console:** https://supabase.com
+- **GitHub Repo:** github.com/MrGweeod/mlb-agent
+- **Living Docs:** SESSION_HANDOFF.md, BUILD_STATUS.md, ARCHITECTURE_DECISIONS.md
+
+---
+
+**Last Review:** May 6, 2026  
+**Next Review:** After 7 days of production monitoring (May 13, 2026)
