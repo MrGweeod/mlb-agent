@@ -2,11 +2,11 @@
 lineup_consistency.py — Lineup consistency filter for MLB props.
 
 Checks whether a batter has been consistently in the starting lineup
-over recent games using the statsapi battingOrder field.
+over recent games by counting games with 3+ at-bats (AB >= 3).
 
-A battingOrder value of 1-9 (e.g. 100, 200, ... 900 in the raw data)
-indicates the player was in the starting lineup. Values >= 1000 or
-missing indicate pinch hitter / bench player.
+A player with AB >= 3 in 7+ of their last 10 games is considered a
+consistent starter. Bench/platoon players will typically fall below
+this threshold.
 """
 from __future__ import annotations
 
@@ -17,11 +17,10 @@ import statsapi
 
 def started_last_n_games(player_id: int, season: int, n: int = 10) -> Optional[float]:
     """
-    Return the fraction of the last n games where the player was a starter
-    (had a battingOrder value in 1-9, i.e. 100-900 in raw data).
+    Return the fraction of the last n games where the player had 3+ at-bats.
 
     Returns None if game log is unavailable (caller should not filter that player).
-    Returns 0.0 only when we have data and the player genuinely never starts.
+    Returns 0.0 only when we have data and the player genuinely never has 3+ AB.
     """
     try:
         logs = statsapi.player_stat_data(
@@ -38,12 +37,9 @@ def started_last_n_games(player_id: int, season: int, n: int = 10) -> Optional[f
         if len(recent) < 3:
             print(f"[lineup_consistency] player {player_id}: only {len(recent)} games (<3), skipping filter")
             return None
-        started = sum(
-            1 for g in recent
-            if g.get("batting_order") and int(g["batting_order"]) <= 900
-        )
-        score = round(started / len(recent), 3)
-        print(f"[lineup_consistency] player {player_id}: {started}/{len(recent)} starts = {score:.3f}")
+        qualified = sum(1 for g in recent if g.get("ab", 0) >= 3)
+        score = round(qualified / len(recent), 3)
+        print(f"[lineup_consistency] player {player_id}: {qualified}/{len(recent)} games with 3+ AB = {score:.3f}")
         return score
     except Exception as exc:
         print(f"[lineup_consistency] player {player_id}: error fetching game log: {exc} — skipping filter")
@@ -70,7 +66,7 @@ def calculate_lineup_consistency(
         n:          Number of recent games to check (default 10)
 
     Returns:
-        float in [0.0, 1.0] — fraction of recent games where player was a starter,
+        float in [0.0, 1.0] — fraction of recent games where player had 3+ AB,
         or None if game log data is unavailable.
     """
     PITCHER_STATS = {"inningsPitched", "hitsAllowed", "earnedRuns"}

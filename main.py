@@ -600,7 +600,7 @@ def run_pipeline(starts_after_override=None) -> tuple[list[dict], str]:
                 # API failed — include conservatively, don't penalise unknown players
                 _lc_errors += 1
                 _lc_kept.append(_leg)
-            elif _lc >= 0.3:
+            elif _lc >= 0.70:
                 _lc_kept.append(_leg)
             else:
                 _expanded = check_expanded_role_due_to_injury(_pid, _leg.get("team", ""), today)
