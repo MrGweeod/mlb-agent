@@ -144,6 +144,182 @@ def resolve_parlay_recommendations(date: str, verbose: bool = True) -> dict:
     return {**counts, "total": total}
 
 
+def resolve_parlay_recommendations_v2(date: str, verbose: bool = True) -> dict:
+    """
+    Resolve pending parlay recommendations in the v2 normalized schema.
+
+    Fetches box scores for each leg's game, computes individual leg outcomes,
+    then rolls up to the parlay level using the same logic as the old resolver.
+
+    Args:
+        date: 'YYYY-MM-DD' — must match mlb_parlay_recommendations_v2.run_date.
+        verbose: Print progress to stdout.
+
+    Returns:
+        {'won': int, 'lost': int, 'void': int, 'skipped': int, 'total': int}
+    """
+    import statsapi as _statsapi
+    from src.tracker.outcome_resolver import extract_stat_from_boxscore
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, rank
+        FROM mlb_parlay_recommendations_v2
+        WHERE run_date = %s AND outcome = 'pending'
+        ORDER BY rank
+        """,
+        (date,),
+    )
+    parlays = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+
+    if not parlays:
+        if verbose:
+            print(f"[PARLAY RESOLVER V2] No pending v2 parlays for {date}.")
+        return {"won": 0, "lost": 0, "void": 0, "skipped": 0, "total": 0}
+
+    if verbose:
+        print(f"[PARLAY RESOLVER V2] Resolving {len(parlays)} parlay(s) for {date}...")
+
+    # Pre-fetch all legs for today's pending parlays in one query
+    parlay_ids = [p["id"] for p in parlays]
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, parlay_id, player_id, player_name, stat, line, direction,
+               game_id, outcome
+        FROM mlb_parlay_legs_v2
+        WHERE parlay_id = ANY(%s)
+        """,
+        (parlay_ids,),
+    )
+    all_legs = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+
+    # Pre-fetch box scores grouped by game_id (one API call per game)
+    game_ids = list({l["game_id"] for l in all_legs if l["game_id"]})
+    box_scores: dict[int, dict] = {}
+    for gid in game_ids:
+        try:
+            bs = _statsapi.boxscore_data(gid)
+            box_scores[gid] = bs
+        except Exception as _e:
+            if verbose:
+                print(f"  [v2] box score error game {gid}: {_e}")
+
+    resolved_at = datetime.now(timezone.utc)
+    counts = {"won": 0, "lost": 0, "void": 0, "skipped": 0}
+
+    for parlay in parlays:
+        parlay_id = parlay["id"]
+        rank = parlay["rank"]
+        legs = [l for l in all_legs if l["parlay_id"] == parlay_id]
+
+        leg_outcomes: list[str] = []
+        all_resolved = True
+
+        for leg in legs:
+            gid = leg["game_id"]
+            if not gid or gid not in box_scores:
+                leg_outcomes.append("void")
+                continue
+
+            bs = box_scores[gid]
+            player_id_str = str(leg["player_id"])
+            player_stats = None
+
+            for side in ("away", "home"):
+                for pid_key, pdata in bs.get(side, {}).get("players", {}).items():
+                    if pid_key == f"ID{player_id_str}" or str(pdata.get("person", {}).get("id")) == player_id_str:
+                        player_stats = pdata.get("stats", {})
+                        break
+                if player_stats is not None:
+                    break
+
+            if player_stats is None:
+                leg_outcomes.append("void")
+                continue
+
+            result_value = extract_stat_from_boxscore(player_stats, leg["stat"])
+            if result_value is None:
+                leg_outcomes.append("void")
+                continue
+
+            line = leg["line"]
+            direction = (leg["direction"] or "over").lower()
+            if direction == "over":
+                outcome = "won" if result_value > line else "lost"
+            else:
+                outcome = "won" if result_value < line else "lost"
+
+            leg_outcomes.append(outcome)
+
+            # Update individual leg
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE mlb_parlay_legs_v2 SET outcome = %s, result_value = %s WHERE id = %s",
+                (outcome, result_value, leg["id"]),
+            )
+            conn.commit()
+            cur.close()
+            conn.close()
+
+        if not all_resolved:
+            counts["skipped"] += 1
+            continue
+
+        # Roll up to parlay outcome
+        void_count = leg_outcomes.count("void")
+        lost_count = leg_outcomes.count("lost")
+        if void_count == len(leg_outcomes):
+            parlay_outcome = "void"
+        elif lost_count > 0:
+            parlay_outcome = "lost"
+        elif all(o in ("won", "void") for o in leg_outcomes) and any(o == "won" for o in leg_outcomes):
+            parlay_outcome = "won"
+        else:
+            parlay_outcome = "pending"
+
+        if parlay_outcome != "pending":
+            counts[parlay_outcome] += 1
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE mlb_parlay_recommendations_v2
+                SET outcome = %s, resolved_at = %s
+                WHERE id = %s
+                """,
+                (parlay_outcome, resolved_at.isoformat(), parlay_id),
+            )
+            conn.commit()
+            cur.close()
+            conn.close()
+        else:
+            counts["skipped"] += 1
+
+        if verbose:
+            icon = "✓" if parlay_outcome == "won" else ("○" if parlay_outcome == "void" else "✗")
+            summary = ", ".join(leg_outcomes)
+            print(f"  [{icon}] Rank {rank}: [{summary}] → {parlay_outcome.upper()}")
+
+    total = sum(counts.values())
+    if verbose:
+        print(
+            f"\n[PARLAY RESOLVER V2] Complete: "
+            f"{counts['won']} won, {counts['lost']} lost, "
+            f"{counts['void']} void, {counts['skipped']} skipped "
+            f"({total} total)"
+        )
+    return {**counts, "total": total}
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         resolve_parlay_recommendations(sys.argv[1])

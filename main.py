@@ -37,7 +37,7 @@ from src.engine.parlay_builder import build_hybrid_parlays, _tier_params
 from src.pipelines.enrich_legs import enrich_legs
 from src.pipelines.trend_analysis import get_trend_signal
 from src.tracker.recommendation_logger import log_recommendations
-from src.utils.db import log_scored_legs, log_training_data_legs, save_parlay_recommendation
+from src.utils.db import log_scored_legs, log_training_data_legs, save_parlay_recommendation, save_parlay_recommendations_v2
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -780,6 +780,20 @@ def run_pipeline(starts_after_override=None) -> tuple[list[dict], str]:
     else:
         print("  No recommendations generated")
 
+    # Dual-write to v2 normalized schema
+    if recommendations:
+        try:
+            _hour = datetime.now(timezone.utc).astimezone().hour
+            if _hour < 11:
+                _source = "auto_9am"
+            elif _hour < 14:
+                _source = "auto_12pm"
+            else:
+                _source = "auto_530pm"
+            save_parlay_recommendations_v2(recommendations, today, source=_source)
+        except Exception as _v2_err:
+            print(f"  [v2] dual-write failed (non-fatal): {_v2_err}")
+
     if not parlays:
         print("  No valid parlays found. Exiting.")
         return [], ""
@@ -857,12 +871,23 @@ def run_morning_pipeline() -> None:
 
     # Step 2c: Resolve yesterday's parlay recommendations
     try:
-        from src.tracker.parlay_outcome_resolver import resolve_parlay_recommendations
+        from src.tracker.parlay_outcome_resolver import (
+            resolve_parlay_recommendations,
+            resolve_parlay_recommendations_v2,
+        )
         parlay_stats = resolve_parlay_recommendations(yesterday, verbose=True)
         print(f"  Parlays: {parlay_stats['won']} won, {parlay_stats['lost']} lost, "
               f"{parlay_stats['void']} void, {parlay_stats['skipped']} skipped")
     except Exception as _par_err:
         print(f"  WARNING: Parlay resolution failed: {_par_err}")
+
+    # Step 2d: Resolve yesterday's v2 parlay recommendations
+    try:
+        v2_stats = resolve_parlay_recommendations_v2(yesterday, verbose=True)
+        print(f"  Parlays v2: {v2_stats['won']} won, {v2_stats['lost']} lost, "
+              f"{v2_stats['void']} void, {v2_stats['skipped']} skipped")
+    except Exception as _v2_par_err:
+        print(f"  WARNING: V2 Parlay resolution failed (non-fatal): {_v2_par_err}")
 
     # Step 3: Training data health check
     print("\n[3/4] Training data health check...")
@@ -1131,6 +1156,13 @@ def run_targeted_pipeline(buffer_minutes: int = 15) -> None:
 
     best_edge = recommendations[0]["edge_pct"] if recommendations else 0
     print(f"\n[8/8] Saved {saved} recommendation(s) (rank 1 edge: {best_edge}%)")
+
+    # Dual-write to v2 normalized schema
+    try:
+        save_parlay_recommendations_v2(recommendations, today, source="manual")
+    except Exception as _v2_err:
+        print(f"  [v2] dual-write failed (non-fatal): {_v2_err}")
+
     print("\nTargeted refresh pipeline complete.")
 
 

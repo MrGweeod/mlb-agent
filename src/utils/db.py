@@ -1547,6 +1547,100 @@ def save_parlay_recommendation(recommendation: dict) -> int:
     return row_id
 
 
+def save_parlay_recommendations_v2(
+    recommendations: list[dict],
+    run_date: str,
+    source: str = "auto",
+) -> str:
+    """
+    Dual-write parlay recommendations to the normalized v2 schema.
+
+    Inserts one row into mlb_parlay_recommendations_v2 per recommendation
+    and one row into mlb_parlay_legs_v2 per leg.  The v2 tables must already
+    exist (run the SQL migration in Supabase first).
+
+    Args:
+        recommendations: List of rec dicts from generate_recommendations().
+                         Each has: legs, combined_odds, win_probability, edge_pct.
+        run_date: 'YYYY-MM-DD' date string for this recommendation set.
+        source: One of 'auto_9am', 'auto_12pm', 'auto_530pm', 'manual'.
+
+    Returns:
+        batch_id string (e.g. '2026-05-07_09:05:23').
+    """
+    from datetime import datetime as _dt
+    if not recommendations:
+        return ""
+
+    batch_id = f"{run_date}_{_dt.now().strftime('%H:%M:%S')}"
+    conn = get_conn()
+    cur = conn.cursor()
+
+    for rank, rec in enumerate(recommendations, start=1):
+        legs = rec.get("legs", [])
+        coverages = [l.get("coverage_pct") for l in legs if l.get("coverage_pct") is not None]
+        evs = [l.get("ev_per_unit") for l in legs if l.get("ev_per_unit") is not None]
+        avg_coverage = round(sum(coverages) / len(coverages), 3) if coverages else None
+        avg_ev = round(sum(evs) / len(evs), 4) if evs else None
+
+        cur.execute(
+            """
+            INSERT INTO mlb_parlay_recommendations_v2
+                (run_date, rank, total_odds, avg_coverage, avg_ev, num_legs,
+                 outcome, source, batch_id, edge_percent)
+            VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s)
+            RETURNING id
+            """,
+            (
+                run_date,
+                rank,
+                rec.get("combined_odds"),
+                avg_coverage,
+                avg_ev,
+                len(legs),
+                source,
+                batch_id,
+                rec.get("edge_pct"),
+            ),
+        )
+        parlay_id = cur.fetchone()["id"]
+
+        for leg in legs:
+            cur.execute(
+                """
+                INSERT INTO mlb_parlay_legs_v2
+                    (parlay_id, player_id, player_name, team, stat, line,
+                     direction, odds, composite_score, opponent_adjustment,
+                     coverage, ev, game_id, opposing_pitcher_id,
+                     opposing_pitcher_name, outcome)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending')
+                """,
+                (
+                    parlay_id,
+                    leg.get("player_id"),
+                    leg.get("player_name"),
+                    leg.get("team"),
+                    leg.get("stat"),
+                    leg.get("best_line") or leg.get("line"),
+                    leg.get("direction", "over"),
+                    leg.get("best_odds") or leg.get("odds"),
+                    leg.get("composite_score"),
+                    leg.get("opponent_adjustment"),
+                    leg.get("coverage_pct"),
+                    leg.get("ev_per_unit"),
+                    leg.get("game_pk"),
+                    leg.get("opposing_pitcher_id"),
+                    leg.get("opposing_pitcher_name"),
+                ),
+            )
+
+    conn.commit()
+    cur.close()
+    conn.close()
+    print(f"[save_v2] Saved {len(recommendations)} parlay(s) to v2 schema (batch: {batch_id})")
+    return batch_id
+
+
 def get_todays_recommendations() -> list[dict]:
     """
     Fetch all recommendations for today, ordered by rank ASC.

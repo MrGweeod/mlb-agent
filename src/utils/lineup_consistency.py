@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-import statsapi
+from src.apis.mlb_stats import get_batter_game_log
 
 
 def started_last_n_games(player_id: int, season: int, n: int = 10) -> Optional[float]:
@@ -21,23 +21,21 @@ def started_last_n_games(player_id: int, season: int, n: int = 10) -> Optional[f
 
     Returns None if game log is unavailable (caller should not filter that player).
     Returns 0.0 only when we have data and the player genuinely never has 3+ AB.
+
+    Uses get_batter_game_log() which returns splits in the format:
+        [{"stat": {"atBats": 4, "hits": 2, ...}, "date": "...", ...}, ...]
     """
     try:
-        logs = statsapi.player_stat_data(
-            player_id,
-            group="hitting",
-            type="gameLog",
-        )
-        games = logs.get("stats", [])
-        if not games:
+        splits = get_batter_game_log(player_id, season)
+        if not splits:
             print(f"[lineup_consistency] player {player_id}: no game log returned, skipping filter")
             return None
         # Most recent n games
-        recent = games[-n:]
+        recent = splits[-n:]
         if len(recent) < 3:
             print(f"[lineup_consistency] player {player_id}: only {len(recent)} games (<3), skipping filter")
             return None
-        qualified = sum(1 for g in recent if g.get("ab", 0) >= 3)
+        qualified = sum(1 for g in recent if g.get("stat", {}).get("atBats", 0) >= 3)
         score = round(qualified / len(recent), 3)
         print(f"[lineup_consistency] player {player_id}: {qualified}/{len(recent)} games with 3+ AB = {score:.3f}")
         return score
