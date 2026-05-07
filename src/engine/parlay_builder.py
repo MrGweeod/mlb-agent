@@ -274,6 +274,13 @@ def build_hybrid_parlays(
             if by_game.get(gk, 0) >= MAX_LEGS_PER_GAME:
                 continue
 
+            # DraftKings does not allow WALKS + STRIKEOUTS in the same parlay
+            leg_stat = leg.get("stat", "").lower()
+            if leg_stat == "walks" and any(l.get("stat", "").lower() == "strikeouts" for l in legs):
+                continue
+            if leg_stat == "strikeouts" and any(l.get("stat", "").lower() == "walks" for l in legs):
+                continue
+
             # ── Add leg ────────────────────────────────────────────────────────
             if not is_pitcher:
                 by_pid[pid] = True
