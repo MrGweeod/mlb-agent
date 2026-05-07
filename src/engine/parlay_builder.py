@@ -343,4 +343,20 @@ def build_hybrid_parlays(
         if len(diverse) >= top_n:
             break
 
+    # Correlation risk logging — no behavior change, for post-hoc analysis only
+    for i, parlay in enumerate(diverse, start=1):
+        game_ids = [leg.get("game_pk") or leg.get("team", "") for leg in parlay["legs"]]
+        unique_games = len(set(game_ids))
+        legs_same_game = len(game_ids) - unique_games
+        correlation_risk = legs_same_game / len(parlay["legs"]) if parlay["legs"] else 0
+        total_odds = int(parlay["parlay_odds"].lstrip("+")) if parlay.get("parlay_odds") else 0
+        print(
+            f"[parlay_correlation] rank={i} "
+            f"correlation_risk={correlation_risk:.3f} "
+            f"legs_same_game={legs_same_game} "
+            f"num_legs={len(parlay['legs'])} "
+            f"avg_coverage={parlay.get('avg_coverage', 0):.3f} "
+            f"total_odds={total_odds}"
+        )
+
     return diverse
