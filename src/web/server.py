@@ -457,6 +457,10 @@ async def handle_build_parlays(request: web.Request) -> web.Response:
         for rank, parlay in enumerate(top_5, start=1):
             parlay["rank"] = rank
 
+        from src.utils.sorting import sort_legs_by_game_time
+        for parlay in top_5:
+            parlay["legs"] = sort_legs_by_game_time(parlay.get("legs", []))
+
         generated_at = datetime.now(timezone.utc).isoformat()
 
         print(
