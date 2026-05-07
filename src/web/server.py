@@ -331,10 +331,11 @@ async def handle_build_parlays(request: web.Request) -> web.Response:
             )
             if cache_valid and not force_refresh:
                 age_min = (datetime.now() - cache_ts).total_seconds() / 60
-                print(f"[build_parlays] Returning cached parlays (age: {age_min:.1f} min)")
+                cached_parlays = _parlay_cache["parlays"] or []
+                print(f"[build_parlays] Returning cached parlays (age: {age_min:.1f} min, {len(cached_parlays)} total, serving top 5)")
                 return web.Response(
                     text=json.dumps({
-                        "parlays": _parlay_cache["parlays"],
+                        "parlays": cached_parlays[:5],
                         "generated_at": _parlay_cache["generated_at"],
                     }, default=str),
                     content_type="application/json",
@@ -452,33 +453,33 @@ async def handle_build_parlays(request: web.Request) -> web.Response:
             parlay["edge_pct"] = round(edge_pct, 1)
 
         parlays.sort(key=lambda p: p.get("edge_pct", 0), reverse=True)
-        top_5 = parlays[:5]
 
-        for rank, parlay in enumerate(top_5, start=1):
+        for rank, parlay in enumerate(parlays, start=1):
             parlay["rank"] = rank
 
         from src.utils.sorting import sort_legs_by_game_time
-        for parlay in top_5:
+        for parlay in parlays:
             parlay["legs"] = sort_legs_by_game_time(parlay.get("legs", []))
 
+        top_5 = parlays[:5]
         generated_at = datetime.now(timezone.utc).isoformat()
 
         print(
-            f"[build_parlays] Built {len(parlays)} parlays, returning top 5 "
+            f"[build_parlays] Built {len(parlays)} parlays, saving ALL {len(parlays)}, returning top 5 "
             f"(edges: {[p['edge_pct'] for p in top_5]})"
         )
 
-        # Cache the results
+        # Cache ALL parlays for outcome tracking; UI receives top 5 at response time
         with _parlay_cache["lock"]:
-            _parlay_cache["parlays"] = top_5
+            _parlay_cache["parlays"] = parlays
             _parlay_cache["generated_at"] = generated_at
             _parlay_cache["timestamp"] = datetime.now()
-        print(f"[build_parlays] Cached {len(top_5)} parlays (expires in {_CACHE_TTL_MINUTES} min)")
+        print(f"[build_parlays] Cached {len(parlays)} parlays (expires in {_CACHE_TTL_MINUTES} min)")
 
-        # Persist parlays to DB for outcome tracking
+        # Persist ALL parlays to DB for outcome tracking and ML training data
         from src.utils.db import save_parlay_recommendation
         run_time = datetime.now(timezone.utc)
-        for parlay in top_5:
+        for parlay in parlays:
             try:
                 save_parlay_recommendation({
                     "recommendation_date": date.today(),
