@@ -1,8 +1,8 @@
 # MLB Parlay Agent — Architecture Decisions
-**Last Updated:** May 6, 2026 (Post-Optimization)
+**Last Updated:** May 7, 2026 (Post-Infrastructure Upgrade)
 
 ## Document Purpose
-This document records the key architectural decisions made during the development of the MLB Parlay Agent, including the rationale, alternatives considered, and lessons learned. Updated with insights from production deployment and May 6 optimization work.
+This document records the key architectural decisions made during the development of the MLB Parlay Agent, including the rationale, alternatives considered, and lessons learned. Updated with insights from May 7's major infrastructure upgrade and yesterday's 4/5 parlay win.
 
 ---
 
@@ -10,12 +10,14 @@ This document records the key architectural decisions made during the developmen
 1. [Core Architecture](#core-architecture)
 2. [ML Model Design](#ml-model-design)
 3. [Data Pipeline](#data-pipeline)
-4. [API Usage Optimization](#api-usage-optimization)
-5. [Parlay Construction](#parlay-construction)
-6. [Outcome Resolution](#outcome-resolution)
-7. [Database Schema](#database-schema)
-8. [Deployment Strategy](#deployment-strategy)
-9. [Lessons Learned](#lessons-learned)
+4. [V2 Normalized Schema](#v2-normalized-schema)
+5. [API Usage Optimization](#api-usage-optimization)
+6. [Parlay Construction](#parlay-construction)
+7. [Outcome Resolution](#outcome-resolution)
+8. [Database Schema](#database-schema)
+9. [Deployment Strategy](#deployment-strategy)
+10. [Validation & Filtering](#validation--filtering)
+11. [Lessons Learned](#lessons-learned)
 
 ---
 
@@ -44,7 +46,7 @@ This document records the key architectural decisions made during the developmen
 - ✅ Fresh data 3x/day, automatic lineup checking
 - ❌ Higher API usage (mitigated by targeted fetching)
 
-**Status:** ✅ Implemented and tested May 6
+**Status:** ✅ Working perfectly, validated in production
 
 ---
 
@@ -120,7 +122,7 @@ This document records the key architectural decisions made during the developmen
 - Captures market inefficiency (over/under imbalance)
 - High predictive power (77% feature importance)
 
-**Problem Discovered (May 6):**
+**Problem Discovered:**
 - Direction overfit: Model relies too heavily on direction
 - Low predictions: 50.5% average (conservative)
 
@@ -149,7 +151,7 @@ This document records the key architectural decisions made during the developmen
 - ✅ Fast lookups, reproducible, audit trail
 - ❌ Storage overhead (minimal ~4 bytes/leg)
 
-**Status:** ✅ Critical for debugging May 6 issues
+**Status:** ✅ Critical for debugging, proven valuable
 
 ---
 
@@ -173,7 +175,7 @@ This document records the key architectural decisions made during the developmen
 - ✅ Flexibility, debuggability, data persistence
 - ❌ Slightly slower (extra database round-trip)
 
-**Status:** ✅ Proven valuable during May 6 optimization
+**Status:** ✅ Proven valuable, enables manual regeneration
 
 ---
 
@@ -187,20 +189,21 @@ This document records the key architectural decisions made during the developmen
 
 **Evolution:**
 - **April Design:** Check `batting_order` field (1-9 = starter)
-- **April-May 5:** Broken (field doesn't exist reliably)
-- **May 6 Fix:** Check `ab >= 3` (at-bats proxy for starter)
+- **April-May 6:** Broken (field doesn't exist reliably)
+- **May 7 Fix:** Check `ab >= 3` via correct MLB-StatsAPI path
 
-**Implementation Challenges (May 6):**
+**Implementation Challenges:**
 - Original field (`batting_order`) unreliable
-- Switched to `ab >= 3` as starter proxy
-- Threshold: 0.70 (7+ games out of 10)
+- Switched to `ab >= 3` as starter proxy (at-bats field)
+- Had to navigate nested MLB-StatsAPI structure
 
 **Lessons Learned:**
-- ✅ Filter concept works (reduces voids)
-- ❌ MLB-StatsAPI field names require experimentation
-- 🔄 Conservative error handling prevents catastrophic filtering
+- ✅ Filter concept works (removes bench players)
+- ❌ MLB-StatsAPI documentation incomplete, requires experimentation
+- ✅ Conservative error handling prevents catastrophic filtering
+- 🔄 Circuit breaker at 90% critical for safety
 
-**Status:** ✅ Fixed and operational
+**Status:** ✅ Fixed May 7, working correctly
 
 ---
 
@@ -217,7 +220,7 @@ This document records the key architectural decisions made during the developmen
 - Late scratches happen before games
 - User requested full day coverage
 
-**Optimization Applied (May 6):**
+**Optimization Applied:**
 - 9 AM: Fetch full slate (wide net)
 - 12 PM: Fetch targeted (eligible players only)
 - 5:30 PM: Fetch targeted (upcoming games only)
@@ -226,7 +229,95 @@ This document records the key architectural decisions made during the developmen
 - ✅ Fresh odds 3x/day, automatic lineup checks
 - ✅ Still under API quota (40 objects/day vs 100K/month limit)
 
-**Status:** ✅ Implemented May 6
+**Status:** ✅ Working perfectly
+
+---
+
+## V2 Normalized Schema
+
+### **Decision: Normalized Schema (Separate Header + Detail Tables)**
+**Chosen:** May 7, 2026
+
+**Problem:**
+- Old schema: JSON legs in single table
+- Couldn't query: "Show me all Cody Bellinger hit under legs"
+- Couldn't extract: Parlay-level features for ML model
+- Couldn't analyze: Per-leg vs per-parlay performance
+
+**Solution:**
+```sql
+-- Parlay header (one row per parlay)
+mlb_parlay_recommendations_v2 (
+    id, run_date, rank, total_odds, avg_coverage, 
+    num_legs, outcome, source, batch_id, created_at
+)
+
+-- Parlay legs (one row per leg)
+mlb_parlay_legs_v2 (
+    id, parlay_id, player_id, player_name, stat, 
+    line, direction, odds, composite_score, coverage, 
+    outcome, result_value, created_at
+)
+```
+
+**Why Normalized:**
+- ✅ Can query individual legs: `SELECT * FROM mlb_parlay_legs_v2 WHERE player_name = 'Bellinger'`
+- ✅ Can analyze player/stat hit rates
+- ✅ Can extract parlay-level features (correlation, diversity)
+- ✅ Efficient resolution: Update one leg row vs parsing JSON
+- ✅ Proper relational model
+
+**Alternatives Considered:**
+
+**Option A: Modify existing table** (add columns to old schema)
+- ❌ Still has JSON legs (can't query individual legs)
+- ❌ No per-leg outcome tracking
+
+**Option B: New table, same JSON structure** (clean slate but same design)
+- ❌ Still can't answer leg-level questions
+- ❌ No per-leg analytics
+
+**Option C: Normalized schema** ✅ **CHOSEN**
+- ✅ Per-leg tracking
+- ✅ SQL aggregations
+- ✅ Parlay-level features
+- ❌ More complex queries (JOINs required)
+- ❌ Bigger refactor (worth it)
+
+**Migration Strategy:**
+- Dual-write system (save to both old + new)
+- Backfill 28 historical parlays
+- Keep old table for historical reference
+- No data loss, rollback possible
+
+**Status:** ✅ Deployed May 7, 39 parlays + 156 legs tracked
+
+---
+
+### **Decision: Dual-Write System**
+**Chosen:** Save parlays to BOTH old and new schemas
+
+**Why:**
+- Backward compatibility (old queries still work)
+- Safety net (can rollback if issues)
+- Gradual migration (validate new schema first)
+
+**Implementation:**
+```python
+# Save to old schema (existing logic)
+save_recommendations(parlays, run_date)
+
+# Save to new v2 schema (new logic)
+save_recommendations_v2(parlays, run_date, source='auto_9am')
+```
+
+**Trade-offs:**
+- ✅ Zero downtime, zero risk
+- ✅ Old system continues working
+- ❌ Double writes (minimal overhead)
+- ❌ Schema divergence over time (acceptable)
+
+**Status:** ✅ Working perfectly, no issues
 
 ---
 
@@ -241,7 +332,7 @@ This document records the key architectural decisions made during the developmen
 - Fetching 15 games = 15 objects (regardless of props parsed)
 - Filtering locally saves processing time
 
-**Discovery (May 6):**
+**Discovery:**
 - Original concern: "3 full fetches = 4500 objects/day = 135K/month (35% over)"
 - Actual reality: "3 fetches = 40 objects/day = 1.2K/month (99% under!)"
 - Key insight: SGO embeds props in game-event objects
@@ -266,7 +357,7 @@ def fetch_props_for_players(date_str, player_ids=None):
 - ✅ Fresh odds 3x/day
 - ❌ Can't reduce below ~15 objects per fetch
 
-**Status:** ✅ Implemented and validated May 6
+**Status:** ✅ Working perfectly, API usage optimized
 
 ---
 
@@ -279,7 +370,7 @@ def fetch_props_for_players(date_str, player_ids=None):
 - `statsapi.boxscore_data()` provides confirmed lineups
 - Integrates naturally into targeted pipeline runs
 
-**Implementation (May 6):**
+**Implementation:**
 ```python
 boxscore = statsapi.boxscore_data(game_pk)
 starters = set(boxscore['away']['battingOrder'] + boxscore['home']['battingOrder'])
@@ -303,45 +394,14 @@ for leg in legs:
 - ✅ Free API (MLB-StatsAPI)
 - ❌ Requires game to be "live" (lineups posted)
 
-**Status:** ✅ Implemented May 6
-
----
-
-### **Decision: Game Start Filtering**
-**Chosen:** Exclude games starting within next 15 minutes
-
-**Why:**
-- Prevents recommendations for imminent games
-- Gives user time to review and place bets
-- Integrates with targeted pipeline (12 PM / 5:30 PM)
-
-**Implementation (May 6):**
-```python
-cutoff = now_et + timedelta(minutes=15)
-upcoming = [leg for leg in legs if leg['game_start_time'] > cutoff]
-```
-
-**Bug Fixed (May 6):**
-- Original: `cutoff = now_et - buffer_minutes` (backwards!)
-- Fixed: `cutoff = now_et + buffer_minutes`
-
-**Alternatives Considered:**
-- No buffer: Risk recommending games about to start
-- Longer buffer (30-60 min): Removes too many legs
-- Per-user buffer: Complex, unnecessary
-
-**Trade-offs:**
-- ✅ Gives user time to act
-- ❌ Reduces leg pool slightly (minimal impact)
-
-**Status:** ✅ Fixed and working
+**Status:** ✅ Working reliably
 
 ---
 
 ## Parlay Construction
 
 ### **Decision: Greedy Construction with Constraints**
-**Chosen:** Build 5 parlays sequentially, apply diversity rules
+**Chosen:** Build parlays sequentially, apply diversity rules
 
 **Why:**
 - Simple to implement and reason about
@@ -353,6 +413,7 @@ upcoming = [leg for leg in legs if leg['game_start_time'] > cutoff]
 2. Max 2 legs per player (prevents over-exposure)
 3. Max 1 leg per prop type per parlay (diversifies prop types)
 4. Odds range: +600 to +1500 (balances risk/reward)
+5. **NEW (May 7):** WALKS + STRIKEOUTS conflict check (DraftKings rule)
 
 **Alternatives Considered:**
 - Optimization (linear programming): Overkill, harder to debug
@@ -363,7 +424,7 @@ upcoming = [leg for leg in legs if leg['game_start_time'] > cutoff]
 - ✅ Simple, consistent, explainable
 - ❌ May miss optimal combinations (good enough > perfect)
 
-**Status:** ✅ Producing valid parlays, no issues
+**Status:** ✅ Producing valid parlays, DraftKings-compliant
 
 ---
 
@@ -378,12 +439,43 @@ upcoming = [leg for leg in legs if leg['game_start_time'] > cutoff]
 **Alternatives Considered:**
 - Expected value (EV): Requires implied odds calculation, more complex
 - Kelly criterion: Requires bankroll management, out of scope
+- **NEW (being tested):** Correlation-adjusted score
 
 **Trade-offs:**
 - ✅ Simple, interpretable
-- ❌ Doesn't account for odds value (future enhancement)
+- ❌ Doesn't account for correlation risk (testing hypothesis)
 
-**Status:** ✅ Working as designed
+**Status:** ✅ Working, pending correlation validation
+
+---
+
+### **Decision: WALKS + STRIKEOUTS Conflict Check**
+**Chosen:** May 7, 2026
+
+**Problem:** DraftKings doesn't allow WALKS + STRIKEOUTS in same parlay
+
+**Solution:** Add validation during parlay construction
+
+**Implementation:**
+```python
+# In Branch-and-Bound loop:
+if leg_stat == "walks" and any(l["stat"] == "strikeouts" for l in legs):
+    continue  # Skip invalid combination
+if leg_stat == "strikeouts" and any(l["stat"] == "walks" for l in legs):
+    continue  # Skip invalid combination
+```
+
+**Why Early Pruning (Not Post-Filtering):**
+- More efficient (prunes invalid branches early)
+- Consistent with other constraints (same-game, same-player)
+- No logging needed (silent filtering like other constraints)
+
+**Trade-offs:**
+- ✅ All parlays DraftKings-valid
+- ✅ Early pruning = faster construction
+- ❌ Slightly reduces candidate pool (acceptable)
+
+**Status:** ✅ Deployed May 7, active
 
 ---
 
@@ -409,7 +501,7 @@ upcoming = [leg for leg in legs if leg['game_start_time'] > cutoff]
 - ❌ Assumed standard logic, didn't validate thoroughly
 - 🔄 Backfilled historical data to correct
 
-**Status:** ✅ Fixed, tested, validated
+**Status:** ✅ Fixed, tested, validated (0% void rate)
 
 ---
 
@@ -431,28 +523,6 @@ upcoming = [leg for leg in legs if leg['game_start_time'] > cutoff]
 - ❌ Two database passes (negligible overhead)
 
 **Status:** ✅ Proven robust during backfill
-
----
-
-### **Decision: MLB-StatsAPI for Outcomes**
-**Chosen:** Use `statsapi` Python library for game results
-
-**Why:**
-- Free, unlimited, official MLB data
-- Python library simplifies integration
-- Reliable (backed by MLB)
-
-**Challenges Encountered (May 6):**
-- Documentation incomplete (parameter combinations unclear)
-- Error messages cryptic (`season` param issue in lineup filter)
-- Field names inconsistent (`batting_order` unreliable)
-
-**Lessons Learned:**
-- ✅ Free and reliable for production use
-- ❌ Requires experimentation, not just documentation
-- 🔄 Conservative error handling critical
-
-**Status:** ✅ Working reliably post-fix
 
 ---
 
@@ -479,25 +549,6 @@ upcoming = [leg for leg in legs if leg['game_start_time'] > cutoff]
 
 ---
 
-### **Decision: Denormalized Legs Table**
-**Chosen:** `mlb_scored_legs` stores all leg data (no joins for display)
-
-**Why:**
-- Fast queries (no joins for Legs tab)
-- Historical props preserved (even if source API changes)
-- ML scores stored with legs (reproducibility)
-
-**Alternatives Considered:**
-- Normalized: Separate players, teams tables (more complex, slower queries)
-
-**Trade-offs:**
-- ✅ Fast reads, simple queries, historical integrity
-- ❌ Data duplication (acceptable for read-heavy workload)
-
-**Status:** ✅ Performs well, 2500+ legs per table
-
----
-
 ### **Decision: TEXT Column for run_date**
 **Chosen (Inherited):** `run_date` stored as TEXT (YYYY-MM-DD format)
 
@@ -516,32 +567,6 @@ upcoming = [leg for leg in legs if leg['game_start_time'] > cutoff]
 - 🔄 Future: Migrate to DATE column (non-critical)
 
 **Status:** ✅ Fixed with ::date casts, functional
-
----
-
-### **Decision: No New Tables for Lineup Status**
-**Chosen:** Add columns to existing `mlb_scored_legs` table
-
-**Why:**
-- Simple schema (no new tables)
-- Lineup status tied to specific leg instance
-- Query performance sufficient
-
-**Columns NOT Added (May 6):**
-- Initially planned: `lineup_status`, `game_status` columns
-- Actual: Computed on-the-fly in pipeline, not persisted
-- Reason: Status changes during day, database updates complex
-
-**Alternative (Chosen):**
-- Compute status in memory during pipeline runs
-- Filter before parlay construction
-- Don't persist transient state
-
-**Trade-offs:**
-- ✅ Simple, no schema changes needed
-- ❌ Can't query historical lineup statuses (acceptable)
-
-**Status:** ✅ Working without database changes
 
 ---
 
@@ -600,20 +625,74 @@ async def _pipeline_scheduler():
 
 ---
 
-### **Decision: Environment Variables for Secrets**
-**Chosen:** Railway environment variables + python-dotenv
+## Validation & Filtering
+
+### **Decision: Chronological Leg Sorting**
+**Chosen:** May 7, 2026
+
+**Problem:** Legs displayed in random construction order
+
+**Solution:** Sort by game start time (earliest → latest)
 
 **Why:**
-- Security: No secrets in code
-- Flexibility: Different values per environment (dev/prod)
+- Better user experience (track games chronologically)
+- Consistent with Legs tab sorting
+- Easier mental model (matches actual game order)
 
-**Variables Used:**
-- `SUPABASE_URL`, `SUPABASE_KEY` (database)
-- `ODDS_API_KEY` (morning props fetch)
-- `SPORTSGAMEODDS_API_KEY` (all SGO fetches)
-- `PORT` (Railway assigned)
+**Implementation:**
+```python
+def sort_legs_by_game_time(legs):
+    """Sort legs by game start time."""
+    # Uses commence_time field from props
+    # Handles missing times (sorts to end)
+    # Works across old + new schemas
+```
 
-**Status:** ✅ No issues
+**Applied in:**
+- Database saves (old + v2)
+- Web UI endpoint (before display)
+
+**Field Used:**
+- `commence_time` from SGO props data (not `game_start_time`)
+- Had to investigate actual field name (API exploration)
+
+**Lessons Learned:**
+- ✅ Field naming varies by API (test before assuming)
+- ✅ Sorting improves UX significantly
+- 🔄 Applied in 3 places for consistency
+
+**Status:** ✅ Fixed May 7, working perfectly
+
+---
+
+### **Decision: Correlation Risk Logging**
+**Chosen:** May 7, 2026
+
+**Problem:** No way to track correlation hypothesis
+
+**Solution:** Log correlation metrics for every parlay
+
+**Why:**
+- Enables post-hoc analysis (after 50+ parlays)
+- Grep-friendly format for extraction
+- No behavior change (observation only)
+
+**Implementation:**
+```python
+[parlay_correlation] rank=1 correlation_risk=0.250 legs_same_game=1 num_legs=4 avg_coverage=76.200
+```
+
+**What NOT to Do:**
+- ❌ Don't add correlation penalty without validation
+- ❌ Don't act on 5 data points (wait for 50+)
+- ✅ Log now, validate later
+
+**Lessons Learned:**
+- ✅ Logging enables future validation without behavior change
+- ✅ Observational data is valuable
+- 🔄 Wait for statistical significance before acting
+
+**Status:** ✅ Active, collecting data
 
 ---
 
@@ -621,18 +700,19 @@ async def _pipeline_scheduler():
 
 ### **1. API Documentation is Incomplete — Experiment!**
 **What Happened:**
-- MLB-StatsAPI docs didn't clarify field availability
+- MLB-StatsAPI docs didn't clarify field structure
 - `batting_order` field assumed to exist (didn't reliably)
-- `season` + `type='gameLog'` parameter combo caused errors
+- `commence_time` vs `game_start_time` naming confusion
 
 **Lesson:**
 - ✅ Budget time for API experimentation
-- ✅ Add conservative error handling (return None vs crash)
+- ✅ Add conservative error handling
 - ✅ Add circuit breakers for critical filters
 - 🔄 Document API quirks in code comments
 
 **Applied:**
-- Switched `batting_order` → `ab >= 3` check
+- Switched `batting_order` → `ab >= 3` check via correct path
+- Discovered `commence_time` is actual field name
 - Added error handling in lineup consistency filter
 - Circuit breaker disables filter if >90% removed
 
@@ -674,38 +754,45 @@ async def _pipeline_scheduler():
 
 ---
 
-### **4. Conservative Defaults Prevent Catastrophic Failures**
-**What Happened:**
-- Lineup filter API errors → include player conservatively
-- Circuit breaker: Disable filter if >90% filtered
-- Prevented 100% filtering from blocking production
+### **4. Small Sample Sizes Lie — Wait for Statistical Significance**
+**What Happened (May 6-7):**
+- Observed: 4 winners had low correlation, 1 loser had high correlation
+- Excitement: "Correlation predicts losses! Add penalty now!"
+- Reality: n=5 is not statistically significant
 
 **Lesson:**
-- ✅ "Include when uncertain" better than "exclude when uncertain"
-- ✅ Circuit breakers catch systemic issues
-- ✅ Logging helps diagnose (shows individual player results)
+- ✅ Don't act on patterns from <50 samples
+- ✅ Form hypothesis, collect data, test statistically
+- ✅ Observational logging enables future validation
+- ❌ Curve-fitting to noise is dangerous
 
 **Applied:**
-- Error handling includes player (doesn't filter)
-- Circuit breaker at 90% threshold
-- Detailed logging for debugging
+- Added correlation logging (observation only)
+- No behavior changes until 50-100 parlays resolved
+- Will run t-test before implementing penalty
+- User kept system disciplined (thank you!)
+
+**Status:** 🧪 Hypothesis formed, data collection in progress
 
 ---
 
-### **5. Separation of Concerns Enables Debugging**
+### **5. Normalized Schema Enables Analytics**
 **What Happened:**
-- Two-stage pipeline (fetch → build) allowed regeneration without refetching
-- Separate resolution (legs → parlays) allowed independent testing
+- Old schema: JSON legs, no per-leg queries
+- Couldn't answer: "Does Cody Bellinger hit under win?"
+- Couldn't extract: Parlay-level features
 
 **Lesson:**
-- ✅ Modularity pays off during debugging
-- ✅ Database as source of truth enables auditing
-- ✅ Idempotent operations (safe to re-run) are valuable
+- ✅ Normalized data unlocks SQL analytics
+- ✅ Per-leg tracking enables player/stat analysis
+- ✅ Dual-write enables safe migration
+- 🔄 Worth the upfront refactor cost
 
 **Applied:**
-- Maintained two-stage pipeline structure
-- Kept resolution phases separate
-- All operations idempotent (can re-run safely)
+- Deployed v2 normalized schema May 7
+- 39 parlays + 156 legs tracked
+- Feature extraction working
+- Analytics ready for ML model training
 
 ---
 
@@ -727,101 +814,111 @@ async def _pipeline_scheduler():
 
 ---
 
-### **7. Optimization Reveals Hidden Efficiency**
-**What Happened:**
-- Designed "targeted fetching" to reduce API usage
-- Discovered SGO already optimized (charges per game, not prop)
-- "Optimization" validated API was efficient all along
+### **7. Silent Validation (DraftKings Rules)**
+**What Happened (May 7):**
+- DraftKings doesn't allow WALKS + STRIKEOUTS
+- System was generating invalid parlays
+- Added validation during construction (not post-filtering)
 
 **Lesson:**
-- ✅ Optimization exercises reveal system behavior
-- ✅ Sometimes "optimizing" means discovering it's already optimal
-- ✅ Validation is as valuable as optimization
+- ✅ Early pruning is more efficient
+- ✅ Silent filtering consistent with other constraints
+- ✅ Validate against real-world rules early
+- 🔄 Test with actual sportsbook before assuming rules
 
 **Applied:**
-- Documented SGO pricing model in code
-- Moved forward with 3 runs/day confidently
-- Removed API usage as a concern
+- WALKS + STRIKEOUTS check in Branch-and-Bound loop
+- Early pruning (skip invalid branches)
+- No logging (consistent with other constraints)
+- All parlays now DraftKings-valid
 
 ---
 
-### **8. Type Safety Prevents Silent Bugs**
+### **8. Chronological Sorting Improves UX**
 **What Happened:**
-- `run_date` stored as TEXT, queries compared to TIMESTAMP
-- SQL failed silently → HTTP 500 errors
+- Legs displayed in random order (construction order)
+- User requested chronological sorting
+- Discovered field name was `commence_time` not `game_start_time`
 
 **Lesson:**
-- ✅ Use correct types from schema design (DATE not TEXT)
-- ✅ Type casting (`::date`) works but adds overhead
-- 🔄 Consider schema migration tools (Alembic) for future
+- ✅ Small UX improvements matter
+- ✅ Test actual field names (don't assume)
+- ✅ Apply consistently across system
+- 🔄 User feedback drives valuable improvements
 
 **Applied:**
-- Fixed with ::date casts in all queries
-- Documented issue for future schema review
-- Working but not ideal (future migration candidate)
+- Sorted legs by `commence_time` (earliest → latest)
+- Applied in database saves + web UI
+- Consistent with Legs tab
+- Better tracking experience
 
 ---
 
 ## Future Architectural Improvements
 
 ### **SHORT TERM (This Month)**
-1. **Add Unit Tests**
-   - Void logic (all cases)
-   - Lineup filter (error handling)
-   - Parlay construction (constraints)
+1. **Parlay-Level ML Model**
+   - Train when 50-100 parlays resolved
+   - Features: correlation, coverage distribution, diversity
+   - Target: Predict "Will this parlay win?"
+   - Validate vs baseline (bet all >75% avg coverage)
 
-2. **Monitoring & Alerts**
+2. **Correlation Validation**
+   - Extract logs after 50+ parlays
+   - Run t-test: zero vs high correlation win rates
+   - If p < 0.05, implement correlation penalty
+   - Document findings
+
+3. **Dashboard Enhancement (5th Tab)**
+   - Parlay History with expandable legs
+   - Click to expand/collapse leg details
+   - Per-leg outcomes visible
+   - Filter by date, outcome, correlation risk
+
+### **MEDIUM TERM (Next Quarter)**
+4. **ML Model V3 (Leg-Level)**
+   - Balance direction sampling
+   - Add rolling window features
+   - Target: 52-55% avg prediction (up from 50.5%)
+   - Retrain when 500+ more samples
+
+5. **Monitoring & Alerts**
    - Daily health check email
    - SGO quota tracking
    - Model drift detection
    - Data quality alerts
 
-### **MEDIUM TERM (Next Quarter)**
-3. **ML Model V3**
-   - Balance direction sampling
-   - Add rolling window features
-   - Target: 52-55% avg prediction
-
-4. **Dashboard Enhancements**
-   - Visualizations (charts, trends)
-   - Parlay diversity analysis
-   - Real-time calibration
-
-5. **Schema Migration**
+6. **Schema Migration**
    - Change `run_date` from TEXT to DATE
    - Add indexes for common queries
    - Consider partitioning by date
 
 ### **LONG TERM (Future)**
-6. **Multi-Sport Expansion**
+7. **Multi-Sport Expansion**
    - Generalize architecture for NBA, NFL, etc.
    - Shared pipeline, sport-specific resolvers
 
-7. **Optimization Engine**
+8. **Optimization Engine**
    - Linear programming for parlay construction
    - EV calculation and Kelly sizing
 
-8. **Manual Button Improvements**
-   - "Refresh" fetches fresh odds on-demand
-   - "Regenerate Now" triggers mini-pipeline
-   - User-configurable buffer times
+9. **Advanced Correlation Detection**
+   - Same-game correlation penalties
+   - Pitcher dominance thesis (K over + opposing batter hits under)
+   - Weather-based correlations
 
 ---
 
 ## Decision Review Schedule
 
-**Weekly:** Review SGO usage, pipeline success rate
+**Daily:** Monitor pipeline runs, system health
+**Weekly:** Review correlation logging, SGO usage
 **Monthly:** Review performance metrics, adjust thresholds
 **Quarterly:** Evaluate ML model, consider retraining
 **Annually:** Reassess architecture for scale/features
 
 ---
 
-**Last Review:** May 6, 2026  
-**Next Review:** June 6, 2026 (after 1 month of 3-run production)  
-**Reviewer:** Development Team
-
-
-**Last Review:** May 6, 2026  
-**Next Review:** June 6, 2026 (after 1 month production)  
-**Reviewer:** Development Team
+**Last Review:** May 7, 2026  
+**Next Review:** May 14, 2026 (after 7 days of v2 schema validation)  
+**Major Milestone:** V2 normalized schema deployed, correlation hypothesis formed
