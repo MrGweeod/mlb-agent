@@ -546,7 +546,8 @@ async def handle_recommendations(request: web.Request) -> web.Response:
                 except Exception:
                     upcoming.append(leg)
             if len(upcoming) >= 4:
-                rec["legs"] = upcoming
+                from src.utils.sorting import sort_legs_by_game_time
+                rec["legs"] = sort_legs_by_game_time(upcoming)
                 filtered.append(rec)
 
         total_in = len(recommendations)

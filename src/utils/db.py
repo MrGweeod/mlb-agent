@@ -1572,12 +1572,14 @@ def save_parlay_recommendations_v2(
     if not recommendations:
         return ""
 
+    from src.utils.sorting import sort_legs_by_game_time
+
     batch_id = f"{run_date}_{_dt.now().strftime('%H:%M:%S')}"
     conn = get_conn()
     cur = conn.cursor()
 
     for rank, rec in enumerate(recommendations, start=1):
-        legs = rec.get("legs", [])
+        legs = sort_legs_by_game_time(rec.get("legs", []))
         coverages = [l.get("coverage_pct") for l in legs if l.get("coverage_pct") is not None]
         evs = [l.get("ev_per_unit") for l in legs if l.get("ev_per_unit") is not None]
         avg_coverage = round(sum(coverages) / len(coverages), 3) if coverages else None

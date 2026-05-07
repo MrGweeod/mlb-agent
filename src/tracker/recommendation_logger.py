@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import date
 from src.utils.db import get_conn, now_utc
+from src.utils.sorting import sort_legs_by_game_time
 
 
 def log_recommendations(parlays: list[dict]) -> list[int]:
@@ -60,7 +61,7 @@ def log_recommendations(parlays: list[dict]) -> list[int]:
         rec_id = cur.fetchone()["id"]
         rec_ids.append(rec_id)
 
-        for leg in parlay.get("legs", []):
+        for leg in sort_legs_by_game_time(parlay.get("legs", [])):
             cur.execute(
                 """
                 INSERT INTO mlb_recommendation_legs
