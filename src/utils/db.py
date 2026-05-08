@@ -1980,18 +1980,21 @@ def get_parlay_dashboard_data() -> dict:
     cur.execute("""
         SELECT
             id,
-            recommendation_date                AS recommendation_date,
+            recommendation_date::text          AS recommendation_date,
             rank,
-            combined_odds                      AS combined_odds,
+            combined_odds,
             ROUND(win_probability::numeric, 1) AS win_probability,
             ROUND(edge_pct::numeric, 1)        AS edge_pct,
-            bet_status                         AS bet_status,
-            resolved_at,
+            bet_status,
+            resolved_at::text                  AS resolved_at,
             'v1'                               AS schema_version
         FROM mlb_parlay_recommendations
+        ORDER BY recommendation_date DESC, rank ASC
+        LIMIT 20
+    """)
+    v1_recs = [dict(r) for r in cur.fetchall()]
 
-        UNION ALL
-
+    cur.execute("""
         SELECT
             id,
             run_date::text                     AS recommendation_date,
@@ -2000,14 +2003,19 @@ def get_parlay_dashboard_data() -> dict:
             ROUND(avg_coverage::numeric, 1)    AS win_probability,
             0.0                                AS edge_pct,
             outcome                            AS bet_status,
-            NULL                               AS resolved_at,
+            NULL::text                         AS resolved_at,
             'v2'                               AS schema_version
         FROM mlb_parlay_recommendations_v2
-
-        ORDER BY recommendation_date DESC, rank ASC
+        ORDER BY run_date DESC, rank ASC
         LIMIT 20
     """)
-    recent_recs = [dict(r) for r in cur.fetchall()]
+    v2_recs = [dict(r) for r in cur.fetchall()]
+
+    recent_recs = sorted(
+        v1_recs + v2_recs,
+        key=lambda x: (x.get("recommendation_date") or "", -(x.get("rank") or 0)),
+        reverse=True,
+    )[:20]
 
     # ── Add v2 pending count to summary ──────────────────────────────────────
     cur.execute("""
