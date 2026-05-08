@@ -414,17 +414,6 @@ def generate_recommendations(
         List of dicts: [{legs, combined_odds, win_probability, edge_pct}]
         ranked by edge_pct descending.
     """
-    # Filter players already used in today's parlays (cross-run diversity)
-    if run_date:
-        from src.engine.parlay_builder import filter_already_used_players
-        qualifying_legs = filter_already_used_players(qualifying_legs, run_date)
-        if len(qualifying_legs) < 20:
-            print(
-                f"[generate_recommendations] Only {len(qualifying_legs)} legs after "
-                "player diversity filter — not enough to build parlays"
-            )
-            return []
-
     # Get up to 3× candidates to give the diversity filter room to work
     candidates = build_hybrid_parlays(qualifying_legs, top_n=15)
     if not candidates:

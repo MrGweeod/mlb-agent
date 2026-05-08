@@ -381,17 +381,33 @@ def build_hybrid_parlays(
         )
         return []
 
-    # Diversity filter: keep best, then only add parlays sharing ≤3 legs with all kept
+    # Within-batch player diversity: no batter appears in more than one parlay.
+    # Pitchers are exempt (multiple pitcher props in same batch is fine).
+    # Quality ordering is preserved — unique[] is already sorted by avg_composite DESC.
     diverse = [unique[0]]
+    used_players_batch: set = set()
+    for leg in unique[0]["legs"]:
+        pid = leg.get("player_id") or leg.get("player_name", "")
+        if leg.get("position", "") not in _PITCHER_POSITIONS:
+            used_players_batch.add(pid)
+
     for candidate in unique[1:]:
-        candidate_ids = frozenset(l["odd_id"] for l in candidate["legs"])
-        if all(
-            len(candidate_ids & frozenset(l["odd_id"] for l in sel["legs"])) <= 3
-            for sel in diverse
-        ):
-            diverse.append(candidate)
+        candidate_batter_ids = {
+            leg.get("player_id") or leg.get("player_name", "")
+            for leg in candidate["legs"]
+            if leg.get("position", "") not in _PITCHER_POSITIONS
+        }
+        if candidate_batter_ids & used_players_batch:
+            continue  # skip — player already in a selected parlay this batch
+        diverse.append(candidate)
+        used_players_batch |= candidate_batter_ids
         if len(diverse) >= top_n:
             break
+
+    print(
+        f"  [parlay_builder] Built {len(diverse)} parlays with within-batch diversity "
+        f"({len(used_players_batch)} unique batters used)"
+    )
 
     # Correlation risk logging — no behavior change, for post-hoc analysis only
     for i, parlay in enumerate(diverse, start=1):
