@@ -50,6 +50,7 @@ from src.utils.db import (
     get_training_dashboard_data,
     get_parlay_dashboard_data,
     get_ml_health_data,
+    get_recommendation_history,
     update_recommendation_analysis,
 )
 from src.engine.claude_agent import analyze_parlays
@@ -575,6 +576,37 @@ async def handle_recommendations(request: web.Request) -> web.Response:
         )
 
 
+async def handle_recommendation_history(request: web.Request) -> web.Response:
+    """
+    Return all parlay recommendation batches for a given date.
+
+    URL param: date (YYYY-MM-DD). Defaults to today.
+
+    Returns an array of batches (newest first), each with full parlay and leg
+    details — used by the Picks tab to display all daily recommendations, not
+    just the latest batch.
+    """
+    if not _check_auth(request):
+        return web.Response(
+            text=json.dumps({"error": "Unauthorized"}),
+            content_type="application/json",
+            status=401,
+        )
+    date_param = request.rel_url.query.get("date", str(date.today()))
+    try:
+        history = get_recommendation_history(date_param)
+        return web.Response(
+            text=json.dumps(history, default=str),
+            content_type="application/json",
+        )
+    except Exception as exc:
+        return web.Response(
+            text=json.dumps({"error": str(exc)}),
+            content_type="application/json",
+            status=500,
+        )
+
+
 async def handle_regenerate_recommendations(request: web.Request) -> web.Response:
     """
     Re-run recommendation generation using today's already-scored legs.
@@ -905,6 +937,7 @@ def create_app() -> web.Application:
     app.router.add_post("/api/analyze", handle_analyze)
     app.router.add_get("/api/build-parlays", handle_build_parlays)
     app.router.add_get("/api/recommendations", handle_recommendations)
+    app.router.add_get("/api/recommendations/history", handle_recommendation_history)
     app.router.add_post("/api/recommendations/regenerate", handle_regenerate_recommendations)
     app.router.add_post("/api/analyze-recommendation", handle_analyze_recommendation)
     app.router.add_post("/api/refresh", handle_refresh)

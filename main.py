@@ -393,6 +393,7 @@ def _attach_trend_signals(legs: list[dict], season: int) -> None:
 def generate_recommendations(
     qualifying_legs: list[dict],
     max_recommendations: int = 5,
+    run_date: str | None = None,
 ) -> list[dict]:
     """
     Generate up to max_recommendations ranked parlays for daily storage.
@@ -405,11 +406,25 @@ def generate_recommendations(
         qualifying_legs:    All scored legs from the pipeline (already have
                             composite_score set from Step 8).
         max_recommendations: Max parlays to return (default 5).
+        run_date:           YYYY-MM-DD date string. When provided, filters out
+                            players already used in today's parlays so each
+                            player appears in at most 1 parlay per day.
 
     Returns:
         List of dicts: [{legs, combined_odds, win_probability, edge_pct}]
         ranked by edge_pct descending.
     """
+    # Filter players already used in today's parlays (cross-run diversity)
+    if run_date:
+        from src.engine.parlay_builder import filter_already_used_players
+        qualifying_legs = filter_already_used_players(qualifying_legs, run_date)
+        if len(qualifying_legs) < 20:
+            print(
+                f"[generate_recommendations] Only {len(qualifying_legs)} legs after "
+                "player diversity filter — not enough to build parlays"
+            )
+            return []
+
     # Get up to 3× candidates to give the diversity filter room to work
     candidates = build_hybrid_parlays(qualifying_legs, top_n=15)
     if not candidates:
@@ -755,7 +770,7 @@ def run_pipeline(starts_after_override=None) -> tuple[list[dict], str]:
 
     # ── Step 9: Generate and save recommendations ─────────────────────────────
     print("\n[9/9] Generating parlay recommendations...")
-    recommendations = generate_recommendations(qualifying_legs)
+    recommendations = generate_recommendations(qualifying_legs, run_date=today)
 
     run_time = datetime.now(timezone.utc)
     for rank, rec in enumerate(recommendations, start=1):
@@ -1131,7 +1146,7 @@ def run_targeted_pipeline(buffer_minutes: int = 15) -> None:
 
     # ── Step 9: Build and save recommendations ────────────────────────────────
     print(f"\n[7/8] Building parlay recommendations from {len(qualified)} legs...")
-    recommendations = generate_recommendations(qualified)
+    recommendations = generate_recommendations(qualified, run_date=today)
     print(f"  Built {len(recommendations)} recommendation(s)")
 
     if not recommendations:

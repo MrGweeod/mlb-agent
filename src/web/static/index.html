@@ -830,6 +830,124 @@
   }
   .modal-btn.primary { background: var(--accent); color: #fff; }
   .modal-btn.secondary { background: var(--bg); border: 1px solid var(--border); color: var(--text); }
+
+  /* ========================================
+     Picks Tab Two-Column Layout
+     ======================================== */
+  .picks-two-column {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 30px;
+    margin-top: 20px;
+  }
+  .picks-latest {
+    border-right: 2px solid var(--border);
+    padding-right: 30px;
+  }
+  .picks-history {
+    padding-left: 10px;
+  }
+  .generated-time, .generated-source {
+    color: var(--muted);
+    font-size: 13px;
+    margin: 4px 0;
+  }
+  .history-subtitle {
+    color: var(--muted);
+    font-size: 13px;
+    margin-bottom: 15px;
+  }
+  .batch-section {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 12px;
+    overflow: hidden;
+    transition: box-shadow 0.2s;
+  }
+  .batch-section:hover {
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  }
+  .batch-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 14px;
+    background: var(--bg);
+    cursor: pointer;
+    user-select: none;
+  }
+  .batch-header:hover {
+    background: var(--surface);
+  }
+  .batch-time {
+    font-weight: 600;
+    color: var(--text);
+    font-size: 13px;
+  }
+  .batch-source {
+    color: var(--muted);
+    font-size: 12px;
+    margin-left: 8px;
+  }
+  .batch-count {
+    color: var(--muted);
+    font-size: 12px;
+    margin-left: auto;
+    margin-right: 10px;
+  }
+  .expand-icon {
+    color: var(--muted);
+    font-size: 11px;
+    transition: transform 0.2s;
+  }
+  .batch-section.expanded .expand-icon {
+    transform: rotate(180deg);
+  }
+  .batch-content {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.3s ease-out, padding 0.3s ease-out;
+  }
+  .batch-section.expanded .batch-content {
+    max-height: 2000px;
+    padding: 14px;
+    overflow-y: auto;
+  }
+  .history-parlay-card {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+    margin-bottom: 10px;
+    background: var(--surface);
+  }
+  .history-parlay-header {
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--text);
+    margin-bottom: 8px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+  }
+  .history-leg-item {
+    padding: 4px 0;
+    font-size: 13px;
+    color: var(--muted);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .history-leg-details { flex: 1; }
+  .batch-outcome {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    margin-left: 8px;
+  }
+  .batch-outcome.won  { background: #d4edda; color: #155724; }
+  .batch-outcome.lost { background: #f8d7da; color: #721c24; }
+  .batch-outcome.pending { background: #fff3cd; color: #856404; }
 </style>
 </head>
 <body>
@@ -1029,20 +1147,34 @@
 
 <!-- ── Recommendations view ── -->
 <div id="recommendations">
-  <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;padding-top:4px">
-    <div>
-      <div style="font-size:17px;font-weight:700">Daily Parlay Picks</div>
-      <div style="font-size:12px;color:var(--muted);margin-top:2px">Engine-selected parlays ranked by edge</div>
-    </div>
-    <div style="text-align:right">
-      <button id="regenerate-btn" class="regenerate-btn">Regenerate Now</button>
+  <div style="font-size:17px;font-weight:700;padding-top:4px;margin-bottom:4px">Daily Parlay Picks</div>
+  <div style="font-size:12px;color:var(--muted);margin-bottom:16px">Engine-selected parlays ranked by edge</div>
+
+  <div class="picks-two-column">
+    <!-- Left Column: Latest Recommendations -->
+    <div class="picks-latest">
+      <h3 style="margin:0 0 8px 0;font-size:15px">Latest Recommendations</h3>
+      <p class="generated-time">Generated: <span id="latest-time">Loading...</span></p>
+      <p class="generated-source">Source: <span id="latest-source">-</span></p>
       <div id="rec-timestamp" class="rec-timestamp"></div>
+
+      <div id="recommendations-container">
+        <div class="center-msg">
+          <div class="spinner"></div>
+          <div>Loading picks…</div>
+        </div>
+      </div>
+
+      <button id="regenerate-btn" class="regenerate-btn" style="margin-top:16px">Regenerate Now</button>
     </div>
-  </div>
-  <div id="recommendations-container">
-    <div class="center-msg">
-      <div class="spinner"></div>
-      <div>Loading picks…</div>
+
+    <!-- Right Column: Previous Recommendations -->
+    <div class="picks-history">
+      <h3 style="margin:0 0 8px 0;font-size:15px">Previous Recommendations (Today)</h3>
+      <p class="history-subtitle">All parlays generated today across pipeline runs</p>
+      <div id="batch-list" class="batch-list">
+        <p style="color:#666;padding:20px 0">Loading history…</p>
+      </div>
     </div>
   </div>
 </div>
@@ -1739,7 +1871,11 @@ const recsView = () => {
   hideAll();
   document.getElementById('recommendations').style.display = 'block';
   document.getElementById('tab-recommendations').classList.add('active');
-  if (password) loadRecommendations();
+  if (password) {
+    const todayDate = new Date().toISOString().slice(0, 10);
+    loadRecommendations();
+    loadRecommendationHistory(todayDate);
+  }
 };
 
 document.getElementById('tab-legs').addEventListener('click', legsView);
@@ -2156,6 +2292,16 @@ async function loadRecommendations(forceRefresh = false) {
     _currentParlays = data.parlays;
     renderRecommendations(data.parlays);
     updateTimestamp(data.generated_at);
+
+    // Update latest-time / latest-source labels
+    if (data.generated_at) {
+      const ts = new Date(data.generated_at);
+      document.getElementById('latest-time').textContent =
+        ts.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }) + ' ET';
+    }
+    if (data.source) {
+      document.getElementById('latest-source').textContent = data.source;
+    }
   } catch (err) {
     console.error('loadRecommendations error:', err);
     container.innerHTML =
@@ -2305,6 +2451,88 @@ function startRecsRefreshTimer() {
   }, 5 * 60 * 1000);
 }
 startRecsRefreshTimer();
+
+// ── Recommendation History (right column) ────────────────────────────────────
+function loadRecommendationHistory(date) {
+  fetch(`/api/recommendations/history?date=${date}&password=${encodeURIComponent(password)}`)
+    .then(r => r.json())
+    .then(batches => {
+      const container = document.getElementById('batch-list');
+      if (!batches || batches.length === 0) {
+        container.innerHTML = '<p style="color:var(--muted);padding:10px 0">No previous recommendations yet.</p>';
+        return;
+      }
+      container.innerHTML = '';
+      batches.forEach((batch, idx) => {
+        const section = document.createElement('div');
+        section.className = 'batch-section';
+        section.id = `batch-${idx}`;
+        section.innerHTML = `
+          <div class="batch-header" onclick="toggleBatch(${idx})">
+            <span>
+              <span class="batch-time">${esc(batch.generated_time)}</span>
+              <span class="batch-source">(${esc(batch.source || '')})</span>
+            </span>
+            <span class="batch-count">${batch.parlay_count} parlays</span>
+            <span class="expand-icon">▼</span>
+          </div>
+          <div class="batch-content" id="batch-content-${idx}">
+            ${renderParlaysForBatch(batch.parlays)}
+          </div>
+        `;
+        container.appendChild(section);
+      });
+    })
+    .catch(err => {
+      console.error('Failed to load history:', err);
+      document.getElementById('batch-list').innerHTML =
+        '<p style="color:var(--red);padding:10px 0">Failed to load history.</p>';
+    });
+}
+
+function toggleBatch(idx) {
+  document.getElementById(`batch-${idx}`).classList.toggle('expanded');
+}
+
+function renderParlaysForBatch(parlays) {
+  if (!parlays || parlays.length === 0) return '<p style="color:var(--muted)">No parlays.</p>';
+  return parlays.map(p => {
+    const outcome = p.outcome || 'pending';
+    const label = p.outcome ? p.outcome.toUpperCase() : 'PENDING';
+    return `
+      <div class="history-parlay-card">
+        <div class="history-parlay-header">
+          Parlay ${p.rank}: +${Math.round(p.total_odds || p.combined_odds || 0)}
+          <span class="batch-outcome ${outcome}">${label}</span>
+          <span style="font-size:12px;color:var(--muted);font-weight:normal;margin-left:8px">
+            ${p.num_legs || (p.legs ? p.legs.length : 0)} legs
+          </span>
+        </div>
+        ${renderHistoryLegs(p.legs)}
+      </div>
+    `;
+  }).join('');
+}
+
+function renderHistoryLegs(legs) {
+  if (!legs || legs.length === 0) return '<p style="color:var(--muted)">No legs.</p>';
+  return legs.map(leg => {
+    const dir = leg.direction === 'under' ? 'U' : 'O';
+    const stat = leg.stat || '';
+    const cov = leg.coverage_pct != null ? leg.coverage_pct.toFixed(1)
+               : leg.coverage != null ? leg.coverage.toFixed(1) : '?';
+    return `
+      <div class="history-leg-item">
+        <span class="history-leg-details">
+          • ${esc(leg.player_name || '—')} (${esc(leg.team || '')})
+          ${esc(statLabel(stat))} ${dir} ${leg.line != null ? leg.line : '?'}
+          <span style="color:var(--muted)">${esc(String(leg.odds || ''))}</span>
+          <span style="color:var(--accent);font-weight:600"> ${cov}%</span>
+        </span>
+      </div>
+    `;
+  }).join('');
+}
 
 // Init
 updatePanel();

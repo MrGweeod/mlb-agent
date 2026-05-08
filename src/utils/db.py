@@ -850,6 +850,42 @@ def log_training_data_legs(legs: list[dict], run_date: str) -> int:
     return inserted
 
 
+def get_players_used_today(run_date: str) -> set:
+    """
+    Get set of player IDs already used in parlays today.
+
+    Ensures each player appears in at most 1 parlay per day, across all
+    pipeline runs (9am, 12pm, 5:30pm) and manual regenerations.
+
+    Args:
+        run_date: Date string (YYYY-MM-DD)
+
+    Returns:
+        set: Player IDs (as strings) already used in today's parlays
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT DISTINCT l.player_id
+            FROM mlb_parlay_legs_v2 l
+            JOIN mlb_parlay_recommendations_v2 p ON l.parlay_id = p.id
+            WHERE p.run_date = %s
+              AND l.player_id IS NOT NULL
+            """,
+            (run_date,),
+        )
+        rows = cur.fetchall()
+        return {str(row["player_id"]) for row in rows}
+    except Exception as e:
+        print(f"[ERROR] Failed to get players used today: {e}")
+        return set()  # fail open — don't block parlay generation
+    finally:
+        cur.close()
+        conn.close()
+
+
 def get_pitcher_profile(pitcher_id: str, max_age_hours: int = 24) -> dict | None:
     """Return cached pitcher profile, or None if missing/expired (TTL 24hr)."""
     conn = get_conn()
@@ -1495,6 +1531,89 @@ def get_training_analytics_data() -> dict:
         "feature_health": feature_health,
         "summary":        summary,
     }
+
+
+def get_recommendation_history(run_date: str) -> list[dict]:
+    """
+    Return all parlay recommendation batches for a given date, newest first.
+
+    Each batch groups parlays generated in the same pipeline run (9am, 12pm,
+    5:30pm, or manual).  Full leg details are hydrated for each parlay.
+
+    Args:
+        run_date: Date string (YYYY-MM-DD)
+
+    Returns:
+        List of batch dicts:
+            {batch_id, source, generated_time, parlay_count, parlays: [...]}
+        Each parlay has {id, rank, total_odds, avg_coverage, num_legs,
+                         outcome, created_at, legs: [...]}
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT
+                p.batch_id,
+                p.source,
+                MIN(p.created_at) AS created_at,
+                COUNT(DISTINCT p.id) AS parlay_count
+            FROM mlb_parlay_recommendations_v2 p
+            WHERE p.run_date = %s
+            GROUP BY p.batch_id, p.source
+            ORDER BY MIN(p.created_at) DESC
+            """,
+            (run_date,),
+        )
+        batches = [dict(r) for r in cur.fetchall()]
+
+        result = []
+        for batch in batches:
+            cur.execute(
+                """
+                SELECT id, rank, total_odds, avg_coverage, num_legs,
+                       outcome, created_at
+                FROM mlb_parlay_recommendations_v2
+                WHERE batch_id = %s
+                ORDER BY rank
+                """,
+                (batch["batch_id"],),
+            )
+            parlays = [dict(r) for r in cur.fetchall()]
+
+            for parlay in parlays:
+                cur.execute(
+                    """
+                    SELECT player_name, team, stat, line, direction, odds,
+                           coverage, ev, outcome, result_value
+                    FROM mlb_parlay_legs_v2
+                    WHERE parlay_id = %s
+                    ORDER BY id
+                    """,
+                    (parlay["id"],),
+                )
+                parlay["legs"] = [dict(r) for r in cur.fetchall()]
+
+            created_at = batch["created_at"]
+            generated_time = (
+                created_at.strftime("%I:%M %p") if created_at else "Unknown"
+            )
+            result.append({
+                "batch_id":       batch["batch_id"],
+                "source":         batch["source"],
+                "generated_time": generated_time,
+                "parlay_count":   batch["parlay_count"],
+                "parlays":        parlays,
+            })
+
+        return result
+    except Exception as e:
+        print(f"[ERROR] Failed to load recommendation history: {e}")
+        return []
+    finally:
+        cur.close()
+        conn.close()
 
 
 def save_parlay_recommendation(recommendation: dict) -> int:

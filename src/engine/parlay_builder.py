@@ -21,6 +21,7 @@ Public API unchanged: build_hybrid_parlays(...) and _tier_params(...).
 """
 import time
 from src.utils.odds_math import american_to_decimal
+from src.utils.db import get_players_used_today
 
 _PITCHER_POSITIONS = frozenset({"SP", "RP", "P"})
 
@@ -28,6 +29,48 @@ _PITCHER_POSITIONS = frozenset({"SP", "RP", "P"})
 # homeRuns ~6.1% hit rate, stolenBases extremely volatile.
 # rbi and walks are no longer blocked — the ML model can score them on merit.
 _HIGH_VARIANCE_OVER_STATS = frozenset({"homeRuns", "stolenBases"})
+
+
+def filter_already_used_players(legs: list, run_date: str) -> list:
+    """
+    Remove legs for players already used in today's parlays.
+
+    Ensures portfolio diversity: each player appears in max 1 parlay per day.
+
+    Args:
+        legs: List of leg dicts with player_id
+        run_date: Date string (YYYY-MM-DD)
+
+    Returns:
+        list: Filtered legs (players not yet used today)
+    """
+    used_players = get_players_used_today(run_date)
+
+    if not used_players:
+        print("[player_diversity] No players filtered (first run of day or query failed)")
+        return legs
+
+    filtered = [
+        leg for leg in legs
+        if str(leg.get("player_id") or "") not in used_players
+    ]
+
+    removed_count = len(legs) - len(filtered)
+    removed_pct = (removed_count / len(legs) * 100) if legs else 0
+
+    print(
+        f"[player_diversity] Filtered {removed_count} legs from {len(used_players)} "
+        f"players already used today ({removed_pct:.1f}%)"
+    )
+    print(f"[player_diversity] {len(filtered)} eligible legs remaining with unique players")
+
+    if removed_pct > 80:
+        print(
+            f"[WARNING] Player diversity filter removed {removed_pct:.1f}% of legs — "
+            "this may indicate an issue"
+        )
+
+    return filtered
 
 
 def filter_and_tag_legs(scored_legs: list) -> list:
