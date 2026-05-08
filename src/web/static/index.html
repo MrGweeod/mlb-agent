@@ -2267,22 +2267,19 @@ function renderTrainDataQuality(rows) {
 let _recsRefreshTimer = null;
 let _currentParlays = [];
 
-async function loadRecommendations(forceRefresh = false) {
+async function loadRecommendations() {
   const container = document.getElementById('recommendations-container');
-  container.innerHTML = '<div class="center-msg"><div class="spinner"></div><div>' +
-    (forceRefresh ? 'Running fresh pipeline…' : 'Loading parlay recommendations…') +
-    '</div></div>';
+  container.innerHTML = '<div class="center-msg"><div class="spinner"></div><div>Loading parlay recommendations…</div></div>';
 
   try {
-    const refreshParam = forceRefresh ? 'refresh=true' : 'refresh=false';
-    const res = await fetch(`/api/build-parlays?${refreshParam}&password=${encodeURIComponent(password)}`);
+    const res = await fetch(`/api/recommendations?password=${encodeURIComponent(password)}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
 
     if (!data.parlays || data.parlays.length === 0) {
       container.innerHTML =
         '<div class="center-msg" style="padding:60px 24px">' +
-        '<div>' + esc(data.message || 'Not enough qualifying legs for parlay building') + '</div></div>';
+        '<div>No recommendations yet for today. Click Regenerate Now to generate picks.</div></div>';
       updateTimestamp(null);
       return;
     }
@@ -2333,10 +2330,25 @@ async function regenerateRecommendations() {
   const btn = document.getElementById('regenerate-btn');
   btn.disabled = true;
   btn.textContent = 'Regenerating…';
+  const container = document.getElementById('recommendations-container');
+  container.innerHTML = '<div class="center-msg"><div class="spinner"></div><div>Running recommendation engine…</div></div>';
   try {
-    await loadRecommendations(true);  // force refresh=true
+    const res = await fetch(`/api/recommendations/regenerate?password=${encodeURIComponent(password)}`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${password}` },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    showToast(`Generated ${data.count} parlays`);
+    // Reload latest picks and refresh history
+    await loadRecommendations();
+    const todayDate = new Date().toISOString().slice(0, 10);
+    loadRecommendationHistory(todayDate);
   } catch (err) {
     showToast('Regeneration failed: ' + err.message);
+    container.innerHTML =
+      '<div class="center-msg"><div style="color:var(--red)">Regeneration failed: ' + esc(err.message) + '</div></div>';
   } finally {
     btn.disabled = false;
     btn.textContent = 'Regenerate Now';
@@ -2383,7 +2395,7 @@ function renderRecommendations(recs) {
           <div style="text-align:right">
             <div class="rec-odds">+${rec.combined_odds}</div>
             <div class="rec-meta">
-              ${rec.win_probability.toFixed(1)}% win
+              ${(rec.win_probability != null ? rec.win_probability.toFixed(1) : '—')}% win
               &nbsp;·&nbsp;
               <span style="${edgeCls};font-weight:700">${edgeStr} edge</span>
             </div>

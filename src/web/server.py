@@ -516,11 +516,7 @@ async def handle_build_parlays(request: web.Request) -> web.Response:
 
 
 async def handle_recommendations(request: web.Request) -> web.Response:
-    """Return today's pre-built parlay recommendations with hydrated leg details.
-
-    Filters out legs whose games have already started (5-minute grace window)
-    so stale morning pipeline results don't include in-progress games.
-    """
+    """Return today's parlay recommendations (latest batch) from v2 schema."""
     if not _check_auth(request):
         return web.Response(
             text=json.dumps({"error": "Unauthorized"}),
@@ -528,47 +524,93 @@ async def handle_recommendations(request: web.Request) -> web.Response:
             status=401,
         )
     try:
-        from datetime import datetime, timedelta
-        import pytz
+        from src.utils.db import get_conn
 
-        recommendations = get_todays_recommendations()
+        today = str(date.today())
 
-        et_tz = pytz.timezone("America/New_York")
-        now_et = datetime.now(et_tz)
-        cutoff = now_et - timedelta(minutes=5)
+        conn = get_conn()
+        cur = conn.cursor()
 
-        filtered = []
-        for rec in recommendations:
-            upcoming = []
-            for leg in rec.get("legs", []):
-                gst = leg.get("game_start_time")
-                if not gst:
-                    upcoming.append(leg)
-                    continue
-                try:
-                    gt = datetime.strptime(str(gst), "%Y-%m-%d %H:%M:%S")
-                    if et_tz.localize(gt) > cutoff:
-                        upcoming.append(leg)
-                except Exception:
-                    upcoming.append(leg)
-            if len(upcoming) >= 4:
-                from src.utils.sorting import sort_legs_by_game_time
-                rec["legs"] = sort_legs_by_game_time(upcoming)
-                filtered.append(rec)
-
-        total_in = len(recommendations)
-        total_out = len(filtered)
-        legs_out = sum(len(r["legs"]) for r in filtered)
-        print(
-            f"[handle_recommendations] {total_in} recs → {total_out} upcoming "
-            f"({legs_out} legs after started-game filter)"
+        # Get latest batch_id for today
+        cur.execute(
+            """
+            SELECT DISTINCT batch_id, source, created_at
+            FROM mlb_parlay_recommendations_v2
+            WHERE run_date = %s
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (today,),
         )
+        batch_row = cur.fetchone()
+
+        if not batch_row:
+            cur.close()
+            conn.close()
+            return web.Response(
+                text=json.dumps({"parlays": [], "generated_at": None, "source": None}),
+                content_type="application/json",
+            )
+
+        batch_id = batch_row["batch_id"]
+        source = batch_row["source"]
+        generated_at = batch_row["created_at"]
+
+        # Get ALL parlays from this batch (alias to match frontend field names)
+        cur.execute(
+            """
+            SELECT id, rank,
+                   total_odds AS combined_odds,
+                   avg_coverage,
+                   num_legs,
+                   outcome,
+                   created_at,
+                   edge_percent AS edge_pct
+            FROM mlb_parlay_recommendations_v2
+            WHERE batch_id = %s
+            ORDER BY rank
+            """,
+            (batch_id,),
+        )
+        parlays = [dict(r) for r in cur.fetchall()]
+
+        # Hydrate legs for each parlay (alias coverage → coverage_pct)
+        for parlay in parlays:
+            cur.execute(
+                """
+                SELECT player_id, player_name, team, stat, line,
+                       direction, odds, coverage AS coverage_pct, ev, outcome
+                FROM mlb_parlay_legs_v2
+                WHERE parlay_id = %s
+                ORDER BY id
+                """,
+                (parlay["id"],),
+            )
+            parlay["legs"] = [dict(r) for r in cur.fetchall()]
+            # Compute win_probability as product of leg coverages
+            win_prob = 1.0
+            for leg in parlay["legs"]:
+                cov = (leg.get("coverage_pct") or 50) / 100
+                win_prob *= cov
+            parlay["win_probability"] = round(win_prob * 100, 1)
+
+        cur.close()
+        conn.close()
+
+        print(f"[recommendations] Returning {len(parlays)} parlays from batch {batch_id}")
 
         return web.Response(
-            text=json.dumps({"recommendations": filtered}, default=str),
+            text=json.dumps({
+                "parlays": parlays,
+                "generated_at": generated_at,
+                "source": source,
+            }, default=str),
             content_type="application/json",
         )
     except Exception as exc:
+        print(f"[ERROR] handle_recommendations failed: {exc}")
+        import traceback
+        traceback.print_exc()
         return web.Response(
             text=json.dumps({"error": str(exc)}),
             content_type="application/json",
@@ -630,7 +672,6 @@ async def handle_regenerate_recommendations(request: web.Request) -> web.Respons
 
     try:
         from main import generate_recommendations
-        from src.utils.db import save_parlay_recommendation
 
         today = datetime.now(_ET).date()
         legs = get_scored_legs(str(today))
@@ -676,32 +717,30 @@ async def handle_regenerate_recommendations(request: web.Request) -> web.Respons
             if (leg.get("coverage_pct") or 0) >= 55
         ]
 
+        import functools
+        today_str = str(today)
+        fn = functools.partial(
+            generate_recommendations,
+            qualifying_legs,
+            max_recommendations=10,
+            run_date=today_str,
+        )
         loop = asyncio.get_event_loop()
-        recommendations = await loop.run_in_executor(
-            None, generate_recommendations, qualifying_legs
+        recommendations = await loop.run_in_executor(None, fn)
+
+        print(f"[regenerate] Generated {len(recommendations)} parlays")
+
+        from src.utils.db import save_parlay_recommendations_v2
+        batch_id = save_parlay_recommendations_v2(
+            recommendations,
+            run_date=today_str,
+            source="manual",
         )
 
-        run_time = datetime.now(timezone.utc)
-        for rank, rec in enumerate(recommendations, start=1):
-            try:
-                save_parlay_recommendation({
-                    "recommendation_date": today,
-                    "pipeline_run_time":   run_time,
-                    "rank":                rank,
-                    "leg_odd_ids":         [leg["odd_id"] for leg in rec["legs"]],
-                    "combined_odds":       rec["combined_odds"],
-                    "win_probability":     rec["win_probability"],
-                    "edge_pct":            rec["edge_pct"],
-                })
-                print(f"[regenerate] Saved recommendation rank {rank}")
-            except Exception as e:
-                import traceback
-                print(f"[regenerate] Failed to save rank {rank}: {e}")
-                traceback.print_exc()
+        print(f"[regenerate] Saved {len(recommendations)} parlays to v2 schema (batch: {batch_id})")
 
-        fresh = get_todays_recommendations()
         return web.Response(
-            text=json.dumps({"success": True, "recommendations": fresh}, default=str),
+            text=json.dumps({"success": True, "count": len(recommendations), "batch_id": batch_id}, default=str),
             content_type="application/json",
         )
     except Exception as exc:
