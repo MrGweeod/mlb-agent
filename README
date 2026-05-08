@@ -1,0 +1,519 @@
+# MLB Parlay Agent
+
+> AI-powered MLB parlay recommendation system using ML-based leg scoring, pitcher-aware matchup logic, and portfolio diversification
+
+[![Status](https://img.shields.io/badge/status-operational-success)](https://railway.app)
+[![Python](https://img.shields.io/badge/python-3.10-blue)](https://python.org)
+[![License](https://img.shields.io/badge/license-personal%20research-lightgrey)](LICENSE)
+
+---
+
+## 🎯 Overview
+
+The MLB Parlay Agent is a production system that generates daily MLB parlay recommendations by:
+- Scoring 200-400 player props daily using a calibrated ML model (AUC: 0.8532)
+- Applying pitcher-aware matchup analysis and handedness-split coverage rates
+- Enforcing **player diversity** across all parlays (no player appears in multiple parlays)
+- Building optimized 4-8 leg parlays targeting +1000 to +1500 odds
+- Tracking outcomes and learning from 77,000+ historical resolved legs
+
+**Last Major Update:** May 8, 2026 — Player diversity system deployed (40 unique players, 0% portfolio concentration)
+
+---
+
+## 📊 Current Status
+
+### Production Health
+```
+✅ Pipeline Runtime:      3 daily runs (9 AM, 12 PM, 5:30 PM ET)
+✅ Player Diversity:      40 players filtered (25.3% at peak)
+✅ ML Model Scoring:      0% NULL rate, 50.5% avg prediction
+✅ Database:              18 parlays + 72 legs tracked (v2 schema)
+✅ Web Dashboard:         4 tabs operational
+✅ Deployment:            Railway live, auto-deploy from master
+```
+
+### Recent Performance (May 4-8, 2026)
+- **Parlays Generated:** 23 total (18 in v2 schema)
+- **Unique Players Used:** 40 (perfect diversification)
+- **Portfolio Concentration:** 5.6% max exposure per player (down from 60%)
+- **Leg Hit Rates:** 47-57% across stat types (strikeouts, hits, RBI, total bases)
+
+---
+
+## 🚀 Features
+
+### 1. **Player Diversity System** (NEW - May 8, 2026)
+Eliminates portfolio concentration risk by ensuring each player appears in **at most one parlay per day**.
+
+**Impact:**
+- Before: Ramón Laureano in 14/23 parlays → 60% portfolio exposure → 0/23 parlays won
+- After: Each player max 1/18 parlays → 5.6% portfolio exposure → diversified risk
+
+### 2. **ML-Powered Leg Scoring**
+- **Model:** Scikit-learn LogisticRegression (15 features)
+- **Training Data:** 77,619 resolved legs
+- **Performance:** AUC 0.8532, calibrated predictions
+- **Features:** Coverage rate, trends, pitcher matchup, odds value, lineup stability
+
+### 3. **Pitcher-Aware Matchup Logic**
+- Batter coverage split by opposing pitcher handedness (RHP vs LHP)
+- Pitcher ERA/K9/WHIP rankings integrated into opponent adjustment
+- Prop-type routing (hits vs strikeouts use different pitcher signals)
+
+### 4. **Three Daily Pipeline Runs**
+- **9:00 AM ET:** Full resolution + fresh props + scoring + building
+- **12:00 PM ET:** Odds refresh + lineup checks + rebuild
+- **5:30 PM ET:** Final odds + last-minute adjustments
+
+### 5. **Web Dashboard (4 Tabs)**
+- **Legs:** Browse all scored props with filters (stat, player, team)
+- **Dashboard:** Performance analytics (win rates, calibration, top performers)
+- **Training:** ML data quality monitoring (samples, hit rates, NULL rates)
+- **Picks:** Daily parlay recommendations with expandable history
+
+---
+
+## 🏗️ Architecture
+
+### System Flow
+```
+┌─────────────────────────────────────────────────────────┐
+│  1. Data Pipeline (3x/day)                              │
+│     ├─ Fetch props from TheOddsAPI                      │
+│     ├─ Fetch pitcher stats (MLB-StatsAPI)               │
+│     ├─ Compute handedness-split coverage                │
+│     ├─ Score legs with ML model                         │
+│     └─ Save to database (mlb_scored_legs)               │
+└─────────────────────────────────────────────────────────┘
+                           ↓
+┌─────────────────────────────────────────────────────────┐
+│  2. Player Diversity Filter                             │
+│     ├─ Query: Which players already used today?         │
+│     ├─ Filter: Remove legs for already-used players     │
+│     └─ Result: Unique player pool for parlay building   │
+└─────────────────────────────────────────────────────────┘
+                           ↓
+┌─────────────────────────────────────────────────────────┐
+│  3. Parlay Construction                                 │
+│     ├─ Apply constraints (odds range, diversity)        │
+│     ├─ Build 5 parlays per run                          │
+│     ├─ Track correlation risk                           │
+│     └─ Save to v2 schema (per-leg tracking)             │
+└─────────────────────────────────────────────────────────┘
+                           ↓
+┌─────────────────────────────────────────────────────────┐
+│  4. Outcome Resolution (Next Day 9 AM)                  │
+│     ├─ Fetch box scores (MLB-StatsAPI)                  │
+│     ├─ Resolve legs: won/lost/void                      │
+│     ├─ Resolve parlays: won/lost/void                   │
+│     └─ Update training data for model retraining        │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Tech Stack
+- **Backend:** Python 3.10, Flask, APScheduler
+- **ML:** Scikit-learn (LogisticRegression + Platt scaling)
+- **Database:** PostgreSQL (Supabase free tier)
+- **Deployment:** Railway (auto-deploy from GitHub)
+- **APIs:** TheOddsAPI (props), MLB-StatsAPI (game data), SportsGameOdds (odds)
+
+---
+
+## 📁 Repository Structure
+
+```
+mlb-agent/
+├── main.py                          # Pipeline orchestrator
+├── src/
+│   ├── apis/
+│   │   ├── mlb_stats.py            # MLB-StatsAPI wrapper
+│   │   ├── sportsgameodds.py       # Props fetcher
+│   │   ├── pitcher_stats.py        # ERA/K9/WHIP rankings
+│   │   └── team_stats.py           # Team offensive rankings
+│   ├── engine/
+│   │   ├── coverage.py             # Handedness-split coverage
+│   │   ├── leg_scorer_v2.pkl       # ML model (trained Apr 30)
+│   │   └── parlay_builder.py      # Parlay construction + diversity
+│   ├── utils/
+│   │   ├── db.py                   # Supabase PostgreSQL client
+│   │   └── lineup_consistency.py   # Lineup filter (3+ AB check)
+│   ├── tracker/
+│   │   ├── outcome_resolver.py     # Box score resolution
+│   │   └── parlay_outcome_resolver.py
+│   └── web/
+│       ├── server.py               # Flask app + scheduler
+│       └── static/index.html       # 4-tab web UI
+├── docs/
+│   ├── SESSION_HANDOFF_MAY8.md     # ✅ Current state (source of truth)
+│   ├── BUILD_STATUS_MAY8.md        # ✅ Component health (source of truth)
+│   ├── ARCHITECTURE_DECISIONS_MAY8.md # ✅ Design rationale (source of truth)
+│   └── PROJECT_INSTRUCTIONS_v2.md  # Setup and usage guide
+└── requirements.txt                 # Python dependencies
+```
+
+---
+
+## 🚀 Quick Start
+
+### Prerequisites
+- Python 3.10+
+- PostgreSQL database (Supabase recommended)
+- Railway account (or any PaaS supporting Python)
+- API keys: TheOddsAPI, Anthropic (optional for future features)
+
+### 1. Clone Repository
+```bash
+git clone https://github.com/MrGweeod/mlb-agent.git
+cd mlb-agent
+```
+
+### 2. Install Dependencies
+```bash
+pip install -r requirements.txt
+```
+
+### 3. Configure Environment Variables
+Create `.env` file (or set in Railway):
+```bash
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_KEY=your-anon-key
+ODDS_API_KEY=your-odds-api-key
+SPORTSGAMEODDS_API_KEY=your-sgo-key  # Optional
+PORT=8080  # Railway assigns this automatically
+```
+
+### 4. Initialize Database
+Run SQL scripts to create tables (see `docs/` for schema):
+- `mlb_scored_legs` — Daily props with ML scores
+- `mlb_parlay_recommendations_v2` — Parlay headers
+- `mlb_parlay_legs_v2` — Per-leg tracking
+- `mlb_training_data` — Historical outcomes
+
+### 5. Run Locally
+```bash
+python main.py
+```
+
+Access web dashboard at `http://localhost:8080`
+
+### 6. Deploy to Railway
+```bash
+# Connect Railway CLI
+railway login
+
+# Link to project
+railway link
+
+# Deploy
+git push origin master  # Auto-deploys via Railway
+```
+
+---
+
+## 📖 Usage
+
+### Web Dashboard
+
+**Access:** `https://[your-railway-url].up.railway.app`
+
+#### **Legs Tab**
+- Browse all scored props for today
+- Filter by: Prop type, Player name, Team
+- Sorted by game start time (chronological)
+- Shows: Coverage %, Odds, ML score
+
+#### **Dashboard Tab**
+- Daily parlay performance (last 14 days)
+- Leg performance by stat type (hit rates)
+- Score calibration (predicted vs actual)
+- Top performing legs (player/stat combos)
+
+#### **Training Tab**
+- Total training samples: 77,619
+- Data quality metrics (hit rate, void rate, NULL rate)
+- Resolved vs pending by date
+
+#### **Picks Tab**
+- **Left column:** Latest recommendations (most recent batch)
+- **Right column:** Previous recommendations (expandable history)
+- Shows: Player names, props, lines, coverage %, win probability
+
+### Manual Regeneration
+Click **"Regenerate Now"** button in Picks tab to trigger parlay building on-demand.
+
+### Database Queries
+
+**Example: Find all Cody Bellinger hit under legs**
+```sql
+SELECT * 
+FROM mlb_parlay_legs_v2 
+WHERE player_name = 'Cody Bellinger' 
+  AND stat = 'hits' 
+  AND direction = 'under';
+```
+
+**Example: Check player diversity for today**
+```sql
+SELECT COUNT(DISTINCT player_id) AS unique_players
+FROM mlb_parlay_legs_v2 l
+JOIN mlb_parlay_recommendations_v2 r ON l.parlay_id = r.id
+WHERE r.run_date = CURRENT_DATE;
+```
+
+---
+
+## 🧪 Development
+
+### Running Tests
+```bash
+# Currently no automated tests
+# Manual validation via Railway logs and web dashboard
+```
+
+### Code Quality
+- Follow existing patterns in `src/` modules
+- Use type hints where applicable
+- Log important operations (player diversity, ML scoring, parlay building)
+
+### Adding New Features
+
+**Before modifying:**
+1. Read `docs/SESSION_HANDOFF_MAY8.md` — Current state
+2. Read `docs/ARCHITECTURE_DECISIONS_MAY8.md` — Design rationale
+3. Check `docs/BUILD_STATUS_MAY8.md` — Component health
+
+**Development workflow:**
+1. Create feature branch: `git checkout -b feature/your-feature`
+2. Make changes, test locally
+3. Commit with descriptive message: `feat: add X` or `fix: resolve Y`
+4. Push and open PR: `git push origin feature/your-feature`
+5. Merge to `master` → auto-deploys to Railway
+
+---
+
+## 📊 Performance Metrics
+
+### ML Model Performance
+- **AUC:** 0.8532
+- **Training Samples:** 77,619 resolved legs
+- **Average Prediction:** 50.5% (conservative but accurate)
+- **Calibration:** Actual hit rates match predicted rates by bucket
+
+### Leg Hit Rates (Last 7 Days)
+| Stat Type      | Total | Won | Hit % | Void % |
+|----------------|-------|-----|-------|--------|
+| Strikeouts     | 402   | 230 | 57.2% | 0%     |
+| Hits           | 871   | 436 | 50.1% | 2.3%   |
+| RBI            | 48    | 24  | 50.0% | 4.2%   |
+| Total Bases    | 75    | 37  | 49.3% | 5.3%   |
+| Walks          | 59    | 28  | 47.5% | 3.4%   |
+
+### Parlay Performance (May 4-8, 2026)
+- **Total Recommended:** 23 parlays
+- **Resolved:** 17 (74%)
+- **Won:** 1 (5.9% hit rate) ✅ Within 5-10% expected range
+- **Lost:** 16 (94.1%)
+- **Void:** 0 (0% after May 6 fix)
+
+### Player Diversity Metrics (May 8)
+```
+9:00 AM:   19 players filtered (14.7%)
+12:00 PM:  24 players filtered (17.9%)
+3:40 PM:   35 players filtered (23.1%)
+3:57 PM:   40 players filtered (25.3%)
+```
+**Trend:** Escalating correctly (more players filtered each run)
+
+---
+
+## 🔧 Configuration
+
+### Environment Variables
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `SUPABASE_URL` | Supabase project URL | Yes |
+| `SUPABASE_KEY` | Supabase anon key | Yes |
+| `ODDS_API_KEY` | TheOddsAPI key | Yes |
+| `SPORTSGAMEODDS_API_KEY` | SportsGameOdds key | Optional |
+| `PORT` | Web server port | Auto (Railway) |
+
+### Pipeline Schedule
+Configured in `src/web/server.py` using APScheduler:
+- Morning: `09:00 ET` (resolution + full fetch)
+- Midday: `12:00 ET` (odds refresh)
+- Evening: `17:30 ET` (final odds)
+
+### ML Model Retraining
+**Current:** `leg_scorer_v2.pkl` (trained April 30, 2026)
+
+**Retraining criteria:**
+- Wait for 500+ more resolved samples
+- Balance direction sampling (currently skewed)
+- Add rolling window features
+- Target: Increase avg prediction to 52-55%
+
+---
+
+## 🐛 Known Issues & Limitations
+
+### Current Issues (May 8, 2026)
+1. **Dashboard shows v1 count (10) instead of v2 (18)** — Fix in progress
+2. **History timestamps in 24-hour format** — Fix in progress
+3. **Parlay target too high (10 vs actual 1-2)** — Lowering to 5
+
+### Technical Limitations
+1. **Player pool exhaustion:** After 40-50 players used, can only generate 1-2 more parlays
+   - Daily capacity: ~10-15 total parlays
+   - Trade-off accepted for diversification
+   
+2. **ML model conservative:** 50.5% average prediction
+   - Accurate but leaves value on table
+   - Retraining planned with balanced sampling
+
+3. **No real-time updates:** Dashboard shows latest pipeline run
+   - Refresh manually or wait for next scheduled run
+
+### Data Limitations
+1. **Postponed games:** Legs never resolve (stuck pending)
+2. **Late scratches:** Players ruled out between 5:30 PM and game time
+3. **Small sample:** Only 77k training samples (model will improve with more data)
+
+---
+
+## 📚 Documentation
+
+**Living Documents (Source of Truth):**
+- [`SESSION_HANDOFF_MAY8.md`](docs/SESSION_HANDOFF_MAY8.md) — Current state, last session work, next priorities
+- [`BUILD_STATUS_MAY8.md`](docs/BUILD_STATUS_MAY8.md) — Component health, operational status, known issues
+- [`ARCHITECTURE_DECISIONS_MAY8.md`](docs/ARCHITECTURE_DECISIONS_MAY8.md) — Design rationale, lessons learned, trade-offs
+
+**Setup & Usage:**
+- [`PROJECT_INSTRUCTIONS_v2.md`](docs/PROJECT_INSTRUCTIONS_v2.md) — Detailed setup guide, operations, troubleshooting
+
+**Historical Reference (Dated):**
+- `MLB_Parlay_Agent_Blueprint_v1.docx` — April 2026 design (many details outdated)
+
+**Priority order when in doubt:**
+1. `SESSION_HANDOFF.md` (current state)
+2. `BUILD_STATUS.md` (what's working/broken)
+3. `ARCHITECTURE_DECISIONS.md` (why things are this way)
+4. Railway logs (ground truth of actual behavior)
+
+---
+
+## 🛠️ Troubleshooting
+
+### Common Issues
+
+**Issue:** Only 1-2 parlays generated (expected 5-10)  
+**Cause:** Player diversity filter + limited remaining pool  
+**Solution:** Expected behavior, lowering target to 5
+
+**Issue:** Dashboard shows wrong count  
+**Cause:** Querying v1 schema only, not v2  
+**Solution:** Fix in progress (query both schemas)
+
+**Issue:** Player appears in multiple parlays  
+**Cause:** Should not happen with current system  
+**Solution:** Check Railway logs for `[player_diversity]` messages
+
+**Issue:** Pipeline doesn't run  
+**Cause:** Railway deployment issue or scheduler failure  
+**Solution:** Check Railway logs, verify environment variables set
+
+### Monitoring
+
+**Railway Logs:**
+```bash
+# Access via Railway dashboard
+https://railway.app → mlb-agent → Deployments → View Logs
+
+# Look for:
+[player_diversity] Filtered X legs from Y players
+[save_v2] Saved N parlay(s) to v2 schema
+[recommendations] Returning N parlays from batch
+```
+
+**Database Health:**
+```sql
+-- Check today's data
+SELECT 
+  (SELECT COUNT(*) FROM mlb_scored_legs WHERE DATE(created_at) = CURRENT_DATE) AS legs_today,
+  (SELECT COUNT(*) FROM mlb_parlay_recommendations_v2 WHERE run_date = CURRENT_DATE) AS parlays_today,
+  (SELECT COUNT(DISTINCT player_id) FROM mlb_parlay_legs_v2 l 
+   JOIN mlb_parlay_recommendations_v2 r ON l.parlay_id = r.id 
+   WHERE r.run_date = CURRENT_DATE) AS unique_players_today;
+```
+
+---
+
+## 🤝 Contributing
+
+This is a personal research project. Contributions are not currently accepted, but you're welcome to fork and adapt for your own use.
+
+**If forking:**
+- Update environment variables with your own API keys
+- Modify strategy constraints to match your risk tolerance
+- Consider the player diversity trade-offs for your use case
+
+---
+
+## ⚖️ License & Disclaimer
+
+**License:** Personal research use only
+
+**Disclaimer:**
+- This system is for **research and educational purposes only**
+- Not financial or betting advice
+- Past performance does not guarantee future results
+- Please gamble responsibly and within your means
+- Verify all recommendations independently before placing any bets
+- The authors are not responsible for any financial losses
+
+**Responsible Gambling Resources:**
+- National Council on Problem Gambling: 1-800-522-4700
+- Massachusetts gambling helpline: 1-800-426-1234
+- Massachusetts self-exclusion program: https://massgaming.com/resources/voluntary-self-exclusion/
+
+---
+
+## 📞 Resources
+
+- **Railway Dashboard:** https://railway.app
+- **Supabase Console:** https://supabase.com
+- **GitHub Repository:** https://github.com/MrGweeod/mlb-agent
+- **TheOddsAPI Docs:** https://the-odds-api.com/liveapi/guides/v4/
+- **MLB-StatsAPI Docs:** https://github.com/toddrob99/MLB-StatsAPI
+
+---
+
+## 🎯 Roadmap
+
+### SHORT TERM (This Month)
+- ✅ Player diversity system deployed (May 8)
+- 🔧 Fix dashboard v1/v2 schema sync
+- 🔧 Lower parlay target to 5 (realistic capacity)
+- 🎯 Collect 50-100 resolved parlays for correlation analysis
+
+### MEDIUM TERM (Next Quarter)
+- 🎯 Validate correlation hypothesis (statistical test)
+- 🎯 Retrain ML model with balanced direction sampling
+- 🎯 Add player pool capacity monitoring/alerts
+- 🎯 Migrate Dashboard fully to v2 schema
+
+### LONG TERM (Future)
+- 🎯 Parlay-level ML model (predict "Will this parlay win?")
+- 🎯 Multi-day player tracking (balance exposure over week/month)
+- 🎯 Advanced correlation detection (same-game, pitcher dominance)
+- 🎯 Optimization engine (linear programming for parlay construction)
+
+---
+
+**Last Updated:** May 8, 2026  
+**Version:** 2.0 (Player Diversity Era)  
+**Status:** ✅ Operational with minor UI fixes pending
+
+---
+
+Made with ⚾ and 🤖 by a human who enjoys baseball and building things
