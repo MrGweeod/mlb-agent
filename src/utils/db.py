@@ -1598,9 +1598,18 @@ def get_recommendation_history(run_date: str) -> list[dict]:
                 parlay["legs"] = [dict(r) for r in cur.fetchall()]
 
             created_at = batch["created_at"]
-            generated_time = (
-                created_at.strftime("%I:%M %p") if created_at else "Unknown"
-            )
+            if created_at:
+                from datetime import timezone
+                from zoneinfo import ZoneInfo
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=timezone.utc)
+                created_at_et = created_at.astimezone(ZoneInfo("America/New_York"))
+                h = created_at_et.hour
+                period = "PM" if h >= 12 else "AM"
+                display_hour = h % 12 or 12
+                generated_time = f"{display_hour}:{created_at_et.strftime('%M')} {period}"
+            else:
+                generated_time = "Unknown"
             result.append({
                 "batch_id":       batch["batch_id"],
                 "source":         batch["source"],
@@ -1983,6 +1992,17 @@ def get_parlay_dashboard_data() -> dict:
         LIMIT 20
     """)
     recent_recs = [dict(r) for r in cur.fetchall()]
+
+    # ── Add v2 pending count to summary ──────────────────────────────────────
+    cur.execute("""
+        SELECT COUNT(*) AS pending_v2
+        FROM mlb_parlay_recommendations_v2
+        WHERE run_date = CURRENT_DATE AND outcome = 'pending'
+    """)
+    v2_pending = (cur.fetchone() or {}).get("pending_v2", 0) or 0
+    v1_pending = summary.get("pending", 0) or 0
+    summary["pending"] = v1_pending + v2_pending
+    print(f"[dashboard] Pending parlays: {v1_pending} (v1) + {v2_pending} (v2) = {summary['pending']}")
 
     cur.close()
     conn.close()

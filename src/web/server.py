@@ -723,7 +723,7 @@ async def handle_regenerate_recommendations(request: web.Request) -> web.Respons
         fn = functools.partial(
             generate_recommendations,
             qualifying_legs,
-            max_recommendations=10,
+            max_recommendations=5,
             run_date=today_str,
         )
         loop = asyncio.get_event_loop()
