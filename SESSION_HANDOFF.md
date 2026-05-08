@@ -391,8 +391,7 @@ HAVING COUNT(DISTINCT l.parlay_id) > 2;
 ### **Monitoring**
 - Railway Dashboard: https://railway.app
 - Supabase Console: https://supabase.com
-- Web App: [Railway deployment URL]
-
+- Web App: https://mlb-agent.up.railway.app/
 ### **Current Blockers**
 - None - all systems operational
 
