@@ -595,11 +595,15 @@ async def handle_recommendation_history(request: web.Request) -> web.Response:
     date_param = request.rel_url.query.get("date", str(date.today()))
     try:
         history = get_recommendation_history(date_param)
+        print(f"[history] Fetched {len(history)} batches for {date_param}")
         return web.Response(
             text=json.dumps(history, default=str),
             content_type="application/json",
         )
     except Exception as exc:
+        print(f"[ERROR] handle_recommendation_history failed: {exc}")
+        import traceback
+        traceback.print_exc()
         return web.Response(
             text=json.dumps({"error": str(exc)}),
             content_type="application/json",

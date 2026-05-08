@@ -1549,6 +1549,7 @@ def get_recommendation_history(run_date: str) -> list[dict]:
         Each parlay has {id, rank, total_odds, avg_coverage, num_legs,
                          outcome, created_at, legs: [...]}
     """
+    print(f"[db.get_recommendation_history] Querying date: {run_date}")
     conn = get_conn()
     cur = conn.cursor()
     try:
@@ -1567,6 +1568,7 @@ def get_recommendation_history(run_date: str) -> list[dict]:
             (run_date,),
         )
         batches = [dict(r) for r in cur.fetchall()]
+        print(f"[db.get_recommendation_history] Found {len(batches)} batches")
 
         result = []
         for batch in batches:

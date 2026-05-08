@@ -2454,11 +2454,16 @@ startRecsRefreshTimer();
 
 // ── Recommendation History (right column) ────────────────────────────────────
 function loadRecommendationHistory(date) {
+  console.log('[history] Fetching for date:', date);
   fetch(`/api/recommendations/history?date=${date}&password=${encodeURIComponent(password)}`)
-    .then(r => r.json())
+    .then(r => {
+      console.log('[history] Response status:', r.status);
+      return r.json();
+    })
     .then(batches => {
+      console.log('[history] Received batches:', batches);
       const container = document.getElementById('batch-list');
-      if (!batches || batches.length === 0) {
+      if (!batches || !Array.isArray(batches) || batches.length === 0) {
         container.innerHTML = '<p style="color:var(--muted);padding:10px 0">No previous recommendations yet.</p>';
         return;
       }
@@ -2484,7 +2489,7 @@ function loadRecommendationHistory(date) {
       });
     })
     .catch(err => {
-      console.error('Failed to load history:', err);
+      console.error('[history] Fetch error:', err);
       document.getElementById('batch-list').innerHTML =
         '<p style="color:var(--red);padding:10px 0">Failed to load history.</p>';
     });
