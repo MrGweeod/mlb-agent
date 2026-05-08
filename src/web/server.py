@@ -590,7 +590,8 @@ async def handle_recommendations(request: web.Request) -> web.Response:
             # Compute win_probability as product of leg coverages
             win_prob = 1.0
             for leg in parlay["legs"]:
-                cov = (leg.get("coverage_pct") or 50) / 100
+                cov_pct = leg.get("coverage_pct") or 50
+                cov = float(cov_pct) / 100.0
                 win_prob *= cov
             parlay["win_probability"] = round(win_prob * 100, 1)
 
