@@ -1976,18 +1976,34 @@ def get_parlay_dashboard_data() -> dict:
     """)
     top_legs = [dict(r) for r in cur.fetchall()]
 
-    # ── Recent recommendations (last 20) ─────────────────────────────────────
+    # ── Recent recommendations (last 20, v1 + v2 combined) ───────────────────
     cur.execute("""
         SELECT
             id,
-            recommendation_date,
+            recommendation_date                AS recommendation_date,
             rank,
-            combined_odds,
+            combined_odds                      AS combined_odds,
             ROUND(win_probability::numeric, 1) AS win_probability,
             ROUND(edge_pct::numeric, 1)        AS edge_pct,
-            bet_status,
-            resolved_at
+            bet_status                         AS bet_status,
+            resolved_at,
+            'v1'                               AS schema_version
         FROM mlb_parlay_recommendations
+
+        UNION ALL
+
+        SELECT
+            id,
+            run_date::text                     AS recommendation_date,
+            rank,
+            total_odds                         AS combined_odds,
+            ROUND(avg_coverage::numeric, 1)    AS win_probability,
+            0.0                                AS edge_pct,
+            outcome                            AS bet_status,
+            NULL                               AS resolved_at,
+            'v2'                               AS schema_version
+        FROM mlb_parlay_recommendations_v2
+
         ORDER BY recommendation_date DESC, rank ASC
         LIMIT 20
     """)
