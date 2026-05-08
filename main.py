@@ -415,7 +415,7 @@ def generate_recommendations(
         ranked by edge_pct descending.
     """
     # Get up to 3× candidates to give the diversity filter room to work
-    candidates = build_hybrid_parlays(qualifying_legs, top_n=15)
+    candidates = build_hybrid_parlays(qualifying_legs, top_n=50)
     if not candidates:
         return []
 

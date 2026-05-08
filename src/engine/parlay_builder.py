@@ -181,7 +181,7 @@ def build_hybrid_parlays(
     MIN_PARLAY_ODDS = 1000
     MAX_PARLAY_ODDS = 1500
     MAX_LEGS_PER_GAME = 3
-    POOL_SIZE       = 20
+    POOL_SIZE       = 50
     MAX_CANDIDATES  = 15
     TIMEOUT_SECS    = 90
 
@@ -206,7 +206,26 @@ def build_hybrid_parlays(
     if not eligible:
         return []
 
-    pool = sorted(eligible, key=lambda l: l.get("composite_score", 0.0), reverse=True)[:POOL_SIZE]
+    eligible_sorted = sorted(eligible, key=lambda l: l.get("composite_score", 0.0), reverse=True)
+
+    # Quality validation: compare top 20 vs top 50 avg ML score
+    if len(eligible_sorted) >= 50:
+        top_20_avg = sum(l.get("composite_score", 0) for l in eligible_sorted[:20]) / 20
+        top_50_avg = sum(l.get("composite_score", 0) for l in eligible_sorted[:50]) / 50
+        quality_drop = ((top_20_avg - top_50_avg) / top_20_avg) * 100
+        print(f"  [parlay_builder] Quality validation:")
+        print(f"    Top 20 avg ML score: {top_20_avg:.1f}%")
+        print(f"    Top 50 avg ML score: {top_50_avg:.1f}%")
+        print(f"    Quality drop: {quality_drop:.1f}%")
+        if quality_drop > 10:
+            print(f"    WARNING: Quality drop >10% when expanding to top 50")
+    elif len(eligible_sorted) >= 20:
+        top_20_avg = sum(l.get("composite_score", 0) for l in eligible_sorted[:20]) / 20
+        print(f"  [parlay_builder] Quality validation:")
+        print(f"    Top 20 avg ML score: {top_20_avg:.1f}%")
+        print(f"    (Not enough legs for top 50 comparison)")
+
+    pool = eligible_sorted[:POOL_SIZE]
 
     print(
         f"  [parlay_builder] Received {len(all_legs)} scored legs | "
@@ -381,15 +400,17 @@ def build_hybrid_parlays(
         )
         return []
 
-    # Within-batch player diversity: no batter appears in more than one parlay.
+    # Within-batch player diversity: batter can appear in MAX 2 parlays per batch.
     # Pitchers are exempt (multiple pitcher props in same batch is fine).
     # Quality ordering is preserved — unique[] is already sorted by avg_composite DESC.
+    MAX_APPEARANCES_PER_PLAYER = 2
+
     diverse = [unique[0]]
-    used_players_batch: set = set()
+    player_appearance_counts: dict = {}
     for leg in unique[0]["legs"]:
         pid = leg.get("player_id") or leg.get("player_name", "")
         if leg.get("position", "") not in _PITCHER_POSITIONS:
-            used_players_batch.add(pid)
+            player_appearance_counts[pid] = player_appearance_counts.get(pid, 0) + 1
 
     for candidate in unique[1:]:
         candidate_batter_ids = {
@@ -397,16 +418,24 @@ def build_hybrid_parlays(
             for leg in candidate["legs"]
             if leg.get("position", "") not in _PITCHER_POSITIONS
         }
-        if candidate_batter_ids & used_players_batch:
-            continue  # skip — player already in a selected parlay this batch
+
+        # Check if any player would exceed max appearances
+        would_exceed = any(
+            player_appearance_counts.get(pid, 0) >= MAX_APPEARANCES_PER_PLAYER
+            for pid in candidate_batter_ids
+        )
+        if would_exceed:
+            continue  # skip — player would appear more than MAX_APPEARANCES_PER_PLAYER times
+
         diverse.append(candidate)
-        used_players_batch |= candidate_batter_ids
+        for pid in candidate_batter_ids:
+            player_appearance_counts[pid] = player_appearance_counts.get(pid, 0) + 1
         if len(diverse) >= top_n:
             break
 
     print(
         f"  [parlay_builder] Built {len(diverse)} parlays with within-batch diversity "
-        f"({len(used_players_batch)} unique batters used)"
+        f"({len(player_appearance_counts)} unique batters, max {MAX_APPEARANCES_PER_PLAYER} appearances each)"
     )
 
     # Correlation risk logging — no behavior change, for post-hoc analysis only
