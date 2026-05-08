@@ -2361,13 +2361,14 @@ function renderRecommendations(recs) {
   container.innerHTML = recs.map(rec => {
     const isBest = rec.rank === 1;
     const cardCls = isBest ? 'rec-card best-bet' : 'rec-card alternate';
-    const edgeStr = (rec.edge_pct >= 0 ? '+' : '') + rec.edge_pct.toFixed(1) + '%';
-    const edgeCls = rec.edge_pct >= 0 ? 'color:var(--green)' : 'color:var(--red)';
+    const edgePct = (rec.edge_pct != null && !isNaN(rec.edge_pct)) ? Number(rec.edge_pct) : 0;
+    const edgeStr = (edgePct >= 0 ? '+' : '') + edgePct.toFixed(1) + '%';
+    const edgeCls = edgePct >= 0 ? 'color:var(--green)' : 'color:var(--red)';
 
     const legsHtml = (rec.legs || []).map(leg => {
       const dir = (leg.direction === 'under') ? 'U' : 'O';
       const propStr = statLabel(leg.stat) + ' ' + dir + ' ' + (leg.line != null ? leg.line : '?');
-      const cov = leg.coverage_pct != null ? leg.coverage_pct.toFixed(1) + '%' : '—';
+      const cov = leg.coverage_pct != null ? parseFloat(leg.coverage_pct).toFixed(1) + '%' : '—';
       return `
         <div class="rec-leg-row">
           <div class="rec-leg-left">
@@ -2536,8 +2537,8 @@ function renderHistoryLegs(legs) {
   return legs.map(leg => {
     const dir = leg.direction === 'under' ? 'U' : 'O';
     const stat = leg.stat || '';
-    const cov = leg.coverage_pct != null ? leg.coverage_pct.toFixed(1)
-               : leg.coverage != null ? leg.coverage.toFixed(1) : '?';
+    const cov = leg.coverage_pct != null ? parseFloat(leg.coverage_pct).toFixed(1)
+               : leg.coverage != null ? parseFloat(leg.coverage).toFixed(1) : '?';
     return `
       <div class="history-leg-item">
         <span class="history-leg-details">

@@ -564,8 +564,7 @@ async def handle_recommendations(request: web.Request) -> web.Response:
                    avg_coverage,
                    num_legs,
                    outcome,
-                   created_at,
-                   edge_percent AS edge_pct
+                   created_at
             FROM mlb_parlay_recommendations_v2
             WHERE batch_id = %s
             ORDER BY rank
@@ -576,6 +575,7 @@ async def handle_recommendations(request: web.Request) -> web.Response:
 
         # Hydrate legs for each parlay (alias coverage → coverage_pct)
         for parlay in parlays:
+            parlay["edge_pct"] = 0.0
             cur.execute(
                 """
                 SELECT player_id, player_name, team, stat, line,
