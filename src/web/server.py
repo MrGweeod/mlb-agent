@@ -992,7 +992,7 @@ def create_app() -> web.Application:
 
 _ET = ZoneInfo("America/New_York")
 # Three daily pipeline runs (label, time-ET, function):
-#   morning  9:00 AM — resolution only (run_morning_pipeline)
+#   morning  9:00 AM — resolve yesterday + full fetch/score/build for today (run_morning_pipeline)
 #   midday  12:00 PM — targeted refresh, no SGO (run_targeted_pipeline)
 #   evening  5:30 PM — targeted refresh, no SGO (run_targeted_pipeline)
 _PIPELINE_SCHEDULE = [
@@ -1009,7 +1009,7 @@ async def _pipeline_scheduler() -> None:
     """
     Background task that runs scheduled pipelines at 9 AM, 12 PM, and 5:30 PM ET.
 
-    9 AM    → run_morning_pipeline()   (resolution only — no SGO)
+    9 AM    → run_morning_pipeline()   (resolve yesterday + full fetch/score/build for today)
     12 PM   → run_targeted_pipeline()  (targeted SGO fetch + lineup check)
     5:30 PM → run_targeted_pipeline()  (targeted SGO fetch + lineup check)
 
@@ -1018,7 +1018,7 @@ async def _pipeline_scheduler() -> None:
     """
     from main import run_morning_pipeline, run_targeted_pipeline
 
-    print("[scheduler] Morning pipeline scheduled at 9:00 AM ET (resolution only)")
+    print("[scheduler] Morning pipeline scheduled at 9:00 AM ET (resolution + full fetch/score/build)")
     print("[scheduler] Midday pipeline scheduled at 12:00 PM ET (targeted SGO fetch + lineup check)")
     print("[scheduler] Evening pipeline scheduled at 5:30 PM ET (targeted SGO fetch + lineup check)")
 
@@ -1099,7 +1099,7 @@ async def start_server() -> web.AppRunner:
 
     # Start the background pipeline scheduler
     asyncio.ensure_future(_pipeline_scheduler())
-    print("[web] Pipeline scheduler started (9 AM resolution, 12 PM + 5:30 PM full pipeline)")
+    print("[web] Pipeline scheduler started (9 AM resolution + full fetch, 12 PM + 5:30 PM targeted refresh)")
 
     return runner
 

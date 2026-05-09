@@ -838,10 +838,11 @@ def run_pipeline(starts_after_override=None) -> tuple[list[dict], str]:
 
 def run_morning_pipeline() -> None:
     """
-    Morning resolution pipeline (9 AM ET): resolve yesterday's outcomes and
-    update training data. Does NOT fetch props, score legs, or build parlays.
+    Morning pipeline (9 AM ET):
+      1. Resolve yesterday's outcomes and update training data.
+      2. Run the full pipeline to fetch props, score legs, and build parlays for today.
 
-    Live recommendations are served on-demand via /api/build-parlays?refresh=true.
+    This ensures today's scored legs are in the DB before the 12 PM targeted refresh runs.
     """
     today  = str(date.today())
     yesterday = str(date.today() - timedelta(days=1))
@@ -910,8 +911,10 @@ def run_morning_pipeline() -> None:
         print(f"  [health] Health check skipped: {_hc_err}")
 
     # Step 4: Log summary
-    print("\n[4/4] Morning pipeline complete")
-    print("  For live recommendations, use /api/build-parlays?refresh=true")
+    print("\n[4/4] Resolution complete — fetching fresh props for today...")
+
+    # Step 5: Full pipeline run for today (fetch props, score legs, build parlays)
+    run_pipeline()
 
 
 def run_targeted_pipeline(buffer_minutes: int = 15) -> None:
