@@ -677,10 +677,10 @@ async def handle_regenerate_recommendations(request: web.Request) -> web.Respons
         today = datetime.now(_ET).date()
         legs = get_scored_legs(str(today))
 
-        # Filter out games that have already started (5-min grace window)
+        # Filter out games starting within the next 15 minutes (forward buffer)
         et_tz = pytz.timezone("America/New_York")
         now_et = datetime.now(et_tz)
-        cutoff = now_et - timedelta(minutes=5)
+        cutoff = now_et + timedelta(minutes=15)
         active_legs = []
         for leg in legs:
             gst = leg.get("game_start_time")
@@ -694,7 +694,7 @@ async def handle_regenerate_recommendations(request: web.Request) -> web.Respons
             except Exception:
                 active_legs.append(leg)
 
-        print(f"[regenerate] {len(legs)} legs → {len(active_legs)} upcoming after filtering started games")
+        print(f"[regenerate] {len(legs)} legs → {len(active_legs)} upcoming after 15-min buffer filter (cutoff: {cutoff.strftime('%H:%M ET')})")
 
         if len(active_legs) < 4:
             return web.Response(

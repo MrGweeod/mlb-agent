@@ -641,7 +641,7 @@ def run_pipeline(starts_after_override=None) -> tuple[list[dict], str]:
     # ── Filter: remove legs whose games have already started ─────────────────
     _et_tz = pytz.timezone("America/New_York")
     _now_et = datetime.now(_et_tz)
-    _cutoff = _now_et - timedelta(minutes=5)
+    _cutoff = _now_et + timedelta(minutes=15)
     upcoming_legs = []
     for _leg in qualifying_legs:
         _gst = _leg.get("game_start_time")
