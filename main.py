@@ -643,20 +643,25 @@ def run_pipeline(starts_after_override=None) -> tuple[list[dict], str]:
     _now_et = datetime.now(_et_tz)
     _cutoff = _now_et + timedelta(minutes=15)
     upcoming_legs = []
+    _started_count = 0
+    _null_count = 0
     for _leg in qualifying_legs:
         _gst = _leg.get("game_start_time")
         if not _gst:
-            upcoming_legs.append(_leg)  # keep legs with no time data
-            continue
+            _null_count += 1
+            continue  # fail-closed: missing time = exclude
         try:
             _gt = datetime.strptime(_gst, "%Y-%m-%d %H:%M:%S")
             if _et_tz.localize(_gt) > _cutoff:
                 upcoming_legs.append(_leg)
+            else:
+                _started_count += 1
         except Exception:
-            upcoming_legs.append(_leg)
+            _null_count += 1
+            continue  # fail-closed: unparseable time = exclude
     print(
         f"  [filter_started] {len(qualifying_legs)} legs → "
-        f"{len(upcoming_legs)} upcoming (filtered {len(qualifying_legs) - len(upcoming_legs)} started)"
+        f"{len(upcoming_legs)} upcoming (filtered {_started_count} started, {_null_count} missing time)"
     )
     qualifying_legs = upcoming_legs
 
@@ -983,11 +988,12 @@ def run_targeted_pipeline(buffer_minutes: int = 15) -> None:
     # ── Step 5: Remove started/imminent games ────────────────────────────────
     upcoming = []
     started_count = 0
+    null_count = 0
     for leg in eligible:
         gst = leg.get("game_start_time")
         if not gst:
-            upcoming.append(leg)
-            continue
+            null_count += 1
+            continue  # fail-closed: missing time = exclude
         try:
             gt = datetime.strptime(str(gst), "%Y-%m-%d %H:%M:%S")
             if et_tz.localize(gt) > cutoff:
@@ -995,10 +1001,11 @@ def run_targeted_pipeline(buffer_minutes: int = 15) -> None:
             else:
                 started_count += 1
         except Exception:
-            upcoming.append(leg)
+            null_count += 1
+            continue  # fail-closed: unparseable time = exclude
 
     print(f"\n[3/8] Game-start filter: {len(eligible)} legs → {len(upcoming)} upcoming"
-          + (f" (removed {started_count} started)" if started_count else ""))
+          + (f" (removed {started_count} started, {null_count} missing time)" if (started_count or null_count) else ""))
 
     if not upcoming:
         print("  No upcoming legs after game-start filter. Exiting.")

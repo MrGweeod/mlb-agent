@@ -364,16 +364,17 @@ async def handle_build_parlays(request: web.Request) -> web.Response:
 
         et_tz = pytz.timezone("America/New_York")
         now_et = datetime.now(et_tz)
-        cutoff = now_et - timedelta(minutes=5)
+        cutoff = now_et + timedelta(minutes=15)
 
         upcoming_legs = []
         started_count = 0
+        null_count = 0
 
         for leg in scored_legs:
             gst = leg.get("game_start_time")
             if not gst:
-                upcoming_legs.append(leg)
-                continue
+                null_count += 1
+                continue  # fail-closed: missing time = exclude
             try:
                 gt = datetime.strptime(str(gst), "%Y-%m-%d %H:%M:%S")
                 if et_tz.localize(gt) > cutoff:
@@ -381,11 +382,12 @@ async def handle_build_parlays(request: web.Request) -> web.Response:
                 else:
                     started_count += 1
             except Exception:
-                upcoming_legs.append(leg)
+                null_count += 1
+                continue  # fail-closed: unparseable time = exclude
 
         print(
             f"[build_parlays] {len(scored_legs)} scored legs → "
-            f"{len(upcoming_legs)} upcoming (filtered {started_count} started)"
+            f"{len(upcoming_legs)} upcoming (filtered {started_count} started, {null_count} missing time)"
         )
 
         if len(upcoming_legs) < 4:
@@ -682,19 +684,24 @@ async def handle_regenerate_recommendations(request: web.Request) -> web.Respons
         now_et = datetime.now(et_tz)
         cutoff = now_et + timedelta(minutes=15)
         active_legs = []
+        started_count = 0
+        null_count = 0
         for leg in legs:
             gst = leg.get("game_start_time")
             if not gst:
-                active_legs.append(leg)
-                continue
+                null_count += 1
+                continue  # fail-closed: missing time = exclude
             try:
                 gt = datetime.strptime(gst, "%Y-%m-%d %H:%M:%S")
                 if et_tz.localize(gt) > cutoff:
                     active_legs.append(leg)
+                else:
+                    started_count += 1
             except Exception:
-                active_legs.append(leg)
+                null_count += 1
+                continue  # fail-closed: unparseable time = exclude
 
-        print(f"[regenerate] {len(legs)} legs → {len(active_legs)} upcoming after 15-min buffer filter (cutoff: {cutoff.strftime('%H:%M ET')})")
+        print(f"[regenerate] {len(legs)} legs → {len(active_legs)} upcoming after 15-min buffer filter (cutoff: {cutoff.strftime('%H:%M ET')}, filtered {started_count} started, {null_count} missing time)")
 
         if len(active_legs) < 4:
             return web.Response(
