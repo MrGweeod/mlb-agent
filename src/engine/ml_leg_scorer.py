@@ -21,8 +21,9 @@ import pickle
 
 import numpy as np
 
-_HERE       = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH  = os.path.join(_HERE, "../../models/leg_scorer_v2.pkl")
+_HERE            = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH       = os.path.join(_HERE, "../../models/leg_scorer_v2.pkl")
+CALIBRATOR_PATH  = os.path.join(_HERE, "../../models/stat_specific_calibrator.pkl")
 
 _PITCHER_STATS = frozenset({"inningsPitched", "hitsAllowed", "earnedRuns"})
 
@@ -62,6 +63,7 @@ class CalibratedModel:
 
 
 _cached: dict | None = None
+_calibrator: dict | None = None
 
 
 class _CompatUnpickler(pickle.Unpickler):
@@ -81,6 +83,31 @@ class _CompatUnpickler(pickle.Unpickler):
 
 def _compat_load(file_obj):
     return _CompatUnpickler(file_obj).load()
+
+
+def _load_calibrator() -> dict:
+    global _calibrator
+    if _calibrator is not None:
+        return _calibrator
+    path = os.path.abspath(CALIBRATOR_PATH)
+    if not os.path.exists(path):
+        print(f"  [ml_scorer] WARNING: calibrator not found at {path}, skipping calibration")
+        _calibrator = {}
+        return _calibrator
+    with open(path, "rb") as f:
+        _calibrator = pickle.load(f)
+    stat_count = len(_calibrator.get("calibrator", {}))
+    print(f"  [ml_scorer] Calibrator loaded with {stat_count} stat types from {path}")
+    return _calibrator
+
+
+def apply_calibration(composite_score: float, stat: str = "") -> float:
+    """Apply stat-specific isotonic calibration; falls back to identity for unknown stats."""
+    cal = _load_calibrator()
+    calibrators = cal.get("calibrator", {})
+    if stat in calibrators:
+        return round(float(calibrators[stat].predict([composite_score / 100])[0]) * 100, 2)
+    return composite_score
 
 
 def _load_model() -> dict:
@@ -163,6 +190,9 @@ def score_legs_ml(legs: list[dict]) -> list[dict]:
         probs = saved["model"].predict_proba(X)[:, 1]
         for leg, p in zip(legs, probs):
             leg["composite_score"] = round(float(p) * 100, 2)
+            leg["composite_score"] = apply_calibration(
+                leg["composite_score"], leg.get("stat", "")
+            )
         scores = [leg["composite_score"] for leg in legs]
         print(
             f"  [ml_scorer] Scored {len(legs)} legs | "
@@ -181,7 +211,9 @@ def score_legs_ml(legs: list[dict]) -> list[dict]:
             try:
                 features = np.array([_extract_features(leg)], dtype=np.float32)
                 p = float(saved["model"].predict_proba(features)[0, 1])
-                leg["composite_score"] = round(p * 100, 2)
+                leg["composite_score"] = apply_calibration(
+                    round(p * 100, 2), leg.get("stat", "")
+                )
             except Exception:
                 leg.setdefault("composite_score", 50.0)
                 failures += 1
