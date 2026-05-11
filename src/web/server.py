@@ -787,9 +787,17 @@ async def handle_regenerate_recommendations(request: web.Request) -> web.Respons
 
         today = datetime.now(_ET).date()
         legs = get_scored_legs(str(today))
+        print(f"[regenerate] Loaded {len(legs)} legs from database")
 
         # Fallback: fetch game_start_time on-the-fly for any legs missing it
-        legs = _fetch_missing_game_times(legs, str(today))
+        missing_count = sum(1 for leg in legs if not leg.get("game_start_time"))
+        if missing_count > 0:
+            print(f"[regenerate] {missing_count}/{len(legs)} legs missing game_start_time, fetching...")
+            legs = _fetch_missing_game_times(legs, str(today))
+            still_missing = sum(1 for leg in legs if not leg.get("game_start_time"))
+            print(f"[regenerate] After fetch: {still_missing} still NULL (fixed {missing_count - still_missing})")
+        else:
+            print(f"[regenerate] All {len(legs)} legs have game_start_time, skipping fetch")
 
         # Filter out games starting within the next 15 minutes (forward buffer)
         et_tz = pytz.timezone("America/New_York")
