@@ -110,6 +110,94 @@ def apply_calibration(composite_score: float, stat: str = "") -> float:
     return composite_score
 
 
+def apply_temporary_scoring_adjustments(scored_legs: list[dict]) -> list[dict]:
+    """
+    Three-part temporary fix until model retraining (May 11, 2026).
+
+    Based on diagnostic analysis of 124 parlays (4,400 legs):
+
+    1. Direction bias: Unders overscored by 26pp, overs underscored by 18pp
+       - Root cause: Model overfit to direction feature (77% importance)
+       - Data: Unders score 66.9% avg but win 40.7%, overs score 40.3% but win 58.9%
+
+    2. Odds signal: Long-odds props contain market information model doesn't capture
+       - Root cause: Model assigns same score to +100 and +160 props
+       - Data: Selected unders +155 avg odds (29.4% win), rejected unders +107 (39.5% win)
+       - Only penalize unders - overs at long odds perform well (70.2% win rate)
+
+    3. Same-game bias: Multiple props from same game overscored
+       - Root cause: Calibrator not accounting for correlation
+       - Data: Same-game legs 69.2% score → 41.7% win, isolated 64.7% → 46.1% win
+
+    Remove this function after:
+    - Direction-split calibrator deployed (14 calibrators: 7 stats × 2 directions)
+    - Base model retrained with balanced direction sampling + odds as feature
+
+    Args:
+        scored_legs: List of leg dicts with composite_score already populated
+
+    Returns:
+        scored_legs: Same list with adjusted composite_scores
+    """
+    # Count game frequencies for same-game adjustment
+    game_counts: dict = {}
+    for leg in scored_legs:
+        game_key = (leg.get("team", ""), leg.get("run_date", ""))
+        game_counts[game_key] = game_counts.get(game_key, 0) + 1
+
+    adjusted_count = 0
+    direction_adjustments: list[float] = []
+    odds_adjustments: list[float] = []
+    game_adjustments: list[float] = []
+
+    for leg in scored_legs:
+        original_score = leg.get("composite_score", 0)
+        adjusted_score = original_score
+
+        direction = leg.get("direction", "").lower()
+        odds = leg.get("odds", 0)
+        game_key = (leg.get("team", ""), leg.get("run_date", ""))
+
+        # Adjustment #1: Direction bias
+        if direction == "over":
+            adjusted_score = min(adjusted_score + 18, 95)
+            direction_adjustments.append(+18)
+        elif direction == "under":
+            adjusted_score = max(adjusted_score - 26, 5)
+            direction_adjustments.append(-26)
+
+        # Adjustment #2: Odds signal (only for unders - overs perform well at all odds)
+        if direction == "under":
+            if odds >= 150:
+                adjusted_score = max(adjusted_score - 15, 5)
+                odds_adjustments.append(-15)
+            elif odds >= 120:
+                adjusted_score = max(adjusted_score - 8, 5)
+                odds_adjustments.append(-8)
+
+        # Adjustment #3: Same-game bias
+        if game_counts[game_key] >= 2:
+            adjusted_score = max(adjusted_score - 20, 5)
+            game_adjustments.append(-20)
+
+        if adjusted_score != original_score:
+            leg["composite_score"] = round(adjusted_score, 2)
+            adjusted_count += 1
+
+    print(f"  [ml_scorer] Applied temporary adjustments to {adjusted_count}/{len(scored_legs)} legs")
+    if direction_adjustments:
+        avg_dir = sum(direction_adjustments) / len(direction_adjustments)
+        n_over = len([x for x in direction_adjustments if x > 0])
+        n_under = len([x for x in direction_adjustments if x < 0])
+        print(f"    Direction: avg {avg_dir:+.1f}pp ({n_over} overs boosted, {n_under} unders penalized)")
+    if odds_adjustments:
+        print(f"    Odds signal: {len(odds_adjustments)} long-odds unders penalized")
+    if game_adjustments:
+        print(f"    Same-game: {len(game_adjustments)} legs from concentrated games penalized")
+
+    return scored_legs
+
+
 def _load_model() -> dict:
     global _cached
     if _cached is not None:
@@ -199,6 +287,7 @@ def score_legs_ml(legs: list[dict]) -> list[dict]:
             f"avg={sum(scores)/len(scores):.1f} | "
             f"min={min(scores):.1f} | max={max(scores):.1f}"
         )
+        apply_temporary_scoring_adjustments(legs)
     except FileNotFoundError as exc:
         print(f"  [ml_scorer] ERROR: {exc}")
         for leg in legs:
@@ -219,4 +308,5 @@ def score_legs_ml(legs: list[dict]) -> list[dict]:
                 failures += 1
         if failures:
             print(f"  [ml_scorer] {failures} legs fell back to composite_score=50.0")
+        apply_temporary_scoring_adjustments(legs)
     return legs
