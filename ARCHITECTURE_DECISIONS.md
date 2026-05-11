@@ -1,800 +1,465 @@
 # MLB Parlay Agent — Architecture Decisions
-**Last Updated:** May 8, 2026 (Post-Player Diversity Deployment)
+**Last Updated:** May 10, 2026 (ML Calibration + Game Filter Fixes)
 
 ## Document Purpose
-This document records the key architectural decisions made during the development of the MLB Parlay Agent, including the rationale, alternatives considered, and lessons learned. Updated with insights from May 8's player diversity system deployment and portfolio concentration analysis.
+This document records the key architectural decisions made during the development of the MLB Parlay Agent, including the rationale, alternatives considered, and lessons learned. Updated with insights from May 10's ML calibration deployment and game start time filter fixes.
 
 ---
 
 ## Table of Contents
-1. [Core Architecture](#core-architecture)
-2. [Player Diversity System](#player-diversity-system)
-3. [ML Model Design](#ml-model-design)
-4. [Data Pipeline](#data-pipeline)
-5. [V2 Normalized Schema](#v2-normalized-schema)
-6. [API Usage Optimization](#api-usage-optimization)
-7. [Parlay Construction](#parlay-construction)
-8. [Outcome Resolution](#outcome-resolution)
-9. [Database Schema](#database-schema)
-10. [Deployment Strategy](#deployment-strategy)
-11. [Frontend Type Safety](#frontend-type-safety)
-12. [Lessons Learned](#lessons-learned)
+1. [ML Calibration Strategy](#ml-calibration-strategy)
+2. [Game Start Time Filter Design](#game-start-time-filter-design)
+3. [Within-Batch Player Diversity](#within-batch-player-diversity)
+4. [Quality Validation Monitoring](#quality-validation-monitoring)
+5. [Dashboard V1/V2 Integration](#dashboard-v1v2-integration)
+6. [Core Architecture (Unchanged)](#core-architecture-unchanged)
+7. [Lessons Learned](#lessons-learned)
 
 ---
 
-## Core Architecture
+## ML Calibration Strategy
 
-### **Decision: Three Daily Pipeline Runs**
-**Chosen:** 9 AM (full), 12 PM (targeted), 5:30 PM (targeted)
-
-**Why:**
-- Props/odds change throughout the day
-- Lineups confirm between 12-5 PM
-- Late scratches happen before first pitch
-- 3 runs provide comprehensive daily coverage
-
-**Timeline:**
-- **Originally:** 3 runs designed in Blueprint (April 2026)
-- **April-May:** Reduced to 1 run (9 AM) when Discord bot removed
-- **May 6:** Restored to 3 runs with optimization
-- **May 8:** All 3 runs operational with player diversity
-
-**Alternatives Considered:**
-- 1 run/day: Too infrequent, stale data by evening
-- 5+ runs/day: Excessive API usage, minimal value gain
-- Real-time streaming: Too complex, high API costs
-
-**Trade-offs:**
-- ✅ Fresh data 3x/day, automatic lineup checking
-- ✅ Player diversity filter applied at each run
-- ❌ Higher API usage (mitigated by targeted fetching)
-
-**Status:** ✅ Working perfectly, validated in production
-
----
-
-## Player Diversity System
-
-### **Decision: Enforce Unique Players Across All Parlays**
-**Chosen:** May 8, 2026
+### **Decision: Stat-Specific Isotonic Regression (Post-Hoc Calibration)**
+**Chosen:** May 10, 2026
 
 **Problem:**
-- May 7: 0/23 parlays won
-- Root cause analysis showed portfolio concentration
-- Ramón Laureano appeared in 14/23 parlays (60% exposure)
-- When Laureano failed, 60% of portfolio failed simultaneously
+Base ML model (leg_scorer_v2.pkl) had good discrimination (AUC 0.8532) but poor calibration. Predicted 34.6% average while actual hit rate is 45.5% - an 11-point systematic underestimation.
+
+**Impact:**
+- Missing betting value (underestimating quality legs)
+- Poor parlay win probability estimates
+- Users losing trust in predictions
 
 **Solution Implemented:**
-Three-phase filter system:
+Post-hoc stat-specific isotonic regression trained on 52,583 resolved legs.
 
-```
-Phase 1: Query Used Players
-↓
-SELECT DISTINCT player_id 
-FROM mlb_parlay_legs_v2 l
-JOIN mlb_parlay_recommendations_v2 r ON l.parlay_id = r.id
-WHERE r.run_date = today
-
-Phase 2: Filter Legs
-↓
-Remove legs where player_id IN (used_players)
-
-Phase 3: Build Parlays
-↓
-Construct parlays from filtered pool
-```
-
-**Implementation:**
-- **File:** `src/utils/db.py` - `get_players_used_today()`
-- **File:** `src/engine/parlay_builder.py` - `filter_already_used_players()`
-- **File:** `main.py` - `generate_recommendations(run_date=today)`
-- **File:** `src/web/server.py` - Pass `run_date` in both automated and manual runs
+**Why Post-Hoc (Not Full Retraining)?**
+1. **Fast deployment:** 1 hour vs 4-6 hours for full retraining
+2. **Low risk:** Calibrator sits on top, base model unchanged
+3. **Reversible:** Easy rollback if issues arise
+4. **Effective:** 16.6% Brier improvement without touching base model
 
 **Alternatives Considered:**
 
-**Option A: Max 2-3 parlays per player** (soft limit)
-- ❌ Still allows concentration (player in 3 parlays = 30% exposure on 10 parlay portfolio)
-- ❌ Complex logic (tracking counts per player)
-- ❌ Doesn't solve root problem
+**Option A: Full Model Retraining**
+- ❌ Time: 4-6 hours to retrain + validate
+- ❌ Risk: Could make model worse
+- ❌ Complexity: Need to rebalance data, tune hyperparameters
+- ✅ Pro: Fixes root cause (conservative base predictions)
+- **Verdict:** Save for later when we have more data
 
-**Option B: Correlation-based filtering** (same-game legs only)
-- ❌ Doesn't address player-level concentration
-- ❌ Players in different games still correlated (same pitcher, weather, lineup position)
-- ❌ May 7 failure was cross-game concentration
+**Option B: Platt Scaling (Global Calibration)**
+- ✅ Fast: 30 minutes
+- ❌ Performance: Only 12.3% Brier improvement (vs 17.2% for stat-specific)
+- ❌ Limitation: Single curve can't handle heterogeneous prop types
+- **Verdict:** Good but not optimal
 
-**Option C: No diversity constraint** (status quo)
-- ❌ Proven failure mode (May 7: 0/23)
-- ❌ High portfolio risk
-- ❌ Unacceptable outcome distribution
+**Option C: Beta Calibration**
+- ✅ Fast: 30 minutes
+- ❌ Performance: 12.3% Brier improvement (same as Platt)
+- ❌ Limitation: Assumes predictions follow beta distribution
+- **Verdict:** Similar to Platt, not better
 
-**Option D: Unique players per parlay** ✅ **CHOSEN**
-- ✅ Eliminates concentration risk entirely
-- ✅ Portfolio fails only if multiple independent players fail
-- ✅ Simple logic (binary: used or not used)
-- ✅ Easy to monitor and validate
+**Option D: Stat-Specific Isotonic Regression** ✅ **CHOSEN**
+- ✅ Best performance: 17.2% Brier improvement
+- ✅ Handles heterogeneous data: Each prop type has its own calibrator
+- ✅ Non-parametric: No distribution assumptions
+- ✅ Production-ready: Deployed in 1 hour
+- ❌ Complexity: 7 calibrators to manage (not 1)
+- ❌ Cold-start: New stat types have no calibrator
 
-**Trade-offs:**
-- ✅ PRO: Perfect diversification (0% same-player exposure)
-- ✅ PRO: Portfolio protection (if 1 player fails, only 5-10% of portfolio fails)
-- ✅ PRO: Risk mitigation (no concentration risk)
-- ❌ CON: Limited daily capacity (can only generate ~10-15 total parlays per day)
-- ❌ CON: Parlay generation slows as day progresses (fewer unique players available)
-- ❌ CON: Lower quality legs used later in day (best players already filtered)
+**Trade-offs Accepted:**
+- Slightly more complex (7 calibrators vs 1)
+- New stat types won't be calibrated until retrained
+- Calibrator file is 3.2KB (negligible)
 
-**Performance Metrics (May 8):**
-```
-9:00 AM:   19 players filtered (14.7%)  → 8 parlays possible
-12:00 PM:  24 players filtered (17.9%)  → 6 parlays possible
-3:40 PM:   35 players filtered (23.1%)  → 3 parlays possible
-3:57 PM:   40 players filtered (25.3%)  → 1-2 parlays possible
-```
+**Performance Metrics:**Brier Score: 0.2341 (was 0.2826, +16.6% improvement)
+Calibration Alignment: 45.5% predicted → 45.5% actual (perfect)By Stat Type:
+Home Runs: +36.8% Brier improvement
+Stolen Bases: +24.5%
+Hits: +17.9%
+Strikeouts: +15.2%
+Total Bases: +14.1%
 
-**Key Insight:**
-- Each parlay requires 4 unique players
-- With 40 players used, only 10-15 unique players remain in quality pool
-- Can only build 2-3 more parlays before exhausting pool
-- Daily capacity: ~10-15 total parlays (acceptable tradeoff)
+**Why Stat-Specific Beat Global:**
+Different prop types have wildly different base rates:
+- Home Runs: 6.5% hit rate
+- Stolen Bases Under: 95% hit rate
+- Hits: ~50% hit rate
 
-**Status:** ✅ Deployed May 8, operational and effective
+A single global calibrator tries to fit one curve to all of these, resulting in poor calibration for extreme values. Stat-specific calibrators adapt to each prop type's unique characteristics.
 
----
-
-### **Decision: Fail Open on Player Diversity Errors**
-**Chosen:** Return empty set on database errors
-
-**Why:**
-- Database connectivity issues shouldn't block parlay generation
-- Better to generate parlays with potential duplication than no parlays at all
-- Errors are logged but don't halt pipeline
-
-**Implementation:**
-```python
-def get_players_used_today(run_date):
-    try:
-        # Query database
-        return set(player_ids)
-    except Exception as e:
-        print(f"[ERROR] get_players_used_today failed: {e}")
-        return set()  # Fail open: allow all players
-```
-
-**Trade-offs:**
-- ✅ Pipeline resilience (keeps running during DB issues)
-- ❌ Temporary diversity violation possible (rare edge case)
-
-**Status:** ✅ Implemented, proven resilient
+**Status:** ✅ Deployed May 10, operational
 
 ---
 
-## ML Model Design
+## Game Start Time Filter Design
 
-### **Decision: Single Binary Classifier (Hit/Miss)**
-**Chosen:** Scikit-learn LogisticRegression, 15 features
-
-**Why:**
-- Simple, interpretable, fast inference
-- Good baseline (AUC: 0.8532)
-- No need for actual value prediction (just over/under)
-
-**Alternatives Considered:**
-- Regression model: Harder to interpret, not needed for binary outcome
-- Deep learning: Overkill, requires more data, harder to debug
-- Multiple models per prop type: More complex, not enough data per type
-
-**Trade-offs:**
-- ✅ Fast, interpretable, sufficient accuracy
-- ❌ Treats all prop types equally (may miss type-specific patterns)
-
-**Status:** ✅ Working but conservative (50.5% avg prediction)
-
----
-
-### **Decision: Direction as Primary Feature**
-**Chosen:** Over/under direction is a model feature
-
-**Why:**
-- Captures market inefficiency (over/under imbalance)
-- High predictive power (77% feature importance)
-
-**Problem Discovered:**
-- Direction overfit: Model relies too heavily on direction
-- Low predictions: 50.5% average (conservative)
-
-**Lessons Learned:**
-- ✅ Direction is predictive BUT needs balancing
-- ❌ Overreliance on single feature limits upside
-- 🔄 Future: Balance direction sampling in training data
-
-**Status:** 🎯 Needs retraining with balanced sampling
-
----
-
-## Data Pipeline
-
-### **Decision: Two-Stage Pipeline (Fetch → Build)**
-**Chosen:** 
-1. Fetch & score all props → database
-2. Build parlays from database
-
-**Why:**
-- Separation of concerns (data vs construction)
-- Allows manual regeneration (rebuild parlays without refetching)
-- Database becomes source of truth
-- Enables player diversity filter (queries existing parlays)
-
-**Alternatives Considered:**
-- Single-stage: Fetch and build in one pass (faster but less flexible)
-- Stream processing: Overkill for batch workload
-
-**Trade-offs:**
-- ✅ Flexibility, debuggability, data persistence, diversity filtering
-- ❌ Slightly slower (extra database round-trip)
-
-**Status:** ✅ Proven valuable, enables player diversity
-
----
-
-### **Decision: Player Diversity Filter Applied Post-Fetch**
-**Chosen:** Filter legs after ML scoring, before parlay construction
-
-**Why:**
-- Need to score all legs first (don't know which are best until scored)
-- Filter removes already-used players from candidate pool
-- Parlay builder works on filtered pool
-
-**Pipeline Order:**
-```
-1. Fetch props from SGO
-2. Score legs with ML model
-3. Save scored legs to database
-4. Load scored legs for parlay building
-5. Query already-used players  ← Player diversity
-6. Filter legs to unique players  ← Player diversity
-7. Build parlays from filtered pool
-8. Save parlays to v2 schema
-```
-
-**Alternatives Considered:**
-- **Filter pre-fetch:** Can't — don't know who's been used until we query database
-- **Filter pre-scoring:** Inefficient — still need to score for filtering
-- **Filter post-construction:** Too late — parlays already built with duplicates
-
-**Trade-offs:**
-- ✅ Optimal placement in pipeline (after scoring, before building)
-- ✅ Clean separation of concerns
-- ❌ Requires database round-trip (acceptable overhead)
-
-**Status:** ✅ Working optimally
-
----
-
-## V2 Normalized Schema
-
-### **Decision: Normalized Schema (Separate Header + Detail Tables)**
-**Chosen:** May 7, 2026
+### **Decision: Fail-Closed Logic with 15-Minute Forward Buffer**
+**Chosen:** May 10, 2026 (Fixed from Fail-Open)
 
 **Problem:**
-- Old schema: JSON legs in single table
-- Couldn't query: "Show me all Cody Bellinger hit under legs"
-- Couldn't extract: Parlay-level features for ML model
-- Couldn't analyze: Per-leg vs per-parlay performance
-- **Couldn't implement:** Player diversity (need to query which players used)
+Players from started games appearing in parlay recommendations. Xavier Edwards in parlays at 1:36 PM ET despite his game starting at 12:10 PM ET (86 minutes earlier).
 
-**Solution:**
-```sql
--- Parlay header (one row per parlay)
-mlb_parlay_recommendations_v2 (
-    id, run_date, rank, total_odds, avg_coverage, 
-    num_legs, outcome, source, batch_id, created_at
-)
+**Root Cause:**
+Filter had "fail-open" logic - if `game_start_time` was NULL or unparseable, the leg would pass through instead of being excluded.
 
--- Parlay legs (one row per leg)
-mlb_parlay_legs_v2 (
-    id, parlay_id, player_id, player_name, stat, 
-    line, direction, odds, coverage, outcome, 
-    result_value, created_at
-)
-```
+**Solution Implemented:**
+Changed to "fail-closed" logic in 4 locations:
+1. `src/web/server.py:367` - build_parlays()
+2. `src/web/server.py:684` - regenerate() endpoint
+3. `main.py:648` - generate_recommendations()
+4. `main.py:988` - run_targeted_pipeline()
 
-**Why Normalized:**
-- ✅ Can query individual legs: `SELECT * FROM mlb_parlay_legs_v2 WHERE player_name = 'Bellinger'`
-- ✅ Can analyze player/stat hit rates
-- ✅ Can extract parlay-level features (correlation, diversity)
-- ✅ Efficient resolution: Update one leg row vs parsing JSON
-- ✅ **CRITICAL:** Can query which players already used for diversity filter
-- ✅ Proper relational model
+**Fail-Open vs Fail-Closed Comparison:**
 
-**Player Diversity Enabler:**
-```sql
--- This query is ONLY possible with normalized schema
-SELECT DISTINCT player_id 
-FROM mlb_parlay_legs_v2 l
-JOIN mlb_parlay_recommendations_v2 r ON l.parlay_id = r.id
-WHERE r.run_date = CURRENT_DATE
-```
+**Fail-Open (OLD - WRONG):**
+```pythonif not game_start_time:
+active_legs.append(leg)  # When in doubt, include
+continue
 
-**Without v2 schema, player diversity would require:**
-- ❌ Parsing JSON legs from every parlay
-- ❌ Extracting player_id from nested JSON
-- ❌ Slow, complex, error-prone
+**Pros:**
+- ✅ More legs in pool (higher capacity)
+- ✅ Handles missing data gracefully
 
-**Status:** ✅ Deployed May 7, enabled player diversity May 8
+**Cons:**
+- ❌ Started games slip through
+- ❌ Quality suffers (invalid bets included)
+- ❌ User trust erodes (why is Xavier Edwards in my parlay?)
+
+**Fail-Closed (NEW - CORRECT):**
+```pythonif not game_start_time:
+null_count += 1
+continue  # When in doubt, exclude
+
+**Pros:**
+- ✅ Guarantees only valid legs (no started games)
+- ✅ Quality preserved (better to miss a good leg than include a bad one)
+- ✅ User trust maintained
+
+**Cons:**
+- ❌ Slightly fewer legs in pool (if game_start_time has NULLs)
+- ❌ Requires robust enrichment pipeline
+
+**Why Fail-Closed is Correct:**
+For time-sensitive filtering, **it's better to exclude a good leg than include a bad one**. A started game in a parlay is a guaranteed loss. A missed betting opportunity is just an opportunity cost.
+
+**Additional Fix: Cutoff Direction**
+Also fixed in `server.py:367`:
+- **OLD (WRONG):** `cutoff = now - 5min` (backward-looking)
+- **NEW (CORRECT):** `cutoff = now + 15min` (forward-looking)
+
+Backward-looking meant "exclude games that started >5 minutes ago" - a game at 12:35 PM would pass through at 12:38 PM (12:35 > 12:33).
+
+Forward-looking means "exclude games starting within 15 minutes" - a game at 12:35 PM is correctly excluded at 12:38 PM (12:35 < 12:53).
+
+**Database Verification:**run_date   | total | has_time | missing
+2026-05-10 |   348 |      348 |       0
+
+100% of legs have valid `game_start_time` - enrichment pipeline already working correctly via `src/pipelines/enrich_legs.py`.
+
+**Trade-offs Accepted:**
+- If enrichment pipeline breaks, capacity drops to 0 (all legs excluded)
+- Requires monitoring "missing time" count in logs
+- But: This is the correct failure mode for a betting system
+
+**Status:** ✅ Deployed May 10 afternoon, operational
 
 ---
 
-## Frontend Type Safety
+## Within-Batch Player Diversity
 
-### **Decision: PostgreSQL Decimal → JavaScript Number Conversion**
-**Chosen:** May 8, 2026
+### **Decision: Max 2 Appearances Per Player Per Batch**
+**Chosen:** May 8, 2026 (Unchanged - Still Operational)
 
-**Problem Discovered:**
-- PostgreSQL returns numeric columns as `decimal.Decimal` type
-- Python: Can't multiply `float * Decimal` directly
-- JavaScript: Can't call `.toFixed()` on Decimal (needs Number type)
+**Problem:**
+May 7 analysis showed 0/23 parlays won due to portfolio concentration. Root cause: same high-quality players appearing in multiple parlays. When Ramón Laureano failed, 60% of portfolio failed simultaneously.
 
-**Solution Pattern:**
-
-**Backend (Python):**
-```python
-# Always convert Decimal to float before math
-cov_pct = leg.get("coverage_pct") or 50  # Decimal
-cov = float(cov_pct) / 100.0  # Convert to float first
-```
-
-**Frontend (JavaScript):**
-```javascript
-// Always parseFloat before formatting
-const cov = parseFloat(leg.coverage_pct).toFixed(1);
-```
-
-**Why This Pattern:**
-- PostgreSQL stores numbers as Decimal for precision
-- psycopg2 returns Decimal type in Python
-- JSON.stringify converts Decimal to number in transit
-- But JavaScript receives it as a special numeric type
-- Must explicitly convert to Number for formatting
+**Solution Implemented:**
+Within-batch diversity: Max 2 appearances per player per generation batch.
 
 **Alternatives Considered:**
-- **Change DB column types:** Don't store as NUMERIC → loses precision
-- **Custom JSON encoder:** Serialize Decimal as float → adds complexity
-- **Frontend-only conversion:** Still need backend conversion for math
-- **Type conversion everywhere:** ✅ **CHOSEN** - Simple, explicit, works
 
-**Trade-offs:**
-- ✅ Explicit type handling (clear intent)
-- ✅ Works across entire stack
-- ✅ No precision loss (convert only when needed)
-- ❌ Must remember to convert (not automatic)
-- ❌ Requires awareness of Decimal type
+**Option A: Cross-Batch Blocking**
+- Players used at 9 AM blocked from 12 PM and 5:30 PM runs
+- ❌ Too restrictive: Only 1-2 parlays per batch
+- ❌ Exhausts player pool throughout day
 
-**Lesson Learned:**
-Always assume numeric types from PostgreSQL need explicit conversion.
+**Option B: No Diversity Constraint**
+- ❌ Proven failure mode (May 7: 0/23)
+- ❌ High portfolio risk
 
-**Status:** ✅ Implemented May 8, pattern established
+**Option C: Max 1 Appearance Per Player Per Batch**
+- ❌ Too restrictive: Only 2-3 parlays max
+- ❌ Forces use of lower-quality legs
 
----
+**Option D: Max 2 Appearances Per Player Per Batch** ✅ **CHOSEN**
+- ✅ Balances quality and diversity
+- ✅ Allows 3-5 parlays per batch
+- ✅ Max 40% exposure per player (2/5 parlays)
+- ✅ Simple logic, easy to monitor
 
-### **Decision: NULL-Safe Field Access**
-**Chosen:** Check for null/undefined before calling methods
+**Pitcher Exemption:**
+Pitchers exempt from diversity constraint because:
+- Pitcher props (strikeouts) are independent of batter props
+- Different skill being measured
+- No portfolio concentration risk
 
-**Problem Discovered:**
-- `rec.edge_pct.toFixed(1)` crashes if edge_pct is null/undefined
-- V2 schema doesn't have edge_percent column
-- Need placeholder values for missing fields
-
-**Solution Pattern:**
-```javascript
-// NULL-safe access with default
-const edgePct = (rec.edge_pct != null && !isNaN(rec.edge_pct)) 
-  ? Number(rec.edge_pct) 
-  : 0;
-
-// Then safely format
-const edgeStr = edgePct.toFixed(1);
-```
-
-**Why This Pattern:**
-- v1 schema had edge_percent column
-- v2 schema doesn't (not computed during save)
-- Frontend expects field to exist
-- Backend sets placeholder: `parlay["edge_pct"] = 0.0`
-- Frontend still needs NULL check (defensive programming)
-
-**Lesson Learned:**
-Never assume fields exist — always check before accessing.
-
-**Status:** ✅ Implemented May 8, pattern established
+**Status:** ✅ Deployed May 8, operational
 
 ---
 
-## Parlay Construction
+## Quality Validation Monitoring
 
-### **Decision: Greedy Construction with Constraints**
-**Chosen:** Build parlays sequentially, apply diversity rules
+### **Decision: Active Logging of Pool Expansion Impact**
+**Chosen:** May 8, 2026 (Unchanged - Still Operational)
 
-**Why:**
-- Simple to implement and reason about
-- Constraints prevent over-correlation
-- 5-10 parlays = good diversity without overwhelming user
+**Problem:**
+Expanding candidate pool from top 20 to top 50 legs could silently degrade parlay quality. Need real-time feedback on quality impact to enable data-driven tuning.
 
-**Constraints Applied:**
-1. Max 1 leg per game (prevents single-game risk)
-2. Max 2 legs per player (**DEPRECATED May 8** - now max 1 per day)
-3. Max 1 leg per prop type per parlay (diversifies prop types)
-4. Odds range: +1000 to +1500 (balances risk/reward)
-5. **NEW (May 7):** WALKS + STRIKEOUTS conflict check (DraftKings rule)
-6. **NEW (May 8):** Player used today check (diversity filter)
+**Solution Implemented:**
+```pythonif len(eligible_sorted) >= 50:
+top_20_avg = sum(l.get("composite_score", 0) for l in eligible_sorted[:20]) / 20
+top_50_avg = sum(l.get("composite_score", 0) for l in eligible_sorted[:50]) / 50
+quality_drop = ((top_20_avg - top_50_avg) / top_20_avg) * 100print(f"  [parlay_builder] Quality validation:")
+print(f"    Top 20 avg ML score: {top_20_avg:.1f}%")
+print(f"    Top 50 avg ML score: {top_50_avg:.1f}%")
+print(f"    Quality drop: {quality_drop:.1f}%")if quality_drop > 10:
+    print(f"    WARNING: Quality drop >10%")
 
-**Evolution of Player Constraint:**
-- **April-May 7:** Max 2 legs per player *per parlay*
-- **May 8:** Max 1 leg per player *per day*
+**Performance Metrics (May 10):**Typical quality drop: 3-5%
+Acceptable range: <10%
+Warnings triggered: 0
+Conclusion: Top 50 pool is viable
 
-**Why Change:**
-- Old: Prevented player concentration *within* a single parlay
-- New: Prevents player concentration *across all parlays*
-- Impact: Portfolio-level diversification vs parlay-level diversification
-
-**Trade-offs:**
-- ✅ Portfolio protection (no player in multiple parlays)
-- ❌ Limited daily capacity (10-15 total parlays)
-
-**Status:** ✅ Producing diversified parlays, DraftKings-compliant
+**Status:** ✅ Deployed May 8, operational
 
 ---
 
-### **Decision: Target 5 Parlays Per Run (Not 10)**
-**Chosen:** May 8, 2026 (pending deployment)
+## Dashboard V1/V2 Integration
 
-**Original Design:** Target 10 parlays per run
+### **Decision: Separate Queries Combined in Python**
+**Chosen:** May 8, 2026 (Unchanged - Still Operational)
 
-**Problem Discovered:**
-- With player diversity filter, can only generate 1-2 parlays per run
-- After 35-40 players used, remaining pool too small
-- System tries for 10, achieves 1-2, appears broken
+**Problem:**
+Dashboard needed to display parlays from both v1 schema (old recommendations) and v2 schema (new normalized schema). Initial UNION ALL approach caused HTTP 500 errors due to type mismatches.
 
-**Why Change to 5:**
-- More realistic given diversity constraints
-- Accounts for escalating filter throughout day
-- Matches actual capacity
+**Solution Implemented:**
+```pythonQuery v1 (cast date to text for consistency)
+cur.execute("""
+SELECT
+id, recommendation_date::text AS recommendation_date,
+rank, combined_odds, win_probability, edge_pct,
+bet_status, resolved_at::text AS resolved_at,
+'v1' AS schema_version
+FROM mlb_parlay_recommendations
+ORDER BY recommendation_date DESC, rank ASC
+LIMIT 20
+""")
+v1_recs = [dict(r) for r in cur.fetchall()]Query v2
+cur.execute("""
+SELECT
+id, run_date::text AS recommendation_date,
+rank, total_odds AS combined_odds,
+avg_coverage AS win_probability, 0.0 AS edge_pct,
+outcome AS bet_status, NULL::text AS resolved_at,
+'v2' AS schema_version
+FROM mlb_parlay_recommendations_v2
+ORDER BY run_date DESC, rank ASC
+LIMIT 20
+""")
+v2_recs = [dict(r) for r in cur.fetchall()]Combine in Python
+recent_recs = sorted(
+v1_recs + v2_recs,
+key=lambda x: (x.get("recommendation_date") or "", -(x.get("rank") or 0)),
+reverse=True,
+)[:20]
 
-**Capacity Analysis:**
-```
-Day Start:   0 players used → can build 10 parlays (40 unique players needed)
-After 9 AM:  19 players used → can build 5 parlays (20 unique players needed)
-After 12 PM: 24 players used → can build 3 parlays (12 unique players needed)
-After 3 PM:  35 players used → can build 2 parlays (8 unique players needed)
-After 5 PM:  40 players used → can build 1 parlay (4 unique players needed)
-```
+**Why This Works:**
+- ✅ Avoids PostgreSQL type mismatch issues
+- ✅ Each query handles its own schema independently
+- ✅ Python sorting is more explicit and debuggable
+- ✅ Can test v1 and v2 queries separately
 
-**Solution:**
-```python
-# OLD: max_recommendations=10
-# NEW: max_recommendations=5
-```
-
-**Trade-offs:**
-- ✅ Realistic expectations (system meets target)
-- ✅ Better UX (doesn't appear broken)
-- ❌ Fewer total daily parlays (acceptable for diversification)
-
-**Status:** 🔧 Fix in progress
-
----
-
-## Outcome Resolution
-
-### **Decision: Void Logic — "Lost Beats Void"**
-**Chosen (May 6 Fix):** 
-- ALL legs void → parlay void
-- ANY leg lost → parlay lost (voids ignored)
-- All non-void legs won → parlay won (adjusted odds)
-
-**Why:**
-- Standard sportsbook behavior
-- Partial voids adjust odds but parlay can still win/lose
-- Prevents false voids (masking losses)
-
-**Previous (Broken) Logic:**
-- ANY leg void → parlay void
-- Problem: One void voided entire parlay, inflated void rate
-
-**Lessons Learned:**
-- ✅ Edge cases matter (partial voids common in MLB)
-- ❌ Assumed standard logic, didn't validate thoroughly
-- 🔄 Backfilled historical data to correct
-
-**Status:** ✅ Fixed, tested, validated (0% void rate)
+**Status:** ✅ Deployed May 8, operational
 
 ---
 
-## Database Schema
+## Core Architecture (Unchanged)
 
-### **Decision: PostgreSQL on Supabase**
-**Chosen:** Hosted PostgreSQL (Supabase free tier)
+These fundamental decisions from earlier in the project remain unchanged and continue to serve well:
 
-**Why:**
-- Relational model fits data (props, parlays, outcomes, players)
-- Supabase free tier sufficient (500MB, 2 connections)
-- SQL queries flexible for dashboard
-- **CRITICAL:** JOINs required for player diversity filter
+### **Three Daily Pipeline Runs**
+- 9 AM, 12 PM, 5:30 PM ET
+- Provides fresh data throughout the day
+- ✅ Working as designed
 
-**Player Diversity Requirement:**
-```sql
--- Need JOIN to find players used today
-SELECT DISTINCT l.player_id 
-FROM mlb_parlay_legs_v2 l
-JOIN mlb_parlay_recommendations_v2 r ON l.parlay_id = r.id
-WHERE r.run_date = CURRENT_DATE
-```
+### **V2 Normalized Schema**
+- Per-leg tracking enables advanced queries
+- Position tracking enabled pitcher exemption
+- ✅ Critical enabler for May 8-10 features
 
-**Why Not NoSQL:**
-- ❌ Can't efficiently JOIN legs with parlays by date
-- ❌ Would need to scan all legs, filter client-side
-- ❌ Slow, expensive, doesn't scale
+### **ML Model-Based Scoring**
+- Quality-first ranking preserved throughout
+- Now with calibration: 45.5% avg prediction (was 34.6%)
+- ✅ Continues to perform well
 
-**Trade-offs:**
-- ✅ Free, reliable, SQL flexibility, JOINs for diversity
-- ❌ Connection limits (not an issue yet)
-
-**Status:** ✅ No issues, plenty of headroom, enabled player diversity
-
----
-
-## Deployment Strategy
-
-### **Decision: Railway for Hosting**
-**Chosen:** Railway (PaaS) with GitHub auto-deploy
-
-**Why:**
-- Simple: Push to master → auto-deploy
-- Free tier sufficient ($5/month estimated usage)
-- Built-in monitoring and logs
-- Fast deployment (~2-3 minutes)
-
-**Alternatives Considered:**
-- Heroku: Similar but more expensive
-- AWS/GCP: More complex, overkill for this scale
-- VPS (DigitalOcean): Requires more maintenance
-
-**Trade-offs:**
-- ✅ Simple, affordable, reliable, fast iteration
-- ❌ Vendor lock-in (mitigated by standard Flask/Python stack)
-
-**Status:** ✅ Stable, 99.9% uptime, enabled rapid deployment of player diversity
+### **Railway Deployment**
+- Auto-deploy from master branch
+- 99.9% uptime
+- ✅ Reliable and fast
 
 ---
 
 ## Lessons Learned
 
-### **Learning #1: Portfolio Concentration is the Silent Killer**
-**What Happened (May 7):**
-- Generated 23 parlays
-- All looked good individually (70%+ coverage)
-- Result: 0/23 won
-- Root cause: Ramón Laureano in 14/23 parlays
-
-**Discovery Process:**
-1. Initial hypothesis: José Ramírez caused losses (wrong!)
-2. SQL analysis showed: Ramírez not in May 7 parlays at all
-3. Deeper analysis: 37/48 losing legs were "hits under" (100% failure)
-4. Pattern: Every parlay had same structure (2 strikeouts over + 2 hits under)
-5. Root cause: Portfolio concentration, not individual player
-
-**Key Insight:**
-- Individual leg quality doesn't matter if portfolio is concentrated
-- A 70% leg becomes 0% if it appears in all parlays
-- Portfolio risk ≠ sum of individual risks
-
-**Solution Implemented:**
-- Player diversity filter (max 1 parlay per player per day)
-- Impact: 60% exposure → 5.6% exposure per player
-
-**Lesson:**
-✅ **Always analyze portfolio-level risk, not just individual bet quality.**
-
----
-
-### **Learning #2: Player Diversity Has a Capacity Cost**
-**Discovery:**
-- Player diversity eliminates concentration risk
-- But reduces daily parlay generation capacity
-- With 40 players used, can only build 1-2 more quality parlays
-
-**Trade-off Analysis:**
-```
-Without Diversity:
-- Capacity: Unlimited (can reuse players)
-- Risk: High (concentration failures like May 7)
-- Outcome: 0/23 when concentrated player fails
-
-With Diversity:
-- Capacity: Limited (~10-15 parlays per day)
-- Risk: Low (max 5-10% exposure per player)
-- Outcome: Diversified (failures are independent)
-```
-
-**Decision:**
-Accept lower capacity in exchange for risk mitigation.
-
-**Lesson:**
-✅ **Diversification is worth the capacity cost — better 10 good bets than 20 correlated ones.**
-
----
-
-### **Learning #3: Decimal Type Handling is Non-Obvious**
-**What Happened:**
-- `TypeError: unsupported operand type(s) for *=: 'float' and 'decimal.Decimal'`
-- Frontend: `rec.edge_pct.toFixed is not a function`
-
-**Discovery:**
-- PostgreSQL NUMERIC columns return as Decimal type
-- Python can't multiply float * Decimal without conversion
-- JavaScript can't call .toFixed() on Decimal without parseFloat
-
-**Solution Pattern Established:**
-```python
-# Backend: Always convert Decimal to float
-value = float(decimal_value) / 100.0
-```
-```javascript
-// Frontend: Always parseFloat before formatting
-const formatted = parseFloat(decimalValue).toFixed(1);
-```
-
-**Lesson:**
-✅ **Assume all numeric types from PostgreSQL need explicit conversion.**
-
----
-
-### **Learning #4: Schema Design Enables Features**
-**Discovery:**
-- Player diversity requires normalized schema
-- Without v2 schema, diversity would require JSON parsing
-- Normalized schema made diversity filter trivial
-
-**V2 Schema Enabled:**
-```sql
--- Simple query for player diversity
-SELECT DISTINCT player_id 
-FROM mlb_parlay_legs_v2 l
-JOIN mlb_parlay_recommendations_v2 r ON l.parlay_id = r.id
-WHERE r.run_date = CURRENT_DATE
-```
-
-**Without v2 schema:**
-```python
-# Would require:
-for parlay in get_parlays(today):
-    legs_json = json.loads(parlay["legs"])
-    for leg in legs_json:
-        player_id = leg["player_id"]  # Nested JSON parsing
-        used_players.add(player_id)
-# Slow, error-prone, complex
-```
-
-**Lesson:**
-✅ **Invest in schema design early — it enables future features you haven't thought of yet.**
-
----
-
-### **Learning #5: Small Sample Sizes Lie**
-**What Happened (May 6-7):**
-- May 6: 4/5 parlays won (80%!)
-- Observed: 4 winners had low correlation, 1 loser had high correlation
-- Excitement: "Correlation predicts losses! Add penalty now!"
-- Reality: n=5 is not statistically significant
-
-**Response:**
-- Added correlation logging (observation only)
-- No behavior changes until 50-100 parlays resolved
-- Will run t-test before implementing penalty
-
-**Lesson:**
-✅ **Don't act on patterns from <50 samples. Form hypothesis, collect data, test statistically.**
-
----
-
-### **Learning #6: Fail Open vs Fail Closed**
-**Decision Point:**
-- What happens if player diversity query fails?
-- Fail closed: Block all parlay generation (safe but rigid)
-- Fail open: Allow generation without diversity (resilient but risky)
-
-**Chosen:** Fail open (return empty set on error)
+### **Learning #1: Calibration Before Retraining**
+**Discovery:** When a model discriminates well (AUC 0.85) but predicts poorly (34.6% vs 45.5% actual), calibrate before retraining.
 
 **Rationale:**
-- Database connectivity issues shouldn't halt pipeline
-- Better to generate parlays with potential duplication than no parlays at all
-- Errors are logged for investigation
-- Rare edge case (DB outage while pipeline running)
+- Calibration is faster (1 hour vs 4-6 hours)
+- Lower risk (sits on top, doesn't change base model)
+- Often sufficient (16.6% Brier improvement)
+- Buys time to collect more training data
 
-**Lesson:**
-✅ **For non-critical features, fail open. For critical features (like money transfers), fail closed.**
+**When to retrain instead:**
+- AUC is poor (<0.75) - discrimination is broken
+- Features are missing critical information
+- Model architecture is fundamentally wrong
+- You have 2x more training data than before
+
+**Takeaway:** Calibration fixes the "what" you predict. Retraining fixes the "how" you predict. If the "how" works (good AUC), just fix the "what."
 
 ---
 
-### **Learning #7: User Expectations vs System Capabilities**
-**What Happened:**
-- System tried to generate 10 parlays
-- Only achieved 1-2 due to player diversity
-- User confused: "Why only 2 parlays?"
+### **Learning #2: Stat-Specific Models for Heterogeneous Data**
+**Discovery:** Home runs hit 6.5%, stolen bases under hit 95% - these need different calibration curves.
 
-**Issue:**
-- Target (10) didn't match capacity (1-2 after 35 players used)
-- System appeared broken but was working correctly
+**Comparison:**
+- Global calibrator: 12.3% Brier improvement
+- Stat-specific calibrator: 17.2% Brier improvement
+- Difference: +4.9 percentage points
 
-**Solution:**
-- Lower target to 5 (matches actual capacity)
-- Log explanation when target not met
-- Communicate capacity constraints clearly
+**Why it matters:**
+When your data has distinct subpopulations with different base rates, modeling them separately captures nuances a global model misses.
 
-**Lesson:**
-✅ **Align system targets with realistic capacity. Better to meet a lower target than fail a higher one.**
+**Other applications:**
+- Direction-specific models (over vs under)
+- Team-specific models (Dodgers vs Rockies)
+- Weather-specific models (outdoor vs domed)
+
+**Takeaway:** If your data has natural partitions with different statistics, partition your models too.
+
+---
+
+### **Learning #3: Fail-Closed for Time-Sensitive Systems**
+**Discovery:** Fail-open logic (pass through when uncertain) caused started games to slip into parlays.
+
+**Trade-off:**
+- Fail-open: More data, but lower quality
+- Fail-closed: Less data, but higher quality
+
+**Decision rule:**
+- Use fail-closed when: Incorrectness is worse than incompleteness
+- Use fail-open when: Completeness is more important than correctness
+
+**Examples:**
+- Betting system: Fail-closed (better to miss a bet than make a bad bet)
+- Search engine: Fail-open (better to show more results than miss relevant ones)
+- Medical diagnosis: Fail-closed (better to run more tests than miss a condition)
+
+**Takeaway:** The right failure mode depends on the cost of false positives vs false negatives.
+
+---
+
+### **Learning #4: Database Verification Before Pipeline Debugging**
+**Discovery:** Initial panic about "100% NULL game_start_time" was a query error, not a data problem.
+
+**Correct diagnostic order:**
+1. Check column exists (information_schema)
+2. Check sample data (SELECT * LIMIT 5)
+3. Check aggregates by date (COUNT, GROUP BY)
+4. Check enrichment pipeline code
+5. Then conclude pipeline is broken
+
+**What went wrong:**
+- Jumped to conclusion (pipeline must be broken)
+- Didn't verify database state first
+- Wasted time debugging working code
+
+**Takeaway:** Always verify ground truth (database state) before assuming application logic is broken.
+
+---
+
+### **Learning #5: Post-Hoc Calibration is Underrated**
+**Discovery:** Most ML practitioners focus on feature engineering and hyperparameter tuning. Calibration is often an afterthought.
+
+**Reality:**
+- Calibration is faster than retraining
+- Calibration is lower risk than retraining
+- Calibration often gives bigger improvements than feature engineering
+
+**When calibration helps most:**
+- Model is well-trained but poorly calibrated
+- You need probabilistic predictions (not just classifications)
+- Different subgroups have different base rates
+- Model is in production and retraining is expensive
+
+**Takeaway:** Check calibration curves before embarking on expensive retraining. You might get 80% of the benefit with 20% of the effort.
 
 ---
 
 ## Future Architectural Improvements
 
 ### **SHORT TERM (This Month)**
-1. **Parlay-Level ML Model**
-   - Train when 50-100 parlays resolved
-   - Features: correlation, coverage distribution, diversity, player exposure
-   - Target: Predict "Will this parlay win?"
+1. **Monitor Calibration Drift**
+   - Track predicted vs actual weekly
+   - Alert if calibration degrades >5%
+   - Plan monthly recalibration
 
-2. **Correlation Validation**
-   - Extract logs after 50+ parlays
-   - Run t-test: zero vs high correlation win rates
-   - Implement correlation penalty only if statistically validated
-
-3. **Dynamic Parlay Target**
-   - Instead of fixed 5, calculate based on available player pool
-   - `target = min(5, (unique_players_remaining // 4))`
-   - Adjust throughout day as pool shrinks
+2. **Automate Fail-Closed Monitoring**
+   - Alert if "missing time" count >10 per run
+   - Indicates enrichment pipeline issues
+   - Enables proactive fixes
 
 ### **MEDIUM TERM (Next Quarter)**
-4. **ML Model V3 (Leg-Level)**
-   - Balance direction sampling
-   - Add rolling window features
-   - Target: 52-55% avg prediction (up from 50.5%)
+3. **Temperature Scaling (Alternative Calibration)**
+   - Single parameter vs 7 isotonic regressors
+   - Easier to tune and deploy
+   - Test if performance matches isotonic
 
-5. **Player Pool Capacity Monitoring**
-   - Alert when <20 unique players remain
-   - Warn when filter removes >40% of legs
-   - Track daily capacity utilization
-
-6. **Dashboard V2 Integration**
-   - Migrate all queries to v2 schema
-   - Deprecate v1 schema
-   - Add player diversity metrics section
+4. **Direction × Stat Calibration**
+   - 14 calibrators (7 stats × 2 directions)
+   - hits_over vs hits_under may need different curves
+   - Hypothesis: overs are harder to predict
 
 ### **LONG TERM (Future)**
-7. **Multi-Day Player Tracking**
-   - Track player usage across multiple days
-   - Identify players used too frequently
-   - Balance exposure over week/month
+5. **Parlay-Level Calibration**
+   - Current: Leg-level calibration only
+   - Goal: Calibrate entire parlay win probability
+   - Accounts for correlation between legs
 
-8. **Optimization Engine**
-   - Linear programming for parlay construction
-   - EV calculation and Kelly sizing
-   - Constraint: player diversity maintained
+6. **Automated Monthly Retraining Pipeline**
+   - Scheduled retraining on 1st of each month
+   - Automatic calibration after retraining
+   - A/B test new model vs old before full deployment
 
-9. **Advanced Correlation Detection**
-   - Same-game correlation penalties
-   - Pitcher dominance thesis (K over + opposing batter hits under)
-   - Weather-based correlations
+7. **Ensemble Calibration**
+   - Combine isotonic + beta + temperature scaling
+   - Weighted ensemble of calibrators
+   - Potentially better than any single method
 
 ---
 
 ## Decision Review Schedule
 
-**Daily:** Monitor player diversity logs, system health
-**Weekly:** Review unique players used, parlay capacity, correlation metrics
-**Monthly:** Review performance metrics, adjust diversity constraints if needed
-**Quarterly:** Evaluate ML model, consider retraining
-**Annually:** Reassess architecture for scale/features
+**Daily:** Monitor calibration alignment, game filter effectiveness  
+**Weekly:** Review quality drop trends, diversity impact on outcomes  
+**Monthly:** Evaluate calibration drift, retrain if needed  
+**Quarterly:** Reassess architecture decisions, plan major changes  
 
 ---
 
-**Last Review:** May 8, 2026  
-**Next Review:** May 15, 2026 (after 7 days of player diversity data)  
-**Major Milestone:** Player diversity system deployed, portfolio concentration eliminated
+**Last Review:** May 10, 2026  
+**Next Review:** May 17, 2026 (after 7 days of calibrated predictions)  
+**Major Milestone:** ML calibration deployed (+16.6% Brier), game filter working correctly (fail-closed)
