@@ -227,6 +227,8 @@ def init_db():
             last_updated TEXT,
             logged_at TEXT NOT NULL,
             odd_id TEXT,
+            game_start_time TEXT,
+            pitcher_hand TEXT,
             composite_score REAL,
             UNIQUE (run_date, odd_id)
         )
@@ -773,8 +775,8 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
              game_start_time, pitcher_hand, composite_score)
         VALUES %s
         ON CONFLICT (run_date, odd_id) DO UPDATE
-            SET composite_score = EXCLUDED.composite_score
-            WHERE mlb_scored_legs.composite_score IS NULL
+            SET composite_score = COALESCE(mlb_scored_legs.composite_score, EXCLUDED.composite_score),
+                game_start_time = COALESCE(mlb_scored_legs.game_start_time, EXCLUDED.game_start_time)
         """,
         rows,
     )

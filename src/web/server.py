@@ -656,6 +656,76 @@ async def handle_recommendation_history(request: web.Request) -> web.Response:
         )
 
 
+def _fetch_missing_game_times(legs: list[dict], run_date: str) -> list[dict]:
+    """
+    Fallback: for legs with NULL game_start_time, fetch from MLB-StatsAPI on-the-fly.
+    Uses game_pk if available; otherwise falls back to team-name schedule lookup.
+    """
+    import statsapi
+
+    missing = [leg for leg in legs if not leg.get("game_start_time")]
+    if not missing:
+        return legs
+
+    print(f"[regenerate] Fetching game times for {len(missing)}/{len(legs)} legs with NULL time")
+
+    # Strategy 1: fetch by game_pk (fast, exact)
+    et_tz = pytz.timezone("America/New_York")
+    gk_to_time: dict[int, str] = {}
+    unique_pks = {leg["game_pk"] for leg in missing if leg.get("game_pk")}
+    for gk in unique_pks:
+        try:
+            game_data = statsapi.get("game", {"gamePk": gk})
+            raw = game_data["gameData"]["datetime"]["dateTime"]
+            utc_dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            gk_to_time[gk] = utc_dt.astimezone(et_tz).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception as e:
+            print(f"[regenerate] Warning: could not fetch time for game_pk {gk}: {e}")
+
+    # Strategy 2: schedule lookup by team name (for legs without game_pk)
+    team_to_time: dict[str, str] = {}
+    if any(not leg.get("game_pk") for leg in missing):
+        try:
+            schedule = statsapi.schedule(date=run_date)
+            for game in schedule:
+                raw = game.get("game_datetime", "")
+                if not raw:
+                    continue
+                try:
+                    utc_dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                    gst = utc_dt.astimezone(et_tz).strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    continue
+                for key in ("away_name", "home_name"):
+                    name = game.get(key, "")
+                    if name:
+                        team_to_time[name] = gst
+        except Exception as e:
+            print(f"[regenerate] Warning: schedule fallback failed: {e}")
+
+    filled = 0
+    for leg in missing:
+        gk = leg.get("game_pk")
+        if gk and gk in gk_to_time:
+            leg["game_start_time"] = gk_to_time[gk]
+            filled += 1
+            continue
+        team = leg.get("team", "")
+        if team in team_to_time:
+            leg["game_start_time"] = team_to_time[team]
+            filled += 1
+            continue
+        # partial match
+        for api_team, gst in team_to_time.items():
+            if team in api_team or api_team in team:
+                leg["game_start_time"] = gst
+                filled += 1
+                break
+
+    print(f"[regenerate] Filled {filled}/{len(missing)} missing game times")
+    return legs
+
+
 async def handle_regenerate_recommendations(request: web.Request) -> web.Response:
     """
     Re-run recommendation generation using today's already-scored legs.
@@ -678,6 +748,9 @@ async def handle_regenerate_recommendations(request: web.Request) -> web.Respons
 
         today = datetime.now(_ET).date()
         legs = get_scored_legs(str(today))
+
+        # Fallback: fetch game_start_time on-the-fly for any legs missing it
+        legs = _fetch_missing_game_times(legs, str(today))
 
         # Filter out games starting within the next 15 minutes (forward buffer)
         et_tz = pytz.timezone("America/New_York")
