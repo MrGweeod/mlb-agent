@@ -659,20 +659,25 @@ async def handle_recommendation_history(request: web.Request) -> web.Response:
 def _fetch_missing_game_times(legs: list[dict], run_date: str) -> list[dict]:
     """
     Fallback: for legs with NULL game_start_time, fetch from MLB-StatsAPI on-the-fly.
-    Uses game_pk if available; otherwise falls back to team-name schedule lookup.
+    Tries game_pk lookup first; always also runs schedule lookup as backup.
+    Persists filled times to the database so future requests don't re-fetch.
     """
     import statsapi
+    from src.utils.db import get_conn
 
     missing = [leg for leg in legs if not leg.get("game_start_time")]
     if not missing:
         return legs
 
-    print(f"[regenerate] Fetching game times for {len(missing)}/{len(legs)} legs with NULL time")
+    has_pk = sum(1 for leg in missing if leg.get("game_pk"))
+    print(f"[_fetch_missing_game_times] {len(missing)}/{len(legs)} legs missing time; {has_pk} have game_pk, {len(missing) - has_pk} do not")
 
-    # Strategy 1: fetch by game_pk (fast, exact)
     et_tz = pytz.timezone("America/New_York")
     gk_to_time: dict[int, str] = {}
+
+    # Strategy 1: fetch by game_pk (fast, exact)
     unique_pks = {leg["game_pk"] for leg in missing if leg.get("game_pk")}
+    print(f"[_fetch_missing_game_times] Strategy 1: fetching {len(unique_pks)} unique game_pks via statsapi.get")
     for gk in unique_pks:
         try:
             game_data = statsapi.get("game", {"gamePk": gk})
@@ -680,49 +685,83 @@ def _fetch_missing_game_times(legs: list[dict], run_date: str) -> list[dict]:
             utc_dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
             gk_to_time[gk] = utc_dt.astimezone(et_tz).strftime("%Y-%m-%d %H:%M:%S")
         except Exception as e:
-            print(f"[regenerate] Warning: could not fetch time for game_pk {gk}: {e}")
+            print(f"[_fetch_missing_game_times] Warning: could not fetch time for game_pk {gk}: {e}")
+    print(f"[_fetch_missing_game_times] Strategy 1 resolved {len(gk_to_time)}/{len(unique_pks)} game_pks")
 
-    # Strategy 2: schedule lookup by team name (for legs without game_pk)
+    # Strategy 2: schedule lookup by team name — ALWAYS run as a reliable backup
     team_to_time: dict[str, str] = {}
-    if any(not leg.get("game_pk") for leg in missing):
-        try:
-            schedule = statsapi.schedule(date=run_date)
-            for game in schedule:
-                raw = game.get("game_datetime", "")
-                if not raw:
-                    continue
-                try:
-                    utc_dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-                    gst = utc_dt.astimezone(et_tz).strftime("%Y-%m-%d %H:%M:%S")
-                except Exception:
-                    continue
-                for key in ("away_name", "home_name"):
-                    name = game.get(key, "")
-                    if name:
-                        team_to_time[name] = gst
-        except Exception as e:
-            print(f"[regenerate] Warning: schedule fallback failed: {e}")
+    try:
+        schedule = statsapi.schedule(date=run_date)
+        print(f"[_fetch_missing_game_times] Strategy 2: schedule returned {len(schedule)} games for {run_date}")
+        for game in schedule:
+            raw = game.get("game_datetime", "")
+            if not raw:
+                continue
+            try:
+                utc_dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                gst = utc_dt.astimezone(et_tz).strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                continue
+            for key in ("away_name", "home_name"):
+                name = game.get(key, "")
+                if name:
+                    team_to_time[name] = gst
+        print(f"[_fetch_missing_game_times] Strategy 2 built {len(team_to_time)} team→time mappings")
+    except Exception as e:
+        print(f"[_fetch_missing_game_times] Warning: schedule fallback failed: {e}")
 
+    # Fill in-memory and track which legs got updated for DB persistence
     filled = 0
+    db_updates: list[dict] = []  # legs that got a new game_start_time
     for leg in missing:
         gk = leg.get("game_pk")
+        new_time: str | None = None
         if gk and gk in gk_to_time:
-            leg["game_start_time"] = gk_to_time[gk]
-            filled += 1
-            continue
-        team = leg.get("team", "")
-        if team in team_to_time:
-            leg["game_start_time"] = team_to_time[team]
-            filled += 1
-            continue
-        # partial match
-        for api_team, gst in team_to_time.items():
-            if team in api_team or api_team in team:
-                leg["game_start_time"] = gst
-                filled += 1
-                break
+            new_time = gk_to_time[gk]
+        else:
+            team = leg.get("team", "") or ""
+            if team in team_to_time:
+                new_time = team_to_time[team]
+            else:
+                # partial match
+                for api_team, gst in team_to_time.items():
+                    if team and (team in api_team or api_team in team):
+                        new_time = gst
+                        break
 
-    print(f"[regenerate] Filled {filled}/{len(missing)} missing game times")
+        if new_time:
+            leg["game_start_time"] = new_time
+            db_updates.append(leg)
+            filled += 1
+        else:
+            print(f"[_fetch_missing_game_times] No time found for team={leg.get('team')!r} game_pk={leg.get('game_pk')}")
+
+    print(f"[_fetch_missing_game_times] Filled {filled}/{len(missing)} missing game times")
+
+    # Persist to DB so repeated calls (and future requests) don't re-fetch
+    if db_updates:
+        try:
+            conn = get_conn()
+            cur = conn.cursor()
+            for leg in db_updates:
+                cur.execute(
+                    """
+                    UPDATE mlb_scored_legs
+                    SET game_start_time = %s
+                    WHERE run_date = %s
+                      AND player_name = %s
+                      AND stat = %s
+                      AND direction = %s
+                    """,
+                    (leg["game_start_time"], run_date, leg["player_name"], leg["stat"], leg["direction"]),
+                )
+            conn.commit()
+            cur.close()
+            conn.close()
+            print(f"[_fetch_missing_game_times] Persisted {len(db_updates)} game times to database")
+        except Exception as e:
+            print(f"[_fetch_missing_game_times] Warning: DB persist failed: {e}")
+
     return legs
 
 
