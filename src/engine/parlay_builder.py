@@ -400,42 +400,17 @@ def build_hybrid_parlays(
         )
         return []
 
-    # Within-batch player diversity: batter can appear in MAX 2 parlays per batch.
-    # Pitchers are exempt (multiple pitcher props in same batch is fine).
-    # Quality ordering is preserved — unique[] is already sorted by avg_composite DESC.
-    MAX_APPEARANCES_PER_PLAYER = 2
-
-    diverse = [unique[0]]
-    player_appearance_counts: dict = {}
-    for leg in unique[0]["legs"]:
-        pid = leg.get("player_id") or leg.get("player_name", "")
-        if leg.get("position", "") not in _PITCHER_POSITIONS:
-            player_appearance_counts[pid] = player_appearance_counts.get(pid, 0) + 1
-
-    for candidate in unique[1:]:
-        candidate_batter_ids = {
-            leg.get("player_id") or leg.get("player_name", "")
-            for leg in candidate["legs"]
-            if leg.get("position", "") not in _PITCHER_POSITIONS
-        }
-
-        # Check if any player would exceed max appearances
-        would_exceed = any(
-            player_appearance_counts.get(pid, 0) >= MAX_APPEARANCES_PER_PLAYER
-            for pid in candidate_batter_ids
-        )
-        if would_exceed:
-            continue  # skip — player would appear more than MAX_APPEARANCES_PER_PLAYER times
-
-        diverse.append(candidate)
-        for pid in candidate_batter_ids:
-            player_appearance_counts[pid] = player_appearance_counts.get(pid, 0) + 1
-        if len(diverse) >= top_n:
-            break
+    # REMOVED: Within-batch player diversity constraint (May 11, 2026).
+    # Diagnostic analysis showed this forces use of worst-performing legs:
+    #   3+ appearances: 48.3% win rate (best)
+    #   2 appearances:  32.8% win rate (worst — what the constraint pushed us into)
+    #   1 appearance:   39.2% win rate
+    # Let ML composite scores determine selection without artificial caps.
+    diverse = unique[:top_n]
 
     print(
-        f"  [parlay_builder] Built {len(diverse)} parlays with within-batch diversity "
-        f"({len(player_appearance_counts)} unique batters, max {MAX_APPEARANCES_PER_PLAYER} appearances each)"
+        f"  [parlay_builder] Built {len(diverse)} parlays (no within-batch diversity cap — "
+        f"ML scores determine selection)"
     )
 
     # Correlation risk logging — no behavior change, for post-hoc analysis only
