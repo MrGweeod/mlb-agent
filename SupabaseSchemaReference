@@ -1,0 +1,244 @@
+# MLB Parlay Agent — Supabase Schema Reference (ACCURATE)
+**Last Updated:** May 11, 2026  
+**Purpose:** Exact column types to prevent SQL query casting errors
+
+---
+
+## ⚠️ CRITICAL: Type Casting Rules
+
+**The Problem:** Many columns store numbers as TEXT, causing "operator does not exist" errors.
+
+**The Solution:** Always cast before comparisons or math operations.
+
+---
+
+## Table-by-Table Schema (EXACT TYPES)
+
+### **mlb_scored_legs** (Daily scored props)
+
+| Column | Type | Notes | Cast Example |
+|--------|------|-------|--------------|
+| `run_date` | **TEXT** | Format: 'YYYY-MM-DD' | `run_date >= (CURRENT_DATE - INTERVAL '14 days')::text` |
+| `player_name` | TEXT | | No cast needed |
+| `team` | TEXT | | No cast needed |
+| `stat` | TEXT | 'hits', 'strikeouts', 'totalBases', etc. | No cast needed |
+| `direction` | TEXT | 'over' or 'under' | No cast needed |
+| `line` | **TEXT** | Contains '0.5', '1.5', '2.5', etc. | `line::numeric >= 1.5` |
+| `odds` | **TEXT** | Contains '-110', '+150', etc. | `odds::numeric > 100` |
+| `composite_score` | NUMERIC | 0-100, ML model prediction | No cast needed |
+| `actual_value` | NUMERIC | Actual stat result | No cast needed |
+| `coverage_overall` | NUMERIC | Coverage rate | No cast needed |
+| `batter_vs_hand_coverage` | NUMERIC | Handedness-split coverage | No cast needed |
+| `result` | TEXT | **'won', 'lost', 'void', 'pending'** (NOT 'outcome') | No cast needed |
+| `game_start_time` | TIMESTAMP | | `game_start_time <= NOW()` |
+
+**Common Query Patterns:**
+```sql
+-- ✅ CORRECT
+SELECT * FROM mlb_scored_legs
+WHERE run_date >= (CURRENT_DATE - INTERVAL '14 days')::text
+  AND result IN ('won', 'lost')
+  AND odds::numeric > 100
+  AND line::numeric >= 1.5;
+
+-- ❌ WRONG
+SELECT * FROM mlb_scored_legs
+WHERE run_date >= CURRENT_DATE - INTERVAL '14 days'  -- Missing ::text
+  AND outcome IN ('won', 'lost')                      -- Column is 'result' not 'outcome'
+  AND odds > 100                                       -- odds is TEXT
+  AND line >= 1.5;                                     -- line is TEXT
+```
+
+---
+
+### **mlb_parlay_recommendations_v2** (Parlay headers)
+
+| Column | Type | Notes | Cast Example |
+|--------|------|-------|--------------|
+| `id` | INTEGER | Serial primary key | No cast needed |
+| `run_date` | **DATE** | ⚠️ Actual DATE type (NOT TEXT!) | `run_date >= CURRENT_DATE - INTERVAL '14 days'` |
+| `rank` | INTEGER | Parlay rank (1 = best) | No cast needed |
+| `total_odds` | **TEXT** | Contains '1200', '1500', etc. | `total_odds::numeric > 1000` |
+| `avg_coverage` | NUMERIC | Average ML score of legs | No cast needed |
+| `num_legs` | INTEGER | Number of legs in parlay | No cast needed |
+| `outcome` | TEXT | **'won', 'lost', 'void', 'pending'** | No cast needed |
+| `source` | TEXT | 'auto_9am', 'auto_12pm', 'auto_530pm', 'manual' | No cast needed |
+| `batch_id` | TEXT | | No cast needed |
+| `created_at` | TIMESTAMP | | No cast needed |
+
+**Common Query Patterns:**
+```sql
+-- ✅ CORRECT (run_date is DATE type)
+SELECT * FROM mlb_parlay_recommendations_v2
+WHERE run_date >= CURRENT_DATE - INTERVAL '14 days'  -- No ::text cast!
+  AND outcome IN ('won', 'lost')
+  AND total_odds::numeric > 1000;
+
+-- Join to mlb_scored_legs (DATE → TEXT)
+SELECT * FROM mlb_parlay_recommendations_v2 p
+JOIN mlb_scored_legs s ON p.run_date::text = s.run_date;
+
+-- ❌ WRONG
+SELECT * FROM mlb_parlay_recommendations_v2
+WHERE run_date >= (CURRENT_DATE - INTERVAL '14 days')::text  -- run_date is DATE, not TEXT
+  AND total_odds > 1000;                                      -- total_odds is TEXT
+```
+
+---
+
+### **mlb_parlay_legs_v2** (Per-leg details)
+
+| Column | Type | Notes | Cast Example |
+|--------|------|-------|--------------|
+| `id` | INTEGER | Serial primary key | No cast needed |
+| `parlay_id` | INTEGER | FK to mlb_parlay_recommendations_v2 | No cast needed |
+| `player_name` | TEXT | | No cast needed |
+| `team` | TEXT | | No cast needed |
+| `stat` | TEXT | | No cast needed |
+| `direction` | TEXT | 'over' or 'under' | No cast needed |
+| `line` | **TEXT** | Contains numbers | `line::numeric >= 1.5` |
+| `odds` | **TEXT** | Contains numbers | `odds::numeric > 100` |
+| `coverage` | NUMERIC | ML score for this leg | No cast needed |
+| `outcome` | TEXT | **'won', 'lost', 'void', 'pending'** | No cast needed |
+| `result_value` | NUMERIC | Actual stat value | No cast needed |
+| `position` | INTEGER | Rank within parlay (1 = highest) | No cast needed |
+| `created_at` | TIMESTAMP | | `created_at >= NOW() - INTERVAL '14 days'` |
+
+**Common Query Patterns:**
+```sql
+-- ✅ CORRECT
+SELECT * FROM mlb_parlay_legs_v2
+WHERE created_at >= CURRENT_DATE - INTERVAL '14 days'
+  AND outcome IN ('won', 'lost')
+  AND odds::numeric > 100;
+
+-- Join to mlb_scored_legs (TIMESTAMP → TEXT)
+SELECT * FROM mlb_parlay_legs_v2 l
+JOIN mlb_scored_legs s 
+  ON l.player_name = s.player_name
+  AND l.stat = s.stat
+  AND l.direction = s.direction
+  AND l.created_at::date::text = s.run_date;  -- TIMESTAMP → DATE → TEXT
+
+-- ❌ WRONG
+SELECT * FROM mlb_parlay_legs_v2 l
+JOIN mlb_scored_legs s ON DATE(l.created_at) = s.run_date;  -- Missing ::text
+```
+
+---
+
+### **mlb_training_data** (Historical outcomes)
+
+| Column | Type | Notes | Cast Example |
+|--------|------|-------|--------------|
+| `run_date` | **TEXT** | Format: 'YYYY-MM-DD' | `run_date >= (CURRENT_DATE - INTERVAL '14 days')::text` |
+| `player_name` | TEXT | | No cast needed |
+| `stat` | TEXT | | No cast needed |
+| `direction` | TEXT | | No cast needed |
+| `line` | NUMERIC | ✅ Actual NUMERIC | No cast needed |
+| `composite_score` | NUMERIC | | No cast needed |
+| `result` | TEXT | 'won' or 'lost' (resolved only) | No cast needed |
+| `coverage_overall` | NUMERIC | | No cast needed |
+| `batter_vs_hand_coverage` | NUMERIC | | No cast needed |
+
+---
+
+## Join Pattern Cheat Sheet
+
+### **Parlay Legs → Scored Legs**
+```sql
+FROM mlb_parlay_legs_v2 l
+JOIN mlb_scored_legs s 
+  ON l.player_name = s.player_name
+  AND l.stat = s.stat
+  AND l.direction = s.direction
+  AND l.created_at::date::text = s.run_date  -- ✅ CORRECT
+```
+
+### **Parlay Headers → Scored Legs**
+```sql
+FROM mlb_parlay_recommendations_v2 p
+JOIN mlb_scored_legs s ON p.run_date::text = s.run_date  -- ✅ CORRECT
+```
+
+### **Parlay Headers → Parlay Legs**
+```sql
+FROM mlb_parlay_recommendations_v2 p
+JOIN mlb_parlay_legs_v2 l ON l.parlay_id = p.id  -- ✅ No cast needed
+```
+
+---
+
+## Common Errors & Fixes
+
+### Error: `operator does not exist: text >= date`
+```sql
+-- ❌ WRONG
+WHERE run_date >= CURRENT_DATE - INTERVAL '14 days'
+
+-- ✅ CORRECT (for TEXT columns)
+WHERE run_date >= (CURRENT_DATE - INTERVAL '14 days')::text
+```
+
+### Error: `operator does not exist: date >= text`
+```sql
+-- ❌ WRONG (for DATE columns like mlb_parlay_recommendations_v2.run_date)
+WHERE run_date >= (CURRENT_DATE - INTERVAL '14 days')::text
+
+-- ✅ CORRECT
+WHERE run_date >= CURRENT_DATE - INTERVAL '14 days'
+```
+
+### Error: `function avg(text) does not exist`
+```sql
+-- ❌ WRONG
+SELECT AVG(odds) FROM mlb_scored_legs
+
+-- ✅ CORRECT
+SELECT AVG(odds::numeric) FROM mlb_scored_legs
+```
+
+### Error: `operator does not exist: text = date`
+```sql
+-- ❌ WRONG
+WHERE p.run_date = s.run_date  -- p.run_date is DATE, s.run_date is TEXT
+
+-- ✅ CORRECT
+WHERE p.run_date::text = s.run_date
+```
+
+---
+
+## Quick Reference: Which Tables Have Which Types
+
+| Table | run_date Type | odds Type | line Type | Status Column Name |
+|-------|---------------|-----------|-----------|-------------------|
+| mlb_scored_legs | **TEXT** | **TEXT** | **TEXT** | `result` |
+| mlb_parlay_recommendations_v2 | **DATE** | **TEXT** | N/A | `outcome` |
+| mlb_parlay_legs_v2 | N/A | **TEXT** | **TEXT** | `outcome` |
+| mlb_training_data | **TEXT** | N/A | NUMERIC | `result` |
+
+---
+
+## Pre-Flight Checklist for SQL Queries
+
+Before providing any SQL query, verify:
+
+- [ ] **Date comparisons:** Is run_date TEXT or DATE in this table?
+  - TEXT tables (mlb_scored_legs, mlb_training_data): Add `::text` to CURRENT_DATE
+  - DATE tables (mlb_parlay_recommendations_v2): No cast needed
+  
+- [ ] **Numeric operations:** Are you using odds or line?
+  - Always cast: `odds::numeric`, `line::numeric`
+  
+- [ ] **Status checks:** Using correct column name?
+  - mlb_scored_legs: Use `result`
+  - mlb_parlay_*: Use `outcome`
+  
+- [ ] **Joins with dates:** Casting timestamps and dates to text?
+  - created_at to run_date: `created_at::date::text = run_date`
+  - p.run_date to s.run_date: `p.run_date::text = s.run_date`
+
+---
+
+**Last Updated:** May 11, 2026 after multiple casting error corrections
