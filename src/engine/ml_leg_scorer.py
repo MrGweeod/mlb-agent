@@ -158,6 +158,14 @@ def apply_temporary_scoring_adjustments(scored_legs: list[dict]) -> list[dict]:
         odds = leg.get("odds", 0)
         game_key = (leg.get("team", ""), leg.get("run_date", ""))
 
+        # Convert odds from TEXT to int for numeric comparisons
+        # (Database stores odds as TEXT: '-110', '+150', etc.)
+        if isinstance(odds, str):
+            try:
+                odds = int(odds)
+            except (ValueError, TypeError):
+                odds = 0
+
         # Adjustment #1: Direction bias
         if direction == "over":
             adjusted_score = min(adjusted_score + 18, 95)
