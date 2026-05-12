@@ -813,10 +813,10 @@ async def handle_regenerate_recommendations(request: web.Request) -> web.Respons
                 continue  # fail-closed: missing time = exclude
             try:
                 # gst may already be a datetime object (psycopg2) or a string
-                if isinstance(gst, datetime.datetime):
+                if isinstance(gst, datetime):
                     gt = gst
                 else:
-                    gt = datetime.datetime.strptime(str(gst)[:19], "%Y-%m-%d %H:%M:%S")
+                    gt = datetime.strptime(str(gst)[:19], "%Y-%m-%d %H:%M:%S")
                 gt_et = et_tz.localize(gt)
                 if gt_et > cutoff:
                     active_legs.append(leg)
@@ -862,14 +862,30 @@ async def handle_regenerate_recommendations(request: web.Request) -> web.Respons
         loop = asyncio.get_event_loop()
         recommendations = await loop.run_in_executor(None, fn)
 
+        if recommendations is None:
+            print(f"[regenerate] ERROR: generate_recommendations() returned None (expected list)")
+            recommendations = []
+
         print(f"[regenerate] Generated {len(recommendations)} parlays")
 
         from src.utils.db import save_parlay_recommendations_v2
-        batch_id = save_parlay_recommendations_v2(
-            recommendations,
-            run_date=today_str,
-            source="manual",
-        )
+        import traceback as _tb
+        try:
+            batch_id = save_parlay_recommendations_v2(
+                recommendations,
+                run_date=today_str,
+                source="manual",
+            )
+        except Exception as save_exc:
+            print(
+                f"[regenerate] ERROR in save_parlay_recommendations_v2:\n"
+                f"  exception type : {type(save_exc).__name__}\n"
+                f"  message        : {save_exc}\n"
+                f"  recommendations: {len(recommendations)} items\n"
+                f"  first rec keys : {list(recommendations[0].keys()) if recommendations else 'N/A'}\n"
+                f"  traceback:\n{_tb.format_exc()}"
+            )
+            raise
 
         print(f"[regenerate] Saved {len(recommendations)} parlays to v2 schema (batch: {batch_id})")
 
@@ -878,6 +894,13 @@ async def handle_regenerate_recommendations(request: web.Request) -> web.Respons
             content_type="application/json",
         )
     except Exception as exc:
+        import traceback as _tb
+        print(
+            f"[regenerate] UNHANDLED ERROR:\n"
+            f"  exception type : {type(exc).__name__}\n"
+            f"  message        : {exc}\n"
+            f"  traceback:\n{_tb.format_exc()}"
+        )
         return web.Response(
             text=json.dumps({"error": str(exc)}),
             content_type="application/json",

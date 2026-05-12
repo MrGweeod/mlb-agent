@@ -1782,7 +1782,15 @@ def save_parlay_recommendations_v2(
                 rec.get("edge_pct"),
             ),
         )
-        parlay_id = cur.fetchone()["id"]
+        row = cur.fetchone()
+        if row is None:
+            import traceback
+            raise RuntimeError(
+                f"[save_v2] INSERT INTO mlb_parlay_recommendations_v2 RETURNING id returned None "
+                f"for rank={rank}, run_date={run_date!r}, source={source!r}, batch_id={batch_id!r}. "
+                f"rec keys: {list(rec.keys())}, legs count: {len(legs)}"
+            )
+        parlay_id = row["id"]
 
         for leg in legs:
             cur.execute(
