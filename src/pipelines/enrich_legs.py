@@ -166,11 +166,17 @@ def enrich_legs(
     if season is None:
         season = datetime.datetime.now().year
 
-    # Pre-fetch all unique pitcher profiles before the per-leg loop
+    # Pre-fetch all unique pitcher profiles and names before the per-leg loop
     unique_pitcher_ids = set(pitcher_id_map.values())
     profiles: dict[int, dict | None] = {}
+    pitcher_names: dict[int, str | None] = {}
     for pid in sorted(pid for pid in unique_pitcher_ids if pid is not None):
         profiles[pid] = get_pitcher_matchup_profile(pid, season)
+        try:
+            data = statsapi.lookup_player(pid)
+            pitcher_names[pid] = data[0]["fullName"] if data else None
+        except Exception:
+            pitcher_names[pid] = None
 
     # Pre-fetch game start times (one API call per unique game_pk)
     unique_game_pks = {leg["game_pk"] for leg in legs if leg.get("game_pk")}
@@ -195,7 +201,13 @@ def enrich_legs(
 
         position = leg.get("position", "")
         player_id = leg.get("player_id")
-        leg["pitcher_hand"] = get_pitcher_handedness(player_id, position) if player_id else None
+
+        # For pitcher props, set pitcher_hand to the pitcher's OWN throwing hand.
+        # For hitter legs, pitcher_hand was already set by coverage.py (opposing
+        # pitcher's hand) — don't overwrite it with None.
+        is_pitcher_prop_leg = position in ("SP", "RP", "P") or stat in _PITCHER_STATS
+        if is_pitcher_prop_leg:
+            leg["pitcher_hand"] = get_pitcher_handedness(player_id, position) if player_id else None
 
         if not pitcher_id:
             leg["opponent_adjustment"] = 0.0
@@ -206,15 +218,30 @@ def enrich_legs(
             leg["opponent_adjustment"] = 0.0
             continue
 
-        # Determine if this is a pitcher prop: position "SP"/"RP" or
-        # stat explicitly in the pitcher-only set.
-        is_pitcher_prop = (
-            position in ("SP", "RP", "P")
-            or stat in _PITCHER_STATS
-        )
+        # Attach raw pitcher profile stats so they persist in mlb_scored_legs
+        leg["pitcher_id"]   = str(pitcher_id)
+        leg["pitcher_name"] = pitcher_names.get(pitcher_id)
+        leg["pitcher_era"]  = profile["era"]
+        leg["pitcher_k9"]   = profile["k9"]
+        leg["pitcher_whip"] = profile["whip"]
 
-        leg["opponent_adjustment"] = _compute_adjustment(stat, profile, is_pitcher_prop)
+        leg["opponent_adjustment"] = _compute_adjustment(stat, profile, is_pitcher_prop_leg)
         enriched += 1
 
     print(f"  [enrich_legs] Enriched {enriched}/{len(legs)} legs with pitcher matchup profiles")
+
+    # Debug: show a sample hitter leg to verify pitcher fields are populated
+    sample = next(
+        (l for l in legs if l.get("pitcher_id") and l.get("position") not in ("SP", "RP", "P")),
+        None
+    )
+    if sample:
+        print(
+            f"  [enrich_legs] Sample hitter leg pitcher fields — "
+            f"player={sample.get('player_name')} batter_hand={sample.get('batter_hand')} "
+            f"pitcher_id={sample.get('pitcher_id')} pitcher_name={sample.get('pitcher_name')} "
+            f"pitcher_hand={sample.get('pitcher_hand')} "
+            f"era={sample.get('pitcher_era')} k9={sample.get('pitcher_k9')} whip={sample.get('pitcher_whip')}"
+        )
+
     return legs

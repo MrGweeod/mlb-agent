@@ -37,7 +37,7 @@ from src.engine.parlay_builder import build_hybrid_parlays, _tier_params
 from src.pipelines.enrich_legs import enrich_legs
 from src.pipelines.trend_analysis import get_trend_signal
 from src.tracker.recommendation_logger import log_recommendations
-from src.utils.db import log_scored_legs, log_training_data_legs, save_parlay_recommendation, save_parlay_recommendations_v2
+from src.utils.db import log_scored_legs, log_training_data_legs, save_parlay_recommendation, save_parlay_recommendations_v2, set_player_position
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -260,6 +260,12 @@ def _find_qualifying_legs(
 
         opposing_pitcher_id = pitcher_id_map.get(team_abbr) or None
 
+        # Populate batter handedness cache BEFORE coverage runs so that
+        # get_player_handedness() inside coverage.py finds it in mlb_player_positions.
+        bats = info.get("bats")
+        if bats:
+            set_player_position(str(mlb_player_id), position, bats=bats)
+
         # Coverage calculation — all props route through calculate_coverage().
         # Pitcher position is passed so pitcher props use game-log coverage.
         coverage = calculate_coverage(
@@ -303,7 +309,7 @@ def _find_qualifying_legs(
             "games_vs_hand":       coverage.get("games_vs_hand"),
             "games_recent":        coverage.get("games_recent"),
             "pitcher_hand":        coverage.get("pitcher_hand"),
-            "batter_hand":         coverage.get("batter_hand"),
+            "batter_hand":         coverage.get("batter_hand") or bats,
             # Game context
             "game_pk":             game_pk,
             "opposing_pitcher_id": opposing_pitcher_id if opposing_pitcher_id else None,
