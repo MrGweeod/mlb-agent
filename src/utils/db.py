@@ -230,6 +230,18 @@ def init_db():
             game_start_time TEXT,
             pitcher_hand TEXT,
             composite_score REAL,
+            coverage_overall REAL,
+            coverage_vs_hand REAL,
+            coverage_recent_10 REAL,
+            coverage_recent_5 REAL,
+            pitcher_id TEXT,
+            pitcher_name TEXT,
+            pitcher_team TEXT,
+            pitcher_era REAL,
+            pitcher_k9 REAL,
+            pitcher_whip REAL,
+            batter_hand TEXT,
+            pitcher_vs_batter_hand_era REAL,
             UNIQUE (run_date, odd_id)
         )
     """)
@@ -237,6 +249,7 @@ def init_db():
     cur.execute("""
         CREATE TABLE IF NOT EXISTS pitcher_profiles (
             pitcher_id TEXT PRIMARY KEY,
+            pitcher_name TEXT,
             team_id TEXT,
             era REAL,
             era_rank INTEGER,
@@ -245,6 +258,10 @@ def init_db():
             whip REAL,
             whip_rank INTEGER,
             hand TEXT,
+            vs_rhb_era REAL,
+            vs_lhb_era REAL,
+            vs_rhb_k9 REAL,
+            vs_lhb_k9 REAL,
             last_updated TEXT NOT NULL
         )
     """)
@@ -756,6 +773,18 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
             leg.get("game_start_time"),
             leg.get("pitcher_hand"),
             leg.get("composite_score"),
+            leg.get("coverage_overall"),
+            leg.get("coverage_vs_hand"),
+            leg.get("coverage_recent_10"),
+            leg.get("coverage_recent_5"),
+            leg.get("pitcher_id"),
+            leg.get("pitcher_name"),
+            leg.get("pitcher_team"),
+            leg.get("pitcher_era"),
+            leg.get("pitcher_k9"),
+            leg.get("pitcher_whip"),
+            leg.get("batter_hand"),
+            leg.get("pitcher_vs_batter_hand_era"),
         )
         for leg in legs
         if leg.get("stat") and leg.get("player_name") and leg.get("odd_id")
@@ -772,11 +801,27 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
              coverage_pct, p_over, ev_per_unit, trend_pass, trend_score,
              opponent_adjustment, position, in_parlay,
              game_pk, player_id, opposing_pitcher_id, logged_at, odd_id,
-             game_start_time, pitcher_hand, composite_score)
+             game_start_time, pitcher_hand, composite_score,
+             coverage_overall, coverage_vs_hand, coverage_recent_10, coverage_recent_5,
+             pitcher_id, pitcher_name, pitcher_team, pitcher_era, pitcher_k9, pitcher_whip,
+             batter_hand, pitcher_vs_batter_hand_era)
         VALUES %s
         ON CONFLICT (run_date, odd_id) DO UPDATE
-            SET composite_score = COALESCE(mlb_scored_legs.composite_score, EXCLUDED.composite_score),
-                game_start_time = COALESCE(mlb_scored_legs.game_start_time, EXCLUDED.game_start_time)
+            SET composite_score             = COALESCE(mlb_scored_legs.composite_score,             EXCLUDED.composite_score),
+                game_start_time             = COALESCE(mlb_scored_legs.game_start_time,             EXCLUDED.game_start_time),
+                coverage_overall            = COALESCE(mlb_scored_legs.coverage_overall,            EXCLUDED.coverage_overall),
+                coverage_vs_hand            = COALESCE(mlb_scored_legs.coverage_vs_hand,            EXCLUDED.coverage_vs_hand),
+                coverage_recent_10          = COALESCE(mlb_scored_legs.coverage_recent_10,          EXCLUDED.coverage_recent_10),
+                coverage_recent_5           = COALESCE(mlb_scored_legs.coverage_recent_5,           EXCLUDED.coverage_recent_5),
+                pitcher_id                  = COALESCE(mlb_scored_legs.pitcher_id,                  EXCLUDED.pitcher_id),
+                pitcher_name                = COALESCE(mlb_scored_legs.pitcher_name,                EXCLUDED.pitcher_name),
+                pitcher_team                = COALESCE(mlb_scored_legs.pitcher_team,                EXCLUDED.pitcher_team),
+                pitcher_era                 = COALESCE(mlb_scored_legs.pitcher_era,                 EXCLUDED.pitcher_era),
+                pitcher_k9                  = COALESCE(mlb_scored_legs.pitcher_k9,                  EXCLUDED.pitcher_k9),
+                pitcher_whip                = COALESCE(mlb_scored_legs.pitcher_whip,                EXCLUDED.pitcher_whip),
+                pitcher_hand                = COALESCE(mlb_scored_legs.pitcher_hand,                EXCLUDED.pitcher_hand),
+                batter_hand                 = COALESCE(mlb_scored_legs.batter_hand,                 EXCLUDED.batter_hand),
+                pitcher_vs_batter_hand_era  = COALESCE(mlb_scored_legs.pitcher_vs_batter_hand_era,  EXCLUDED.pitcher_vs_batter_hand_era)
         """,
         rows,
     )
@@ -1872,38 +1917,38 @@ def get_parlay_dashboard_data() -> dict:
     cur.execute("""
         SELECT
             COUNT(*)                                                             AS total_parlays,
-            COUNT(*) FILTER (WHERE bet_status = 'won')                          AS won,
-            COUNT(*) FILTER (WHERE bet_status = 'lost')                         AS lost,
-            COUNT(*) FILTER (WHERE bet_status = 'void')                         AS voided,
-            COUNT(*) FILTER (WHERE bet_status = 'pending')                      AS pending,
+            COUNT(*) FILTER (WHERE outcome = 'won')                             AS won,
+            COUNT(*) FILTER (WHERE outcome = 'lost')                            AS lost,
+            COUNT(*) FILTER (WHERE outcome = 'void')                            AS voided,
+            COUNT(*) FILTER (WHERE outcome = 'pending')                         AS pending,
             ROUND(
-                100.0 * COUNT(*) FILTER (WHERE bet_status = 'won') /
-                NULLIF(COUNT(*) FILTER (WHERE bet_status IN ('won','lost')), 0),
+                100.0 * COUNT(*) FILTER (WHERE outcome = 'won') /
+                NULLIF(COUNT(*) FILTER (WHERE outcome IN ('won','lost')), 0),
                 1
             )                                                                    AS parlay_win_rate,
-            ROUND(AVG(combined_odds) FILTER (WHERE bet_status IN ('won','lost')), 0) AS avg_odds
-        FROM mlb_parlay_recommendations
-        WHERE recommendation_date >= CURRENT_DATE - INTERVAL '30 days'
+            ROUND(AVG(total_odds::numeric) FILTER (WHERE outcome IN ('won','lost')), 0) AS avg_odds
+        FROM mlb_parlay_recommendations_v2
+        WHERE run_date >= CURRENT_DATE - INTERVAL '30 days'
     """)
     summary = dict(cur.fetchone())
 
     # ── Daily performance (last 14 days) ─────────────────────────────────────
     cur.execute("""
         SELECT
-            recommendation_date,
+            run_date::text                                                       AS recommendation_date,
             COUNT(*)                                                             AS total,
-            COUNT(*) FILTER (WHERE bet_status = 'won')                          AS won,
-            COUNT(*) FILTER (WHERE bet_status = 'lost')                         AS lost,
-            COUNT(*) FILTER (WHERE bet_status = 'void')                         AS voided,
+            COUNT(*) FILTER (WHERE outcome = 'won')                             AS won,
+            COUNT(*) FILTER (WHERE outcome = 'lost')                            AS lost,
+            COUNT(*) FILTER (WHERE outcome = 'void')                            AS voided,
             ROUND(
-                100.0 * COUNT(*) FILTER (WHERE bet_status = 'won') /
-                NULLIF(COUNT(*) FILTER (WHERE bet_status IN ('won','lost')), 0),
+                100.0 * COUNT(*) FILTER (WHERE outcome = 'won') /
+                NULLIF(COUNT(*) FILTER (WHERE outcome IN ('won','lost')), 0),
                 1
             )                                                                    AS win_rate
-        FROM mlb_parlay_recommendations
-        WHERE recommendation_date >= CURRENT_DATE - INTERVAL '14 days'
-        GROUP BY recommendation_date
-        ORDER BY recommendation_date DESC
+        FROM mlb_parlay_recommendations_v2
+        WHERE run_date >= CURRENT_DATE - INTERVAL '14 days'
+        GROUP BY run_date
+        ORDER BY run_date DESC
     """)
     daily_performance = [dict(r) for r in cur.fetchall()]
 
@@ -1978,24 +2023,7 @@ def get_parlay_dashboard_data() -> dict:
     """)
     top_legs = [dict(r) for r in cur.fetchall()]
 
-    # ── Recent recommendations (last 20, v1 + v2 combined) ───────────────────
-    cur.execute("""
-        SELECT
-            id,
-            recommendation_date::text          AS recommendation_date,
-            rank,
-            combined_odds,
-            ROUND(win_probability::numeric, 1) AS win_probability,
-            ROUND(edge_pct::numeric, 1)        AS edge_pct,
-            bet_status,
-            resolved_at::text                  AS resolved_at,
-            'v1'                               AS schema_version
-        FROM mlb_parlay_recommendations
-        ORDER BY recommendation_date DESC, rank ASC
-        LIMIT 20
-    """)
-    v1_recs = [dict(r) for r in cur.fetchall()]
-
+    # ── Recent recommendations (last 20, v2 only) ────────────────────────────
     cur.execute("""
         SELECT
             id,
@@ -2003,32 +2031,17 @@ def get_parlay_dashboard_data() -> dict:
             rank,
             total_odds                         AS combined_odds,
             ROUND(avg_coverage::numeric, 1)    AS win_probability,
-            0.0                                AS edge_pct,
+            COALESCE(edge_percent, 0.0)        AS edge_pct,
             outcome                            AS bet_status,
             NULL::text                         AS resolved_at,
+            source,
             'v2'                               AS schema_version
         FROM mlb_parlay_recommendations_v2
         ORDER BY run_date DESC, rank ASC
         LIMIT 20
     """)
-    v2_recs = [dict(r) for r in cur.fetchall()]
-
-    recent_recs = sorted(
-        v1_recs + v2_recs,
-        key=lambda x: (x.get("recommendation_date") or "", -(x.get("rank") or 0)),
-        reverse=True,
-    )[:20]
-
-    # ── Add v2 pending count to summary ──────────────────────────────────────
-    cur.execute("""
-        SELECT COUNT(*) AS pending_v2
-        FROM mlb_parlay_recommendations_v2
-        WHERE run_date = CURRENT_DATE AND outcome = 'pending'
-    """)
-    v2_pending = (cur.fetchone() or {}).get("pending_v2", 0) or 0
-    v1_pending = summary.get("pending", 0) or 0
-    summary["pending"] = v1_pending + v2_pending
-    print(f"[dashboard] Pending parlays: {v1_pending} (v1) + {v2_pending} (v2) = {summary['pending']}")
+    recent_recs = [dict(r) for r in cur.fetchall()]
+    print(f"[dashboard] Pending parlays: {summary.get('pending', 0)} (v2)")
 
     cur.close()
     conn.close()
