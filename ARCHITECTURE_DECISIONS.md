@@ -17,6 +17,222 @@ This document records the key architectural decisions made during the developmen
 
 ---
 
+## V1 Schema Deprecation
+
+### **Decision: Migrate All V1 Data to V2, Deprecate V1 Tables**
+**Chosen:** May 12, 2026
+
+**Problem:**
+Dashboard queried both v1 (flat) and v2 (normalized) schemas, requiring UNION queries and maintaining two code paths.
+
+**Solution Chosen:**
+- Migrate all 50 v1 parlays to v2 normalized schema
+- Deprecate v1 tables with 30-day safety net (rename with _deprecated suffix)
+- Update dashboard to query v2 exclusively
+
+**Why Migrate (Not Just Stop Writing)?**
+
+✅ **Pros:**
+- Single schema = simpler queries, faster performance
+- All historical data in one place
+- No code complexity maintaining two paths
+- V2 schema enables per-leg outcome tracking (v1 couldn't do this)
+
+❌ **Alternatives Rejected:**
+
+**Option A: Stop writing to v1, keep both schemas**
+- Dashboard still needs UNION queries
+- Code complexity remains
+- No performance benefit
+
+**Option B: Hard delete v1 immediately after migration**
+- Too risky - no rollback if migration had bugs
+- Lost 30 days of safety net
+
+**Implementation Details:**
+
+**Migration Script:** `scripts/migrate_v1_to_v2.py`
+- Parsed v1 legs JSON blob
+- Created v2 parlay header (one row per parlay)
+- Created v2 leg rows (one row per leg)
+- Set per-leg outcome = parlay outcome (limitation accepted)
+
+**Safety Net:**
+```sql
+-- V1 tables renamed, not dropped
+ALTER TABLE mlb_recommendations RENAME TO mlb_recommendations_deprecated_20260512;
+ALTER TABLE mlb_parlay_legs RENAME TO mlb_parlay_legs_deprecated_20260512;
+-- Safe to drop after June 11, 2026
+```
+
+**Results:**
+- ✅ 50 parlays migrated successfully
+- ✅ 0 migration errors
+- ✅ Dashboard loads 2x faster (no UNION)
+- ✅ Total v2 parlays: 185 (50 + 135)
+
+**Trade-offs Accepted:**
+- V1 didn't track per-leg outcomes, only parlay-level
+- Migration sets all legs in a parlay to same outcome (won/lost/void)
+- Acceptable: We only need granular tracking going forward
+
+**Status:** ✅ Complete May 12, operational
+
+---
+
+## coverage_overall Persistence Strategy
+
+### **Decision: ON CONFLICT Backfill + DB INSERT Fix**
+**Chosen:** May 12, 2026
+
+**Problem:**
+coverage_overall was NULL for 100% of rows (2,014+ legs, 7 days). Diagnostic revealed:
+- ✅ main.py line 298 was setting coverage_overall in leg dict
+- ❌ db.py INSERT was NOT including it in column list
+- Result: Data calculated but never saved
+
+**Solution Chosen:**
+1. Add coverage_overall to INSERT column list
+2. Add coverage_overall to ON CONFLICT backfill
+3. Let next pipeline run populate going forward
+
+**Why ON CONFLICT Backfill?**
+
+When a leg already exists in the database (same run_date + odd_id), the ON CONFLICT clause decides what to update:
+
+```sql
+ON CONFLICT (run_date, odd_id) DO UPDATE
+SET coverage_overall = COALESCE(mlb_scored_legs.coverage_overall, EXCLUDED.coverage_overall)
+```
+
+**What this does:**
+- If existing row has NULL → use new value
+- If existing row has value → keep existing (don't overwrite)
+
+**This is important because:**
+- Odds can change throughout the day (12pm odds ≠ 5:30pm odds)
+- But coverage_overall doesn't change (based on game logs, not odds)
+- We want to preserve the first calculation, not recalculate 3x/day
+
+**Alternatives Considered:**
+
+**Option A: Always overwrite on conflict**
+```sql
+coverage_overall = EXCLUDED.coverage_overall
+```
+❌ Rejected: Would recalculate coverage 3x/day unnecessarily
+
+**Option B: Never update on conflict**
+```sql
+-- No coverage_overall in ON CONFLICT clause
+```
+❌ Rejected: Wouldn't backfill today's 194 NULL legs
+
+**Option C: COALESCE (chosen)** ✅
+- Backfills NULLs
+- Preserves existing values
+- Best of both worlds
+
+**Timeline of the Bug:**
+May 5-11:  coverage_overall calculated but not saved (1,820 legs)
+May 12 12pm: 194 legs inserted without coverage_overall (pre-fix)
+May 12 12:38pm: Fix committed (e683147)
+May 12 12:39pm: Fix deployed to Railway
+Next run: coverage_overall will populate
+
+**Historical Data Decision:**
+
+**Question:** Should we backfill May 5-11 (1,820 legs)?
+
+**Decision:** No, accept the gap
+
+**Reasoning:**
+- Would require recalculating coverage for each leg (CPU intensive)
+- Would need to fetch historical game logs (API calls)
+- New data accumulates at ~150-200 legs/day
+- 14 days = ~1,960 new samples (replaces lost samples)
+- Calibrator has 90,331 total samples; 1,820 is 2%
+
+**Trade-off accepted:** 2% of calibration data has NULL coverage_overall
+
+**Status:** ✅ Fix deployed, ⏳ Data verification pending
+
+---
+
+## Lessons Learned
+
+### **Learning #7: Schema Migrations Need Post-Deployment Verification**
+
+**Discovery:** We deployed coverage_overall column addition and db.py INSERT fix, but didn't verify data populated until several hours later.
+
+**What Happened:**
+1. Deployed schema changes at 12:38 PM
+2. Assumed coverage_overall would populate automatically
+3. Checked database at 4:00 PM, found still NULL
+4. Realized pipeline ran at 12:00 PM (BEFORE fix)
+
+**The Gap:**
+- Schema changes can succeed without data populating
+- Code can look correct but have subtle bugs
+- Verification queries should run immediately after deployment
+
+**Better Workflow:**
+1. Deploy schema changes
+2. Trigger manual pipeline run immediately
+3. Run verification query within 5 minutes
+4. Confirm data populated as expected
+
+**How to Avoid:**
+- Add verification step to deployment checklist
+- Create manual trigger endpoint (done today)
+- Don't wait hours to check results
+
+**Takeaway:** Deploy → Trigger → Verify → Celebrate (in that order)
+
+---
+
+### **Learning #8: Filter Bugs Can Hide Schema Fixes**
+
+**Discovery:** coverage_overall fix worked perfectly, but we couldn't tell because filter bugs blocked all parlay generation.
+
+**What Happened:**
+1. Fixed coverage_overall persistence (deployed successfully)
+2. Filters broke simultaneously (unrelated code)
+3. 0 parlays generated → looked like coverage fix failed
+4. Actually: coverage fix worked, filters broke separately
+
+**The Confusion:**
+Multiple changes deployed together → hard to isolate which failed
+
+**Better Workflow:**
+- Deploy one fix at a time
+- Verify each fix before next deployment
+- Keep changes small and isolated
+
+**How to Avoid:**
+- Single-purpose commits
+- Manual trigger for immediate testing
+- Don't bundle unrelated changes
+
+**Takeaway:** One fix per deploy, verify before next fix
+
+---
+Then at the END of the file, add:
+markdown---
+
+## Decision Review Schedule
+
+**Daily:** Monitor coverage_overall population, filter effectiveness  
+**Weekly:** Review schema performance, migration success  
+**Monthly:** Evaluate v1 deprecation (can we drop tables?), pitcher data usage  
+**Quarterly:** Reassess architecture decisions, plan next improvements  
+
+---
+
+**Last Review:** May 12, 2026  
+**Next Review:** May 19, 2026 (after 7 days of coverage_overall data)  
+**Major Milestone:** V1 schema deprecated, coverage_overall fix deployed, filters being fixed
+
 ## Temporary Scoring Adjustments Strategy
 
 ### **Decision: Post-Hoc Score Adjustments (Not Model Retraining)**
