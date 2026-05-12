@@ -771,13 +771,13 @@ def _fetch_missing_game_times(legs: list[dict], run_date: str) -> list[dict]:
 
 async def handle_regenerate_recommendations(request: web.Request) -> web.Response:
     """
-    Re-run recommendation generation using today's already-scored legs.
+    Re-run the targeted pipeline: fetches fresh SGO odds for today's legs,
+    updates composite_scores, and rebuilds parlay recommendations.
 
-    Fetches mlb_scored_legs for today (ET), filters to coverage >= 55%,
-    calls generate_recommendations(), UPSERTs the results, then returns
-    the freshly hydrated list from get_todays_recommendations().
+    Delegates entirely to run_targeted_pipeline() and returns immediately.
+    Check Railway logs for progress.
 
-    Returns: {"success": true, "recommendations": [...]}
+    Returns: {"status": "triggered", "message": "..."}
     """
     if not _check_auth(request):
         return web.Response(
@@ -787,131 +787,31 @@ async def handle_regenerate_recommendations(request: web.Request) -> web.Respons
         )
 
     try:
-        from main import generate_recommendations
+        from main import run_targeted_pipeline
 
-        today = datetime.now(_ET).date()
-        legs = get_scored_legs(str(today))
-        print(f"[regenerate] Loaded {len(legs)} legs from database")
-        _with_pitcher_id   = sum(1 for l in legs if l.get("pitcher_id"))
-        _with_pitcher_hand = sum(1 for l in legs if l.get("pitcher_hand"))
-        _with_batter_hand  = sum(1 for l in legs if l.get("batter_hand"))
-        print(
-            f"  [pitcher_debug] pitcher_id={_with_pitcher_id}/{len(legs)} legs "
-            f"| pitcher_hand={_with_pitcher_hand} | batter_hand={_with_batter_hand}"
-        )
+        print("[regenerate] Triggering fresh pipeline run with SGO odds fetch")
 
-        # Fallback: fetch game_start_time on-the-fly for any legs missing it
-        missing_count = sum(1 for leg in legs if not leg.get("game_start_time"))
-        if missing_count > 0:
-            print(f"[regenerate] {missing_count}/{len(legs)} legs missing game_start_time, fetching...")
-            legs = _fetch_missing_game_times(legs, str(today))
-            still_missing = sum(1 for leg in legs if not leg.get("game_start_time"))
-            print(f"[regenerate] After fetch: {still_missing} still NULL (fixed {missing_count - still_missing})")
-        else:
-            print(f"[regenerate] All {len(legs)} legs have game_start_time, skipping fetch")
-
-        # Filter out games starting within the next 15 minutes (forward buffer)
-        et_tz = pytz.timezone("America/New_York")
-        now_et = datetime.now(et_tz)
-        cutoff = now_et + timedelta(minutes=15)
-        active_legs = []
-        started_count = 0
-        null_count = 0
-        for leg in legs:
-            gst = leg.get("game_start_time")
-            if not gst:
-                null_count += 1
-                continue  # fail-closed: missing time = exclude
+        def _run():
             try:
-                # gst may already be a datetime object (psycopg2) or a string
-                if isinstance(gst, datetime):
-                    gt = gst
-                else:
-                    gt = datetime.strptime(str(gst)[:19], "%Y-%m-%d %H:%M:%S")
-                gt_et = et_tz.localize(gt)
-                if gt_et > cutoff:
-                    active_legs.append(leg)
-                else:
-                    started_count += 1
+                run_targeted_pipeline()
+                print("[regenerate] Pipeline completed successfully")
             except Exception as _e:
-                print(f"[regenerate] filter_debug: player={leg.get('player_name')!r}, raw_gst={gst!r}, type={type(gst).__name__}, error={_e}")
-                null_count += 1
-                continue  # fail-closed: unparseable time = exclude
+                import traceback
+                print(f"[regenerate] Pipeline error: {_e}")
+                traceback.print_exc()
 
-        print(f"[regenerate] {len(legs)} legs → {len(active_legs)} upcoming after 15-min buffer filter (cutoff: {cutoff.strftime('%H:%M ET')}, filtered {started_count} started, {null_count} missing time)")
-
-        if len(active_legs) < 4:
-            return web.Response(
-                text=json.dumps({
-                    "success": True,
-                    "recommendations": [],
-                    "message": f"Not enough legs with upcoming games (need 4+, found {len(active_legs)})",
-                }),
-                content_type="application/json",
-            )
-
-        # Provide composite_score from coverage_pct so the parlay builder can
-        # rank and filter legs without a full pipeline run.
-        for leg in active_legs:
-            leg["composite_score"] = leg.get("coverage_pct") or 50.0
-
-        # Bridge DB field names → generate_recommendations() format
-        qualifying_legs = [
-            {**leg, "best_odds": leg.get("odds"), "best_line": leg.get("line")}
-            for leg in active_legs
-            if (leg.get("coverage_pct") or 0) >= 55
-        ]
-
-        import functools
-        today_str = str(today)
-        fn = functools.partial(
-            generate_recommendations,
-            qualifying_legs,
-            max_recommendations=5,
-            run_date=today_str,
-        )
-        loop = asyncio.get_event_loop()
-        recommendations = await loop.run_in_executor(None, fn)
-
-        if recommendations is None:
-            print(f"[regenerate] ERROR: generate_recommendations() returned None (expected list)")
-            recommendations = []
-
-        print(f"[regenerate] Generated {len(recommendations)} parlays")
-
-        from src.utils.db import save_parlay_recommendations_v2
-        import traceback as _tb
-        try:
-            batch_id = save_parlay_recommendations_v2(
-                recommendations,
-                run_date=today_str,
-                source="manual",
-            )
-        except Exception as save_exc:
-            print(
-                f"[regenerate] ERROR in save_parlay_recommendations_v2:\n"
-                f"  exception type : {type(save_exc).__name__}\n"
-                f"  message        : {save_exc}\n"
-                f"  recommendations: {len(recommendations)} items\n"
-                f"  first rec keys : {list(recommendations[0].keys()) if recommendations else 'N/A'}\n"
-                f"  traceback:\n{_tb.format_exc()}"
-            )
-            raise
-
-        print(f"[regenerate] Saved {len(recommendations)} parlays to v2 schema (batch: {batch_id})")
+        threading.Thread(target=_run, daemon=True).start()
 
         return web.Response(
-            text=json.dumps({"success": True, "count": len(recommendations), "batch_id": batch_id}, default=str),
+            text=json.dumps({
+                "status": "triggered",
+                "message": "Fresh pipeline run started. Check Railway logs for progress.",
+            }),
             content_type="application/json",
         )
     except Exception as exc:
         import traceback as _tb
-        print(
-            f"[regenerate] UNHANDLED ERROR:\n"
-            f"  exception type : {type(exc).__name__}\n"
-            f"  message        : {exc}\n"
-            f"  traceback:\n{_tb.format_exc()}"
-        )
+        print(f"[regenerate] UNHANDLED ERROR: {exc}\n{_tb.format_exc()}")
         return web.Response(
             text=json.dumps({"error": str(exc)}),
             content_type="application/json",
