@@ -26,92 +26,73 @@ The MLB Parlay Agent is a production system that generates daily MLB parlay reco
 ## 📊 Current Status
 
 ### Production Health
-✅ Pipeline Runtime:      3 daily runs (9 AM, 12 PM, 5:30 PM ET)
+✅ Pipeline Runtime:      ⚠️ Blocked (filter fixes in progress)
 ✅ ML Calibration:        Deployed (+16.6% Brier improvement)
-✅ Scoring Adjustments:   Deployed (direction, odds, same-game) - **NEW May 11**
-✅ Diversity Constraint:  Removed (pure ML selection) - **NEW May 11**
-⏳ game_start_time:       Fix deployed, awaiting validation - **NEW May 11**
-⏳ Regenerate Button:     Fix deployed, awaiting validation - **NEW May 11**
-✅ ML Model Scoring:      0% NULL rate, 45.5% avg prediction (calibrated + adjusted)
-✅ Database:              V2 normalized schema operational
-✅ Web Dashboard:         4 tabs operational, v1+v2 integration complete
-✅ Deployment:            Railway live, auto-deploy from master
+✅ coverage_overall:      Fix deployed (awaiting data verification)
+✅ V1 Schema:             Deprecated (v2 only)
+✅ V2 Schema:             Operational (185 parlays)
+✅ Database:              Upgraded (13 new columns)
+✅ Web Dashboard:         Operational (v2 queries only)
+✅ Deployment:            Live (Railway)
 
-### Recent Performance (May 11, 2026)
+### Recent Performance (May 12, 2026)
 
-**Baseline (Pre-Fixes):**
-- Parlay hit rate: 8.1% (10/124)
-- Leg win rate: 51.7% (2,276/4,400)
-- Net P&L: +$3,044 on $100 stakes (+24.5% ROI)
-- Average odds: +1444
+**Schema Migration:**
+- V1→V2 migration: 50 parlays (0 errors)
+- Total v2 parlays: 185 (50 migrated + 135 native)
+- V1 tables deprecated (30-day safety net)
 
-**Expected (Post-Fixes):**
-- Parlay hit rate: 12-13% (target: +60% improvement)
-- Leg win rate: 48-50%
-- Parlay composition: 60% overs / 40% unders (was 20/80)
-- Net P&L: +$6,000-8,000 target (60-80% ROI)
+**Current Blockers:**
+- ⚠️ game_start_time filter broken (treats valid times as "missing")
+- ⚠️ Lineup check broken (marks all players "scratched")
+- Result: 0 parlays generated (fixes in progress)
 
-**Validation window:** Next 7 days (May 12-18, 2026)
+**Expected (After Filter Fixes):**
+- Parlay generation: 4-5 per run
+- coverage_overall: 100% populated
+- Pitcher data: 0% populated (Phase 3 work)
+
+**Validation window:** After filter fixes deployed (~30-60 min)
 
 ---
 
 ## 🚀 Features
 
-### 1. **Temporary Scoring Adjustments** (May 11, 2026) **NEW**
-Post-hoc adjustments to correct systematic biases discovered via comprehensive diagnostic analysis:
+### 1. **V2 Normalized Schema** (May 12, 2026) **NEW**
+Single parlay schema with per-leg outcome tracking:
+- ✅ 50 v1 parlays migrated to v2
+- ✅ Dashboard queries v2 exclusively (faster queries)
+- ✅ V1 tables deprecated (safe to drop after June 11)
+- ✅ Per-leg tracking enables advanced analytics
 
-**Three Adjustments Applied:**
-- **Direction bias correction:** Overs +18pp, Unders -26pp (model overfit to direction)
-- **Odds signal penalty:** Unders +150 get -15pp, +120-149 get -8pp (avoid long-odds losers)
-- **Same-game penalty:** Props from same game get -20pp (account for correlation)
+### 2. **Extended Database Schema** (May 12, 2026) **NEW**
+13 new columns added to mlb_scored_legs:
+- **Coverage signals:** coverage_overall, coverage_vs_hand, coverage_recent_10, coverage_recent_5
+- **Pitcher data:** pitcher_id, pitcher_name, pitcher_team, pitcher_era, pitcher_k9, pitcher_whip
+- **Batter data:** batter_hand, pitcher_vs_batter_hand_era
 
-**Diagnostic Findings:**
-- Unders: 66.9% avg score → 40.7% actual (-26.2pp error)
-- Overs: 40.3% avg score → 58.9% actual (+18.6pp error)
-- Selected unders: +155 avg odds → 29.4% win rate (bad)
-- Rejected unders: +107 avg odds → 39.5% win rate (good)
-- Same-game legs: 69.2% score → 41.7% actual (-27.5pp error)
+**Status:** ✅ Schema deployed, ⏳ Data population pending (coverage_overall) or Phase 3 (pitcher)
 
-**Expected impact:** +60% hit rate improvement (8.1% → 12-13%)
+### 3. **coverage_overall Persistence Fix** (May 12, 2026) **NEW**
+Fixed 100% NULL issue:
+- Root cause: db.py INSERT missing coverage_overall in column list
+- Fix: Added to INSERT + ON CONFLICT backfill
+- **Expected result:** 100% population starting next pipeline run
 
-### 2. **Pure Quality-First Selection** (May 11, 2026) **NEW**
-Removed within-batch diversity constraint discovered to hurt performance:
+### 4. **Manual Pipeline Trigger** (May 12, 2026) **NEW**
+On-demand pipeline execution for testing:
+```bash
+curl -X POST https://your-app.railway.app/api/admin/run_pipeline
+```
+**Use case:** Immediate testing after deployments
 
-**Why Removed:**
-- Legs appearing 3+ times: 48.3% win rate (best) - **EXCLUDED by constraint**
-- Legs appearing twice: 32.8% win rate (worst) - **FORCED by constraint**
-- Constraint reduced hit rate by 10-15%
+### 5. **Stat-Specific ML Calibration** (May 10, 2026)
+[Keep existing content from May 11 version]
 
-**New Strategy:** Pure ML score selection, top 50 legs by composite_score
+### 6. **Reliable game_start_time Population** (May 11, 2026)
+[Keep existing content from May 11 version]
 
-**Expected impact:** +10-15% hit rate improvement
-
-### 3. **Stat-Specific ML Calibration** (May 10, 2026)
-Post-hoc isotonic regression calibration for accurate probabilistic predictions:
-- **7 calibrators** (one per major prop type: hits, strikeouts, totalBases, homeRuns, stolenBases, rbi, walks)
-- **16.6% Brier improvement** (0.2826 → 0.2341)
-- **Perfect alignment** (45.5% predicted = 45.5% actual hit rate)
-- **Biggest wins:** Home Runs +36.8%, Stolen Bases +24.5%, Hits +17.9%
-
-### 4. **Reliable game_start_time Population** (May 11, 2026) **NEW**
-Multi-layer fallback ensures regenerate button works:
-- **Layer 1:** Enrichment pipeline (primary)
-- **Layer 2:** game_pk API calls (fast fallback)
-- **Layer 3:** Schedule lookup (always runs, reliable)
-- **Layer 4:** Database persistence (cached for future)
-
-**Result:** Regenerate button should generate new parlays (not cached)
-
-### 5. **Game Start Time Filter** (May 10, 2026)
-Fail-closed filtering ensures only upcoming games appear in parlays:
-- **15-minute forward buffer** (only games starting >15 min from now)
-- **Fail-closed logic** (missing game_start_time = exclude, not include)
-- **100% database coverage** (all legs have valid game_start_time)
-
-### 6. **ML-Powered Leg Scoring**
-- **Model:** Scikit-learn LogisticRegression (15 features)
-- **Training Data:** 90,331 resolved legs (52,583 used for calibration)
-- **Performance:** AUC 0.8532, calibrated Brier 0.2341 (with adjustments)
+[Keep remaining features 7-10 from May 11 version unchanged]
 
 ### 7. **Pitcher-Aware Matchup Logic**
 - Batter coverage split by opposing pitcher handedness (RHP vs LHP)
@@ -135,6 +116,24 @@ Fail-closed filtering ensures only upcoming games appear in parlays:
 - Warning alerts if degradation exceeds 10%
 
 ---
+
+### Recent Performance (May 11, 2026)
+
+**Baseline (Pre-Fixes):**
+- Parlay hit rate: 8.1% (10/124)
+- Leg win rate: 51.7% (2,276/4,400)
+- Net P&L: +$3,044 on $100 stakes (+24.5% ROI)
+- Average odds: +1444
+
+**Expected (Post-Fixes):**
+- Parlay hit rate: 12-13% (target: +60% improvement)
+- Leg win rate: 48-50%
+- Parlay composition: 60% overs / 40% unders (was 20/80)
+- Net P&L: +$6,000-8,000 target (60-80% ROI)
+
+**Validation window:** Next 7 days (May 12-18, 2026)
+
+--
 
 ## 🏗️ Architecture
 
@@ -383,6 +382,24 @@ No artificial diversity constraints. Select top 50 legs by composite_score. Let 
 
 ### **Common Issues**
 
+### **Technical Limitations**
+1. **Filter bugs (temporary)**
+   - game_start_time filter treating valid times as "missing"
+   - Lineup check marking all players as "scratched"
+   - Fixes in development, ETA 30-60 minutes
+
+2. **Historical coverage_overall gap**
+   - May 5-11 legs (1,820 samples) have NULL coverage_overall
+   - Will remain NULL permanently (no backfill planned)
+   - New data accumulates at ~150-200 legs/day
+
+3. **Pitcher data not wired** (Phase 3 work)
+   - pitcher_id, pitcher_era, etc. columns exist but are NULL
+   - Phase 3 will populate and use in scoring logic
+   - ETA: 3-4 hours after filter fixes complete
+
+[Keep remaining limitations from May 11 version]
+
 **Issue:** Scoring adjustments not appearing in logs
 - **Cause:** Wrong commit deployed
 - **Solution:** Check `git log --oneline -3`, verify commit e481f22 or later
@@ -423,6 +440,17 @@ Personal research use only. Please gamble responsibly.
 ---
 
 ## 🎉 Recent Updates
+
+### **May 12, 2026 - Schema Cleanup + coverage_overall Fix**
+- ✅ V1→V2 migration complete (50 parlays, 0 errors)
+- ✅ V1 tables deprecated (mlb_recommendations → mlb_recommendations_deprecated_20260512)
+- ✅ 13 new columns added to mlb_scored_legs (coverage + pitcher fields)
+- ✅ coverage_overall persistence fixed (db.py INSERT bug)
+- ✅ Dashboard updated to query v2 exclusively (no more UNION)
+- ⏳ Filter bugs discovered (game_start_time + lineup check), fixes in progress
+- ⏳ Manual pipeline trigger endpoint being added
+
+[Keep May 11 and May 10 entries below this]
 
 ### **May 11, 2026 - Comprehensive Diagnostic Analysis + Scoring Fixes**
 - ✅ Ran comprehensive diagnostic analysis (124 parlays, 4,400 legs)
