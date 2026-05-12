@@ -533,8 +533,9 @@ async def handle_recommendations(request: web.Request) -> web.Response:
         conn = get_conn()
         cur = conn.cursor()
 
-        # Get latest batch_id for today — order by batch_id DESC (format YYYY-MM-DD_HH:MM:SS
-        # sorts correctly lexicographically and avoids per-row created_at drift from the INSERT loop)
+        # Get latest batch_id for today — order by MAX(created_at) DESC so v2 batches
+        # (format YYYY-MM-DD_HH:MM:SS) aren't shadowed by old v1 batches (v1_YYYY-MM-DD_N)
+        # which sort lexicographically later because 'v' > any digit.
         print(f"[recommendations] Querying for run_date={today}")
         cur.execute(
             """
@@ -542,7 +543,7 @@ async def handle_recommendations(request: web.Request) -> web.Response:
             FROM mlb_parlay_recommendations_v2
             WHERE run_date = %s
             GROUP BY batch_id, source
-            ORDER BY batch_id DESC
+            ORDER BY MAX(created_at) DESC
             LIMIT 1
             """,
             (today,),
@@ -791,6 +792,13 @@ async def handle_regenerate_recommendations(request: web.Request) -> web.Respons
         today = datetime.now(_ET).date()
         legs = get_scored_legs(str(today))
         print(f"[regenerate] Loaded {len(legs)} legs from database")
+        _with_pitcher_id   = sum(1 for l in legs if l.get("pitcher_id"))
+        _with_pitcher_hand = sum(1 for l in legs if l.get("pitcher_hand"))
+        _with_batter_hand  = sum(1 for l in legs if l.get("batter_hand"))
+        print(
+            f"  [pitcher_debug] pitcher_id={_with_pitcher_id}/{len(legs)} legs "
+            f"| pitcher_hand={_with_pitcher_hand} | batter_hand={_with_batter_hand}"
+        )
 
         # Fallback: fetch game_start_time on-the-fly for any legs missing it
         missing_count = sum(1 for leg in legs if not leg.get("game_start_time"))
