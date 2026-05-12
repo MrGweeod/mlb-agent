@@ -812,12 +812,15 @@ async def handle_regenerate_recommendations(request: web.Request) -> web.Respons
                 null_count += 1
                 continue  # fail-closed: missing time = exclude
             try:
-                gt = datetime.strptime(gst, "%Y-%m-%d %H:%M:%S")
-                if et_tz.localize(gt) > cutoff:
+                # str(gst) handles both string and datetime objects from psycopg2
+                gt = datetime.strptime(str(gst)[:19], "%Y-%m-%d %H:%M:%S")
+                gt_et = et_tz.localize(gt)
+                if gt_et > cutoff:
                     active_legs.append(leg)
                 else:
                     started_count += 1
-            except Exception:
+            except Exception as _e:
+                print(f"[regenerate] filter_debug: player={leg.get('player_name')!r}, raw_gst={gst!r}, type={type(gst).__name__}, error={_e}")
                 null_count += 1
                 continue  # fail-closed: unparseable time = exclude
 
@@ -1097,6 +1100,55 @@ async def handle_analyze_recommendation(request: web.Request) -> web.Response:
     )
 
 
+async def handle_run_pipeline(request: web.Request) -> web.Response:
+    """
+    Manual trigger for the targeted refresh pipeline (run_targeted_refresh_pipeline).
+    POST /api/admin/run_pipeline
+
+    Runs in a background thread so this returns immediately.
+    Check Railway logs for pipeline progress.
+    """
+    if not _check_auth(request):
+        return web.Response(
+            text=json.dumps({"error": "Unauthorized"}),
+            content_type="application/json",
+            status=401,
+        )
+
+    try:
+        from main import run_targeted_refresh_pipeline
+        import threading
+
+        triggered_at = datetime.now(ZoneInfo("America/New_York")).isoformat()
+        print(f"[admin] Manual pipeline triggered at {triggered_at}")
+
+        def _run():
+            try:
+                run_targeted_refresh_pipeline()
+                print("[admin] Pipeline completed successfully")
+            except Exception as _e:
+                import traceback
+                print(f"[admin] Pipeline error: {_e}")
+                traceback.print_exc()
+
+        threading.Thread(target=_run, daemon=True).start()
+
+        return web.Response(
+            text=json.dumps({
+                "status": "triggered",
+                "message": "Pipeline started in background. Check Railway logs for progress.",
+                "timestamp": triggered_at,
+            }),
+            content_type="application/json",
+        )
+    except Exception as exc:
+        return web.Response(
+            text=json.dumps({"status": "error", "message": str(exc)}),
+            content_type="application/json",
+            status=500,
+        )
+
+
 def create_app() -> web.Application:
     """Build and return the aiohttp Application object."""
     app = web.Application()
@@ -1114,6 +1166,7 @@ def create_app() -> web.Application:
     app.router.add_post("/api/refresh", handle_refresh)
     app.router.add_get("/api/train-model", handle_train_model)
     app.router.add_post("/api/training/retrain", handle_training_retrain)
+    app.router.add_post("/api/admin/run_pipeline", handle_run_pipeline)
     return app
 
 

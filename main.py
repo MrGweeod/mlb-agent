@@ -1068,6 +1068,12 @@ def run_targeted_pipeline(buffer_minutes: int = 15) -> None:
                         starters.add(int(pid_str))
                     except (ValueError, TypeError):
                         pass
+            if not starters:
+                # Batting order not yet available — lineups not announced, include all
+                print(f"    [lineup] No batting order for game {game_pk} (lineups not yet announced) — including all")
+                for leg in game_legs:
+                    leg["lineup_status"] = "unknown"
+                continue
             for leg in game_legs:
                 stat = leg.get("stat", "")
                 pid = leg.get("player_id")
