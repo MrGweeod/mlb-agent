@@ -1045,7 +1045,7 @@ def run_targeted_pipeline(buffer_minutes: int = 15) -> None:
             # Slow path — statsapi (only for genuinely new players not in DB)
             if name not in _statsapi_id_cache:
                 try:
-                    results = _statsapi.lookup_player(name)
+                    results = statsapi.lookup_player(name)
                     _statsapi_id_cache[name] = results[0]["id"] if results else None
                 except Exception as _e:
                     _statsapi_id_cache[name] = None
