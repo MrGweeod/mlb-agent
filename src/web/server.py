@@ -528,18 +528,21 @@ async def handle_recommendations(request: web.Request) -> web.Response:
     try:
         from src.utils.db import get_conn
 
-        today = str(date.today())
+        today = str(datetime.now(_ET).date())
 
         conn = get_conn()
         cur = conn.cursor()
 
-        # Get latest batch_id for today
+        # Get latest batch_id for today — order by batch_id DESC (format YYYY-MM-DD_HH:MM:SS
+        # sorts correctly lexicographically and avoids per-row created_at drift from the INSERT loop)
+        print(f"[recommendations] Querying for run_date={today}")
         cur.execute(
             """
-            SELECT DISTINCT batch_id, source, created_at
+            SELECT DISTINCT batch_id, source, MAX(created_at) AS created_at
             FROM mlb_parlay_recommendations_v2
             WHERE run_date = %s
-            ORDER BY created_at DESC
+            GROUP BY batch_id, source
+            ORDER BY batch_id DESC
             LIMIT 1
             """,
             (today,),

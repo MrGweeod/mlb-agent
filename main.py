@@ -977,6 +977,15 @@ def run_targeted_pipeline(buffer_minutes: int = 15) -> None:
         print("  No legs in DB. Exiting targeted pipeline.")
         return
 
+    # Debug: show pitcher field coverage on loaded legs
+    _with_pitcher_id   = sum(1 for l in all_legs if l.get("pitcher_id"))
+    _with_pitcher_hand = sum(1 for l in all_legs if l.get("pitcher_hand"))
+    _with_batter_hand  = sum(1 for l in all_legs if l.get("batter_hand"))
+    print(
+        f"  [pitcher_debug] pitcher_id={_with_pitcher_id}/{len(all_legs)} legs "
+        f"| pitcher_hand={_with_pitcher_hand} | batter_hand={_with_batter_hand}"
+    )
+
     # ── Step 3: Filter composite_score >= MIN_COVERAGE_PCT (55) ──────────────
     eligible = [l for l in all_legs if (l.get("composite_score") or 0) >= MIN_COVERAGE_PCT]
     print(f"  {len(eligible)} legs with composite_score >= {MIN_COVERAGE_PCT}")

@@ -166,6 +166,12 @@ def enrich_legs(
     if season is None:
         season = datetime.datetime.now().year
 
+    print(
+        f"  [enrich_legs] pitcher_id_map has {len(pitcher_id_map)} team(s): "
+        + ", ".join(f"{t}→{pid}" for t, pid in sorted(pitcher_id_map.items()) if pid is not None)
+        + (f" | {sum(1 for v in pitcher_id_map.values() if v is None)} team(s) with no pitcher" if any(v is None for v in pitcher_id_map.values()) else "")
+    )
+
     # Pre-fetch all unique pitcher profiles and names before the per-leg loop
     unique_pitcher_ids = set(pitcher_id_map.values())
     profiles: dict[int, dict | None] = {}
