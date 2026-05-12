@@ -2328,10 +2328,23 @@ function updateTimestamp(isoStr) {
 
 async function regenerateRecommendations() {
   const btn = document.getElementById('regenerate-btn');
+  const container = document.getElementById('recommendations-container');
+
   btn.disabled = true;
   btn.textContent = 'Regenerating…';
-  const container = document.getElementById('recommendations-container');
-  container.innerHTML = '<div class="center-msg"><div class="spinner"></div><div>Running recommendation engine…</div></div>';
+  container.innerHTML = '<div class="center-msg"><div class="spinner"></div><div>Regenerating Recommendations…</div></div>';
+
+  // Snapshot the current generated_at so we can detect when a new batch lands
+  let originalGeneratedAt = null;
+  try {
+    const snap = await fetch(`/api/recommendations?password=${encodeURIComponent(password)}`);
+    if (snap.ok) {
+      const snapData = await snap.json();
+      originalGeneratedAt = snapData.generated_at || null;
+    }
+  } catch (_) {}
+
+  // Trigger the pipeline (returns immediately with {"status": "triggered"})
   try {
     const res = await fetch(`/api/recommendations/regenerate?password=${encodeURIComponent(password)}`, {
       method: 'POST',
@@ -2340,19 +2353,67 @@ async function regenerateRecommendations() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     if (data.error) throw new Error(data.error);
-    showToast(`Generated ${data.count} parlays`);
-    // Reload latest picks and refresh history
-    await loadRecommendations();
-    const todayDate = new Date().toISOString().slice(0, 10);
-    loadRecommendationHistory(todayDate);
   } catch (err) {
     showToast('Regeneration failed: ' + err.message);
     container.innerHTML =
       '<div class="center-msg"><div style="color:var(--red)">Regeneration failed: ' + esc(err.message) + '</div></div>';
-  } finally {
     btn.disabled = false;
     btn.textContent = 'Regenerate Now';
+    return;
   }
+
+  // Poll /api/recommendations every 2s until generated_at changes (new batch ready)
+  const POLL_INTERVAL = 2000;
+  const TIMEOUT_MS = 60000;
+  const startTime = Date.now();
+
+  const pollTimer = setInterval(async () => {
+    if (Date.now() - startTime > TIMEOUT_MS) {
+      clearInterval(pollTimer);
+      showToast('Timed out waiting for new parlays — try refreshing');
+      container.innerHTML =
+        '<div class="center-msg"><div style="color:var(--yellow)">Timed out waiting for new parlays. Try refreshing.</div></div>';
+      btn.disabled = false;
+      btn.textContent = 'Regenerate Now';
+      return;
+    }
+
+    try {
+      const res = await fetch(`/api/recommendations?password=${encodeURIComponent(password)}`);
+      if (!res.ok) return; // keep polling on transient errors
+      const data = await res.json();
+
+      if ((data.generated_at || null) === originalGeneratedAt) return; // no new batch yet
+
+      clearInterval(pollTimer);
+
+      if (!data.parlays || data.parlays.length === 0) {
+        container.innerHTML =
+          '<div class="center-msg" style="padding:60px 24px">' +
+          '<div>No recommendations yet for today. Click Regenerate Now to generate picks.</div></div>';
+        updateTimestamp(null);
+      } else {
+        data.parlays.forEach(p => { p.id = p.rank; });
+        _currentParlays = data.parlays;
+        renderRecommendations(data.parlays);
+        updateTimestamp(data.generated_at);
+        if (data.generated_at) {
+          const ts = new Date(data.generated_at);
+          document.getElementById('latest-time').textContent =
+            ts.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }) + ' ET';
+        }
+        if (data.source) document.getElementById('latest-source').textContent = data.source;
+        showToast('New parlays ready!');
+      }
+
+      const todayDate = new Date().toISOString().slice(0, 10);
+      loadRecommendationHistory(todayDate);
+      btn.disabled = false;
+      btn.textContent = 'Regenerate Now';
+    } catch (_) {
+      // ignore transient fetch errors, keep polling
+    }
+  }, POLL_INTERVAL);
 }
 
 function renderRecommendations(recs) {
