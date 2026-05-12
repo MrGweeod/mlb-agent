@@ -501,6 +501,20 @@ def fetch_props_for_players(date_str: str, player_ids: list[int] | None = None) 
         player_set = set(player_ids)
         filtered = [p for p in all_props if p.get('player_id') in player_set]
         print(f"[SGO] Filtered to {len(filtered)} props for {len(player_ids)} target players")
+
+        if len(filtered) == 0 and all_props:
+            # Debug: show why nothing matched
+            sample_props = all_props[:5]
+            prop_ids_in_sgo = {p.get('player_id') for p in all_props}
+            print(f"[SGO_DEBUG] Target player_ids (first 10): {sorted(player_set)[:10]}")
+            print(f"[SGO_DEBUG] SGO returned {len(all_props)} total props")
+            print(f"[SGO_DEBUG] Unique player_ids in SGO props: {sorted(p for p in prop_ids_in_sgo if p is not None)[:10]}")
+            none_count = sum(1 for p in all_props if p.get('player_id') is None)
+            print(f"[SGO_DEBUG] Props with player_id=None (MLB ID lookup failed): {none_count}/{len(all_props)}")
+            print(f"[SGO_DEBUG] Sample props (first 5):")
+            for sp in sample_props:
+                print(f"[SGO_DEBUG]   player_name={sp.get('player_name')!r}, player_id={sp.get('player_id')}, stat={sp.get('stat')}")
+
         return filtered
 
     return all_props

@@ -1159,11 +1159,13 @@ def run_targeted_pipeline(buffer_minutes: int = 15) -> None:
         return
 
     saved = 0
+    run_time = datetime.now(timezone.utc)
     for rank, rec in enumerate(recommendations, start=1):
         rec_row = {
             "recommendation_date": today,
+            "pipeline_run_time":   run_time,
             "rank":                rank,
-            "legs":                rec["legs"],
+            "leg_odd_ids":         [leg["odd_id"] for leg in rec["legs"]],
             "combined_odds":       rec["combined_odds"],
             "win_probability":     rec["win_probability"],
             "edge_pct":            rec["edge_pct"],
