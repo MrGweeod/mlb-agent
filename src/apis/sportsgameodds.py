@@ -473,7 +473,11 @@ def get_player_props(game, include_unders=True):
     return props
 
 
-def fetch_props_for_players(date_str: str, player_ids: list[int] | None = None) -> list[dict]:
+def fetch_props_for_players(
+    date_str: str,
+    player_ids: list[int] | None = None,
+    player_names: list[str] | None = None,
+) -> list[dict]:
     """
     Fetch fresh player props for a given date, optionally filtering to specific players.
 
@@ -481,12 +485,20 @@ def fetch_props_for_players(date_str: str, player_ids: list[int] | None = None) 
     so this always fetches the full day's events and parses props locally.  Filtering
     by player_ids reduces downstream work but does not reduce API objects consumed.
 
+    player_names provides a name-based fallback filter for props where the SGO-side
+    statsapi.lookup_player() call failed and player_id is None.  The caller is
+    responsible for resolving player_id on returned props (e.g. via a DB name→ID
+    mapping and/or a statsapi fallback).
+
     Args:
-        date_str:   Game date (YYYY-MM-DD).
-        player_ids: Optional list of MLB player IDs to restrict results.
+        date_str:     Game date (YYYY-MM-DD).
+        player_ids:   Optional list of MLB player IDs to restrict results.
+        player_names: Optional list of player display names; matched case-insensitively.
+                      Props are included if they match on player_id OR player_name.
 
     Returns:
-        List of prop dicts (same shape as get_player_props output).
+        List of prop dicts (same shape as get_player_props output).  player_id may
+        be None for props where ID resolution failed inside get_player_props().
     """
     games = get_todays_games(date=date_str)
     print(f"[SGO] Fetched {len(games)} game event(s) for {date_str}")
@@ -497,24 +509,15 @@ def fetch_props_for_players(date_str: str, player_ids: list[int] | None = None) 
 
     print(f"[SGO] Parsed {len(all_props)} player props across all games")
 
-    if player_ids:
-        player_set = set(player_ids)
-        filtered = [p for p in all_props if p.get('player_id') in player_set]
-        print(f"[SGO] Filtered to {len(filtered)} props for {len(player_ids)} target players")
-
-        if len(filtered) == 0 and all_props:
-            # Debug: show why nothing matched
-            sample_props = all_props[:5]
-            prop_ids_in_sgo = {p.get('player_id') for p in all_props}
-            print(f"[SGO_DEBUG] Target player_ids (first 10): {sorted(player_set)[:10]}")
-            print(f"[SGO_DEBUG] SGO returned {len(all_props)} total props")
-            print(f"[SGO_DEBUG] Unique player_ids in SGO props: {sorted(p for p in prop_ids_in_sgo if p is not None)[:10]}")
-            none_count = sum(1 for p in all_props if p.get('player_id') is None)
-            print(f"[SGO_DEBUG] Props with player_id=None (MLB ID lookup failed): {none_count}/{len(all_props)}")
-            print(f"[SGO_DEBUG] Sample props (first 5):")
-            for sp in sample_props:
-                print(f"[SGO_DEBUG]   player_name={sp.get('player_name')!r}, player_id={sp.get('player_id')}, stat={sp.get('stat')}")
-
+    if player_ids is not None or player_names is not None:
+        id_set   = set(player_ids or [])
+        name_set = {n.lower() for n in (player_names or [])}
+        filtered = [
+            p for p in all_props
+            if p.get('player_id') in id_set
+            or p.get('player_name', '').lower() in name_set
+        ]
+        print(f"[SGO] Filtered to {len(filtered)} props for {len(id_set or name_set)} target player(s)")
         return filtered
 
     return all_props

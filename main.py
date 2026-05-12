@@ -1013,12 +1013,55 @@ def run_targeted_pipeline(buffer_minutes: int = 15) -> None:
 
     # ── Step 6: Fetch fresh SGO odds for eligible players ────────────────────
     print(f"\n[4/8] Fetching fresh SGO odds for {len(upcoming)} eligible legs...")
-    player_ids = list({leg.get("player_id") for leg in upcoming if leg.get("player_id")})
-    print(f"  {len(player_ids)} unique player(s)")
+    player_ids   = list({leg.get("player_id")   for leg in upcoming if leg.get("player_id")})
+    player_names = list({leg.get("player_name") for leg in upcoming if leg.get("player_name")})
+    # Primary resolution source: IDs we already trust from the database.
+    _db_name_to_id: dict[str, int] = {
+        leg["player_name"].lower(): leg["player_id"]
+        for leg in upcoming
+        if leg.get("player_name") and leg.get("player_id")
+    }
+    print(f"  {len(player_ids)} unique player(s) | {len(_db_name_to_id)} name→ID entries in DB map")
 
     try:
-        fresh_props = fetch_props_for_players(today, player_ids=player_ids)
+        fresh_props = fetch_props_for_players(today, player_ids=player_ids, player_names=player_names)
         print(f"  Received {len(fresh_props)} prop(s) from SGO")
+
+        # ── Two-stage player ID resolution ───────────────────────────────────
+        # Props may arrive with player_id=None when the SGO-side statsapi call
+        # fails.  Resolve in order: DB mapping (fast) → statsapi (new players only).
+        _statsapi_id_cache: dict[str, int | None] = {}
+        _resolved_db = _resolved_api = _unresolved = 0
+        for prop in fresh_props:
+            if prop.get("player_id") is not None:
+                continue
+            name = prop.get("player_name", "")
+            # Fast path — authoritative DB mapping
+            db_id = _db_name_to_id.get(name.lower())
+            if db_id is not None:
+                prop["player_id"] = db_id
+                _resolved_db += 1
+                continue
+            # Slow path — statsapi (only for genuinely new players not in DB)
+            if name not in _statsapi_id_cache:
+                try:
+                    results = _statsapi.lookup_player(name)
+                    _statsapi_id_cache[name] = results[0]["id"] if results else None
+                except Exception as _e:
+                    _statsapi_id_cache[name] = None
+                    print(f"  [ID:api] {name!r} → lookup error: {_e}")
+            api_id = _statsapi_id_cache[name]
+            prop["player_id"] = api_id
+            if api_id is not None:
+                _resolved_api += 1
+            else:
+                _unresolved += 1
+
+        print(
+            f"  ID resolution: {_resolved_db} via DB, "
+            f"{_resolved_api} via statsapi"
+            + (f", {_unresolved} unresolved" if _unresolved else "")
+        )
 
         # Build lookup: (player_id, stat, direction) → {line → odds}
         prop_lookup: dict[tuple, dict[float, int | str]] = {}
