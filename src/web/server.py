@@ -812,8 +812,11 @@ async def handle_regenerate_recommendations(request: web.Request) -> web.Respons
                 null_count += 1
                 continue  # fail-closed: missing time = exclude
             try:
-                # str(gst) handles both string and datetime objects from psycopg2
-                gt = datetime.strptime(str(gst)[:19], "%Y-%m-%d %H:%M:%S")
+                # gst may already be a datetime object (psycopg2) or a string
+                if isinstance(gst, datetime.datetime):
+                    gt = gst
+                else:
+                    gt = datetime.datetime.strptime(str(gst)[:19], "%Y-%m-%d %H:%M:%S")
                 gt_et = et_tz.localize(gt)
                 if gt_et > cutoff:
                     active_legs.append(leg)
