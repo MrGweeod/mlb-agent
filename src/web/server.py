@@ -1102,7 +1102,7 @@ async def handle_analyze_recommendation(request: web.Request) -> web.Response:
 
 async def handle_run_pipeline(request: web.Request) -> web.Response:
     """
-    Manual trigger for the targeted refresh pipeline (run_targeted_refresh_pipeline).
+    Manual trigger for the targeted refresh pipeline (run_targeted_pipeline).
     POST /api/admin/run_pipeline
 
     Runs in a background thread so this returns immediately.
@@ -1116,7 +1116,7 @@ async def handle_run_pipeline(request: web.Request) -> web.Response:
         )
 
     try:
-        from main import run_targeted_refresh_pipeline
+        from main import run_targeted_pipeline
         import threading
 
         triggered_at = datetime.now(ZoneInfo("America/New_York")).isoformat()
@@ -1124,7 +1124,7 @@ async def handle_run_pipeline(request: web.Request) -> web.Response:
 
         def _run():
             try:
-                run_targeted_refresh_pipeline()
+                run_targeted_pipeline()
                 print("[admin] Pipeline completed successfully")
             except Exception as _e:
                 import traceback
