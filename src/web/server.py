@@ -793,7 +793,7 @@ async def handle_regenerate_recommendations(request: web.Request) -> web.Respons
 
         def _run():
             try:
-                run_targeted_pipeline()
+                run_targeted_pipeline(source="manual")
                 print("[regenerate] Pipeline completed successfully")
             except Exception as _e:
                 import traceback
@@ -1061,7 +1061,7 @@ async def handle_run_pipeline(request: web.Request) -> web.Response:
 
         def _run():
             try:
-                run_targeted_pipeline()
+                run_targeted_pipeline(source="manual")
                 print("[admin] Pipeline completed successfully")
             except Exception as _e:
                 import traceback

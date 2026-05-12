@@ -928,7 +928,7 @@ def run_morning_pipeline() -> None:
     run_pipeline()
 
 
-def run_targeted_pipeline(buffer_minutes: int = 15) -> None:
+def run_targeted_pipeline(buffer_minutes: int = 15, source: str = "auto") -> None:
     """
     Midday/evening targeted refresh — fetches fresh SGO odds for eligible players.
 
@@ -1239,7 +1239,7 @@ def run_targeted_pipeline(buffer_minutes: int = 15) -> None:
 
     # Dual-write to v2 normalized schema
     try:
-        save_parlay_recommendations_v2(recommendations, today, source="manual")
+        save_parlay_recommendations_v2(recommendations, today, source=source)
     except Exception as _v2_err:
         print(f"  [v2] dual-write failed (non-fatal): {_v2_err}")
 
