@@ -1086,6 +1086,56 @@ async def handle_run_pipeline(request: web.Request) -> web.Response:
         )
 
 
+async def handle_run_full_pipeline(request: web.Request) -> web.Response:
+    """
+    Manual trigger for the full morning pipeline (run_morning_pipeline).
+    POST /api/admin/run_full_pipeline
+
+    Fetches fresh props from SGO, runs full coverage calculation, enrichment,
+    scoring, and parlay building. Runs in a background thread and returns immediately.
+    Check Railway logs for pipeline progress.
+    """
+    if not _check_auth(request):
+        return web.Response(
+            text=json.dumps({"error": "Unauthorized"}),
+            content_type="application/json",
+            status=401,
+        )
+
+    try:
+        from main import run_morning_pipeline
+        import threading
+
+        triggered_at = datetime.now(ZoneInfo("America/New_York")).isoformat()
+        print(f"[admin] Manual full pipeline triggered at {triggered_at}")
+
+        def _run():
+            try:
+                run_morning_pipeline()
+                print("[admin] Full pipeline completed successfully")
+            except Exception as _e:
+                import traceback
+                print(f"[admin] Full pipeline error: {_e}")
+                traceback.print_exc()
+
+        threading.Thread(target=_run, daemon=True).start()
+
+        return web.Response(
+            text=json.dumps({
+                "status": "triggered",
+                "message": "Full pipeline started in background. Check Railway logs for progress.",
+                "timestamp": triggered_at,
+            }),
+            content_type="application/json",
+        )
+    except Exception as exc:
+        return web.Response(
+            text=json.dumps({"status": "error", "message": str(exc)}),
+            content_type="application/json",
+            status=500,
+        )
+
+
 def create_app() -> web.Application:
     """Build and return the aiohttp Application object."""
     app = web.Application()
@@ -1104,6 +1154,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/train-model", handle_train_model)
     app.router.add_post("/api/training/retrain", handle_training_retrain)
     app.router.add_post("/api/admin/run_pipeline", handle_run_pipeline)
+    app.router.add_post("/api/admin/run_full_pipeline", handle_run_full_pipeline)
     return app
 
 
