@@ -215,6 +215,12 @@ def enrich_legs(
         if is_pitcher_prop_leg:
             leg["pitcher_hand"] = get_pitcher_handedness(player_id, position) if player_id else None
             leg["opponent_adjustment"] = 0.0
+            leg["pitcher_id"] = None
+            leg["pitcher_name"] = None
+            leg["pitcher_era"] = None
+            leg["pitcher_k9"] = None
+            leg["pitcher_whip"] = None
+            leg["pitcher_vs_batter_hand_era"] = None
             continue
 
         if not pitcher_id:
