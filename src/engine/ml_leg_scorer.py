@@ -259,7 +259,6 @@ def _extract_features(leg: dict) -> list[float]:
         pitcher_era = leg.get("pitcher_era")
         if pitcher_id is not None and pitcher_era is not None and float(pitcher_era) > 0:
             pitcher_quality = max(0.0, min(100.0, ((float(pitcher_era) - 2.0) / 4.0) * 100))
-            print(f"  [ml_debug] player={leg.get('player_name')}, pitcher_era={float(pitcher_era):.2f}, pitcher_quality={pitcher_quality:.1f}")
         else:
             pitcher_quality = 50.0
         opponent_offense   = 0.0
