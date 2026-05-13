@@ -251,7 +251,17 @@ def _extract_features(leg: dict) -> list[float]:
         coverage_vs_hand   = _f("coverage_vs_hand",   cov_pct)
         coverage_recent_10 = _f("coverage_recent_10", cov_pct * 0.9)
         coverage_recent_5  = 0.0
-        pitcher_quality    = 0.0
+        # pitcher_quality scale (from batter's perspective):
+        #   0-30:  Elite pitcher (ERA < 2.5) - bad matchup for batter
+        #   30-70: Average pitcher (ERA 2.5-4.5)
+        #   70-100: Poor pitcher (ERA 4.5-6.0+) - good matchup for batter
+        pitcher_id  = leg.get("pitcher_id")
+        pitcher_era = leg.get("pitcher_era")
+        if pitcher_id is not None and pitcher_era is not None and float(pitcher_era) > 0:
+            pitcher_quality = max(0.0, min(100.0, ((float(pitcher_era) - 2.0) / 4.0) * 100))
+            print(f"  [ml_debug] player={leg.get('player_name')}, pitcher_era={float(pitcher_era):.2f}, pitcher_quality={pitcher_quality:.1f}")
+        else:
+            pitcher_quality = 50.0
         opponent_offense   = 0.0
 
     line      = float(leg.get("line") or leg.get("best_line") or 0.5)
