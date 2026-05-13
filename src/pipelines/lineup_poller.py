@@ -86,17 +86,14 @@ def _rescore_leg(leg: dict, season: int) -> bool:
         player_id  = int(player_id_raw)
         pitcher_id = int(pitcher_id_raw) if pitcher_id_raw else None
 
-        coverage = calculate_coverage(player_id, stat, float(line), pitcher_id, season)
+        direction = leg.get("direction", "over")
+        coverage = calculate_coverage(player_id, stat, float(line), pitcher_id, season, direction=direction)
         if coverage is None:
             mark_lineup_confirmed(leg_id)
             return True
 
-        # Apply confidence multiplier (blueprint §4.2): shrink toward 50% for
-        # small samples. Store as 0-100 percentage to match the DB column scale.
-        raw_rate     = coverage["coverage_rate"]
-        multiplier   = coverage["confidence_multiplier"]
-        adjusted     = 0.50 + multiplier * (raw_rate - 0.50)
-        coverage_pct_val = round(adjusted * 100, 1)
+        # Use best available coverage signal: vs-hand if available, else overall.
+        coverage_pct_val = coverage.get("coverage_vs_hand") or coverage.get("coverage_overall") or 0.0
 
         # Re-build a minimal leg dict so score_leg() can compute the composite
         scored = dict(leg)

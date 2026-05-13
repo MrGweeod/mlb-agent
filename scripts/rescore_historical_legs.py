@@ -34,7 +34,8 @@ def rescore_all_legs():
     print("Fetching resolved legs...")
     cur.execute("""
         SELECT id, player_id, stat, line, opposing_pitcher_id,
-               run_date, coverage_pct AS old_coverage
+               run_date, coverage_pct AS old_coverage,
+               COALESCE(direction, 'over') AS direction
         FROM mlb_scored_legs
         WHERE result IS NOT NULL
           AND player_id IS NOT NULL
@@ -67,6 +68,8 @@ def rescore_all_legs():
 
         season = int(run_date.split("-")[0])
 
+        direction = leg.get("direction", "over")
+
         try:
             result = calculate_coverage(
                 player_id=player_id,
@@ -74,15 +77,16 @@ def rescore_all_legs():
                 line=line,
                 opposing_pitcher_id=pitcher_id,
                 season=season,
+                direction=direction,
             )
 
             if result is None:
                 skipped += 1
                 continue
 
-            # coverage_pct is stored on 0-100 scale; coverage_rate is 0-1
-            new_coverage_pct = result["coverage_rate"] * 100
-            new_p_over       = result["coverage_rate"]
+            # Use best available coverage signal (0-100 scale)
+            new_coverage_pct = result.get("coverage_vs_hand") or result.get("coverage_overall") or 0.0
+            new_p_over       = new_coverage_pct / 100.0
 
             cur.execute(
                 """

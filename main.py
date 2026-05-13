@@ -275,6 +275,7 @@ def _find_qualifying_legs(
             opposing_pitcher_id=opposing_pitcher_id,
             season=season,
             position=position,
+            direction=prop.get("direction", "over"),
         )
         if coverage is None:
             continue  # below seasonal minimum games threshold

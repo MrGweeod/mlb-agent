@@ -93,14 +93,17 @@ def get_season_minimum(games_played: int) -> int:
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-def _count_coverage(game_log: list[dict], stat_field: str, line: float) -> tuple[int, int]:
+def _count_coverage(game_log: list[dict], stat_field: str, line: float, direction: str = "over") -> tuple[int, int]:
     """
-    Count games in game_log where stat_field met or exceeded line.
+    Count games in game_log where stat_field covered the line.
 
-    Returns (games_over_line, total_valid_games).
+    For 'over': counts games where val >= line.
+    For 'under': counts games where val < line.
+
+    Returns (games_covered, total_valid_games).
     Entries missing the field or with non-numeric values are skipped.
     """
-    over = 0
+    covered = 0
     total = 0
     for entry in game_log:
         raw = entry.get("stat", {}).get(stat_field)
@@ -111,19 +114,26 @@ def _count_coverage(game_log: list[dict], stat_field: str, line: float) -> tuple
         except (ValueError, TypeError):
             continue
         total += 1
-        if val >= line:
-            over += 1
-    return over, total
+        if direction == "under":
+            if val < line:
+                covered += 1
+        else:
+            if val >= line:
+                covered += 1
+    return covered, total
 
 
-def _count_ip_coverage(game_log: list[dict], line: float) -> tuple[int, int]:
+def _count_ip_coverage(game_log: list[dict], line: float, direction: str = "over") -> tuple[int, int]:
     """
-    Count starts where inningsPitched met or exceeded line.
+    Count starts where inningsPitched covered the line.
 
     Parses the MLB API "6.1" format: integer part = full innings,
     decimal part = outs (so "6.1" = 6⅓, "6.2" = 6⅔).
+
+    For 'over': counts starts where val >= line.
+    For 'under': counts starts where val < line.
     """
-    over = 0
+    covered = 0
     total = 0
     for entry in game_log:
         raw = entry.get("stat", {}).get("inningsPitched")
@@ -137,9 +147,13 @@ def _count_ip_coverage(game_log: list[dict], line: float) -> tuple[int, int]:
         except (ValueError, TypeError, IndexError):
             continue
         total += 1
-        if val >= line:
-            over += 1
-    return over, total
+        if direction == "under":
+            if val < line:
+                covered += 1
+        else:
+            if val >= line:
+                covered += 1
+    return covered, total
 
 
 def _get_stat_splits(player_id: int, season: int, pitcher_hand: str) -> dict | None:
@@ -197,6 +211,7 @@ def calculate_coverage(
     opposing_pitcher_id: int | None,
     season: int = None,
     position: str = "",
+    direction: str = "over",
 ) -> dict | None:
     """
     Calculate multi-signal coverage for a single prop leg.
@@ -204,6 +219,9 @@ def calculate_coverage(
     Detects pitcher props by position (SP/RP/P/TWP) or prop_type
     (inningsPitched, hitsAllowed, earnedRuns). Pitcher strikeouts are treated
     as pitcher props only when position is a pitcher position.
+
+    direction: 'over' or 'under'. Coverage is the % of games where the prop
+    would have won — for 'over' that means val >= line, for 'under' val < line.
 
     Returns:
         Dict with coverage signals (see module docstring), or None when there
@@ -218,9 +236,9 @@ def calculate_coverage(
     )
 
     if is_pitcher:
-        return _pitcher_coverage(player_id, prop_type, line, season)
+        return _pitcher_coverage(player_id, prop_type, line, season, direction)
     else:
-        return _hitter_coverage(player_id, prop_type, line, opposing_pitcher_id, season)
+        return _hitter_coverage(player_id, prop_type, line, opposing_pitcher_id, season, direction)
 
 
 def _hitter_coverage(
@@ -229,6 +247,7 @@ def _hitter_coverage(
     line: float,
     opposing_pitcher_id: int | None,
     season: int,
+    direction: str = "over",
 ) -> dict | None:
     """Calculate overall, vs-hand, and recent-10 coverage for a batter prop."""
     stat_field = PROP_STAT_MAP.get(prop_type)
@@ -237,18 +256,18 @@ def _hitter_coverage(
         return None
 
     full_log = get_batter_game_log(player_id, season)
-    overall_over, overall_games = _count_coverage(full_log, stat_field, line)
+    overall_covered, overall_games = _count_coverage(full_log, stat_field, line, direction)
 
     if overall_games < get_season_minimum(overall_games):
         return None
 
-    coverage_overall = round(100.0 * overall_over / overall_games, 1)
-    overall_rate = overall_over / overall_games
+    coverage_overall = round(100.0 * overall_covered / overall_games, 1)
+    overall_rate = overall_covered / overall_games
 
     # Recent 10 games
     recent_log = full_log[-10:]
-    recent_over, recent_games = _count_coverage(recent_log, stat_field, line)
-    coverage_recent_10 = round(100.0 * recent_over / recent_games, 1) if recent_games > 0 else None
+    recent_covered, recent_games = _count_coverage(recent_log, stat_field, line, direction)
+    coverage_recent_10 = round(100.0 * recent_covered / recent_games, 1) if recent_games > 0 else None
 
     # Handedness split
     coverage_vs_hand = None
@@ -271,7 +290,13 @@ def _hitter_coverage(
                 if rate_overall_stat > 0 and rate_vs_hand > 0:
                     if 0 < overall_rate < 1:
                         log_odds_base = math.log(overall_rate / (1 - overall_rate))
-                        log_odds_adj = math.log(rate_vs_hand / rate_overall_stat)
+                        # For UNDER props, higher batting stat means WORSE coverage,
+                        # so invert the adjustment direction.
+                        ratio = rate_vs_hand / rate_overall_stat
+                        if direction == "under":
+                            log_odds_adj = -math.log(ratio)
+                        else:
+                            log_odds_adj = math.log(ratio)
                         adjusted_rate = 1.0 / (1.0 + math.exp(-(log_odds_base + log_odds_adj)))
                         coverage_vs_hand = round(adjusted_rate * 100, 1)
                     else:
@@ -300,6 +325,7 @@ def _pitcher_coverage(
     prop_type: str,
     line: float,
     season: int,
+    direction: str = "over",
 ) -> dict | None:
     """Calculate overall and recent-5 coverage for a pitcher prop."""
     if prop_type not in PITCHER_PROP_STAT_MAP:
@@ -309,22 +335,22 @@ def _pitcher_coverage(
     game_log = get_pitcher_game_log(player_id, season)
 
     if prop_type == "inningsPitched":
-        overall_over, overall_games = _count_ip_coverage(game_log, line)
+        overall_covered, overall_games = _count_ip_coverage(game_log, line, direction)
         recent_log = game_log[-5:]
-        recent_over, recent_games = _count_ip_coverage(recent_log, line)
+        recent_covered, recent_games = _count_ip_coverage(recent_log, line, direction)
     else:
         stat_field = PITCHER_PROP_STAT_MAP[prop_type]
-        overall_over, overall_games = _count_coverage(game_log, stat_field, line)
+        overall_covered, overall_games = _count_coverage(game_log, stat_field, line, direction)
         recent_log = game_log[-5:]
-        recent_over, recent_games = _count_coverage(recent_log, stat_field, line)
+        recent_covered, recent_games = _count_coverage(recent_log, stat_field, line, direction)
 
     if overall_games < 3:
         return None
 
     return {
-        "coverage_overall":  round(100.0 * overall_over / overall_games, 1),
+        "coverage_overall":  round(100.0 * overall_covered / overall_games, 1),
         "coverage_vs_hand":  None,
-        "coverage_recent_5": round(100.0 * recent_over / recent_games, 1) if recent_games > 0 else None,
+        "coverage_recent_5": round(100.0 * recent_covered / recent_games, 1) if recent_games > 0 else None,
         "games_total":       overall_games,
         "games_vs_hand":     None,
         "games_recent":      recent_games,
