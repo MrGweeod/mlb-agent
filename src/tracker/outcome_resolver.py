@@ -177,7 +177,7 @@ def resolve_all_legs(run_date: str, verbose: bool = True) -> dict:
     cur  = conn.cursor()
     cur.execute(
         "SELECT * FROM mlb_scored_legs "
-        "WHERE run_date = %s AND (result IS NULL OR result = 'unresolvable') "
+        "WHERE run_date::date = %s::date AND (result IS NULL OR result = 'unresolvable') "
         "ORDER BY game_pk, id",
         (run_date,),
     )

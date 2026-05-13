@@ -69,7 +69,7 @@ def get_pitcher_handedness(player_id: int, position: str) -> str | None:
 # ── Prop routing ──────────────────────────────────────────────────────────────
 
 # Stats that belong to pitchers — opponent adjustment is 0.0 (not yet implemented)
-_PITCHER_STATS = frozenset({"inningsPitched", "hitsAllowed", "earnedRuns"})
+_PITCHER_STATS = frozenset({"inningsPitched", "hitsAllowed", "earnedRuns", "strikeouts"})
 
 # SGO stat names that map unambiguously to pitcher K props when prop_category is pitcher
 # (disambiguated by position in enrich_legs; both sides use "strikeouts" from SGO)
@@ -214,6 +214,8 @@ def enrich_legs(
         is_pitcher_prop_leg = position in ("SP", "RP", "P") or stat in _PITCHER_STATS
         if is_pitcher_prop_leg:
             leg["pitcher_hand"] = get_pitcher_handedness(player_id, position) if player_id else None
+            leg["opponent_adjustment"] = 0.0
+            continue
 
         if not pitcher_id:
             leg["opponent_adjustment"] = 0.0
