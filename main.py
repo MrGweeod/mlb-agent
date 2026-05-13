@@ -453,35 +453,16 @@ def generate_recommendations(
     # Rank by edge_pct descending
     enriched.sort(key=lambda x: x["edge_pct"], reverse=True)
 
-    # Diversity filter: each leg may appear in at most 2 of the final parlays
-    leg_appearance: dict[str, int] = {}
-    result: list[dict] = []
-
-    for candidate in enriched:
-        odd_ids = [leg["odd_id"] for leg in candidate["legs"]]
-
-        # Tentatively count appearances
-        temp = dict(leg_appearance)
-        valid = True
-        for oid in odd_ids:
-            temp[oid] = temp.get(oid, 0) + 1
-            if temp[oid] > 2:
-                valid = False
-                break
-
-        if valid:
-            leg_appearance = temp
-            result.append(candidate)
-
-        if len(result) >= max_recommendations:
-            break
-
-    return result
+    # REMOVED: Within-recommendation diversity filter (May 2026).
+    # Diagnostic data shows legs appearing 3+ times have 48.3% win rate (best),
+    # while the 2-appearance cap forced use of 32.8% win-rate legs (worst).
+    # ML composite scores determine selection; no artificial leg-appearance cap.
+    return enriched[:max_recommendations]
 
 
 # ── Public pipeline function ──────────────────────────────────────────────────
 
-def run_pipeline(starts_after_override=None) -> tuple[list[dict], str]:
+def run_pipeline(starts_after_override=None, source: str | None = None) -> tuple[list[dict], str]:
     """
     Execute the full MLB parlay pipeline and return (parlays, analysis).
 
@@ -798,13 +779,17 @@ def run_pipeline(starts_after_override=None) -> tuple[list[dict], str]:
     # Dual-write to v2 normalized schema
     if recommendations:
         try:
-            _hour = datetime.now(timezone.utc).astimezone().hour
-            if _hour < 11:
-                _source = "auto_9am"
-            elif _hour < 14:
-                _source = "auto_12pm"
+            if source:
+                _source = source
             else:
-                _source = "auto_530pm"
+                _et = pytz.timezone("America/New_York")
+                _hour_et = datetime.now(_et).hour
+                if _hour_et < 11:
+                    _source = "auto_9am"
+                elif _hour_et < 14:
+                    _source = "auto_12pm"
+                else:
+                    _source = "auto_530pm"
             save_parlay_recommendations_v2(recommendations, today, source=_source)
         except Exception as _v2_err:
             print(f"  [v2] dual-write failed (non-fatal): {_v2_err}")
@@ -847,13 +832,17 @@ def run_pipeline(starts_after_override=None) -> tuple[list[dict], str]:
     return parlays, analysis
 
 
-def run_morning_pipeline() -> None:
+def run_morning_pipeline(source: str | None = None) -> None:
     """
     Morning pipeline (9 AM ET):
       1. Resolve yesterday's outcomes and update training data.
       2. Run the full pipeline to fetch props, score legs, and build parlays for today.
 
     This ensures today's scored legs are in the DB before the 12 PM targeted refresh runs.
+
+    Args:
+        source: Optional source label for saved recommendations (e.g. 'manual').
+                When None, run_pipeline auto-detects from ET hour.
     """
     today  = str(date.today())
     yesterday = str(date.today() - timedelta(days=1))
@@ -925,7 +914,7 @@ def run_morning_pipeline() -> None:
     print("\n[4/4] Resolution complete — fetching fresh props for today...")
 
     # Step 5: Full pipeline run for today (fetch props, score legs, build parlays)
-    run_pipeline()
+    run_pipeline(source=source)
 
 
 def run_targeted_pipeline(buffer_minutes: int = 15, source: str = "auto") -> None:

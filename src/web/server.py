@@ -1111,7 +1111,7 @@ async def handle_run_full_pipeline(request: web.Request) -> web.Response:
 
         def _run():
             try:
-                run_morning_pipeline()
+                run_morning_pipeline(source="manual")
                 print("[admin] Full pipeline completed successfully")
             except Exception as _e:
                 import traceback
