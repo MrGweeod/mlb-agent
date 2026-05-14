@@ -230,6 +230,10 @@ def calculate_coverage(
     if season is None:
         season = datetime.datetime.now().year
 
+    if direction not in ("over", "under"):
+        raise ValueError(f"[coverage] Invalid direction '{direction}' — must be 'over' or 'under'")
+    print(f"  [coverage] calculating {prop_type} {direction} {line} player={player_id}")
+
     is_pitcher = (
         position in PITCHER_POSITIONS
         or prop_type in {"inningsPitched", "hitsAllowed", "earnedRuns"}
