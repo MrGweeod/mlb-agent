@@ -1087,6 +1087,8 @@ def run_targeted_pipeline(buffer_minutes: int = 15, source: str = "auto") -> Non
     try:
         fresh_props = fetch_props_for_players(today, player_ids=player_ids, player_names=player_names)
         print(f"  Received {len(fresh_props)} prop(s) from SGO")
+        fresh_props = _filter_useless_props(fresh_props)
+        print(f"  {len(fresh_props)} prop(s) after filtering useless prop types")
 
         # ── Two-stage player ID resolution ───────────────────────────────────
         # Props may arrive with player_id=None when the SGO-side statsapi call
