@@ -6,16 +6,18 @@ An intelligent system that analyzes player statistics, historical performance, a
 
 ---
 
-## 📊 Current Performance (as of May 13, 2026)
+## 📊 Current Performance (as of May 14, 2026)
 
-| Metric | Current | Target (Post-Fix) |
-|--------|---------|-------------------|
-| Individual Leg Hit Rate | 52% | 60-65% |
-| 4-Leg Parlay Hit Rate | 7% | 15-20% |
+| Metric | Current | Target |
+|--------|---------|--------|
+| Individual Leg Hit Rate | 52% → validating | 60-65% |
+| 4-Leg Parlay Hit Rate | 7% → validating | 15-20% |
 | Parlays Generated Daily | 4-5 | 4-5 |
 | Average Parlay Odds | +1200-1400 | +1200-1400 |
 
-**🎉 MAJOR UPDATE (May 13):** Coverage calculation bug fixed! Expected 10-15 percentage point improvement in hit rates starting May 14.
+**🎉 MAJOR UPDATE (May 13):** Coverage calculation bug fixed! The system was calculating coverage backwards for UNDER props, selecting high-performing players for UNDER bets when it should select low-performing players. Expected 10-15 percentage point improvement in hit rates.
+
+**Next Validation:** May 14-20, 2026 - Monitoring actual performance with corrected coverage calculation.
 
 ---
 
@@ -31,11 +33,11 @@ An intelligent system that analyzes player statistics, historical performance, a
 - Lineup consistency check (minimum 60% games with 3+ AB)
 - Game start buffer (15 minutes) to avoid late scratches
 - IL/DFA transaction wire integration
-- Automatic odds verification via Sportsbook API
+- Automatic odds verification via SportsGameOdds API
 
 ### **Parlay Construction**
 - Optimized for 4-6 leg parlays at +1000 to +1500 odds
-- Avoids same-game conflicts (e.g., pitcher + batter from same game)
+- Avoids same-game conflicts (max 3 legs per game)
 - Balances risk (over/under distribution, stat type diversity)
 - Branch-and-bound algorithm for optimal leg combinations
 
@@ -55,8 +57,9 @@ An intelligent system that analyzes player statistics, historical performance, a
 - **ML Model:** Scikit-learn RandomForestClassifier
 - **Deployment:** Railway (auto-deploy from GitHub)
 - **APIs:** 
-  - MLB Stats API (free tier)
-  - Sportsbook API (100K objects/month quota)
+  - MLB Stats API (free tier, unlimited)
+  - SportsGameOdds API (100K objects/month quota)
+  - Anthropic API (Claude Sonnet 4.6 for parlay analysis)
   - Transactions Wire (IL/DFA tracking)
 
 ### **Core Components**
@@ -69,7 +72,7 @@ mlb-parlay-agent/
 │   │   ├── coverage.py            # Historical performance analysis
 │   │   └── parlay_builder.py     # Parlay construction logic
 │   ├── pipelines/
-│   │   ├── fetch_legs.py          # Fetch props from Sportsbook
+│   │   ├── fetch_legs.py          # Fetch props from SportsGameOdds
 │   │   ├── enrich_legs.py         # Add context (pitcher, matchups)
 │   │   └── lineup_poller.py       # Lineup verification
 │   ├── db/
@@ -81,6 +84,11 @@ mlb-parlay-agent/
 │   └── rescore_historical_legs.py # Backfill coverage data
 ├── models/
 │   └── leg_scorer_v2.pkl          # Trained ML model (673 KB)
+├── docs/                          # Reference documentation
+│   ├── SESSION_HANDOFF.md         # Latest session context
+│   ├── BUILD_STATUS.md            # System health status
+│   ├── ARCHITECTURE_DECISIONS.md  # Key technical decisions
+│   └── MLB_Parlay_Agent_Blueprint_v1.docx  # Original spec
 └── main.py                        # Pipeline orchestration
 ```
 
@@ -92,8 +100,8 @@ mlb-parlay-agent/
 ```
 Fetch Props → Check Transactions → Enrich Context → Calculate Coverage
     ↓               ↓                    ↓                   ↓
-  2,282 props    6 IL/DFA          Add pitcher         Historical
-   from SGO     placements         matchups            performance
+  ~300 props    IL/DFA              Add pitcher         Historical
+   from SGO     placements          matchups            performance
 ```
 
 ### **2. ML Scoring**
@@ -122,7 +130,7 @@ Eligible Legs → Sort by Score → Branch & Bound → Generate Parlays
 ```
 Load Today's Legs → Fetch Fresh Odds → Check Lineups → Rebuild Parlays
         ↓                  ↓                 ↓               ↓
-   210 from DB      Update 15 players   Mark scratches   Update UI
+   From database    Update prices     Mark scratches   Update UI
 ```
 
 ---
@@ -131,21 +139,28 @@ Load Today's Legs → Fetch Fresh Odds → Check Lineups → Rebuild Parlays
 
 **Coverage** = "What % of games does this player go over/under this line?"
 
-### **Example: Daylen Lile (hits_under 0.5)**
+### **Example: Player with Low Hit Rate (good for UNDER bets)**
 ```
 Last 40 games:
 - 12 games with 0 hits (stayed UNDER 0.5) ✅
 - 28 games with 1+ hits (went OVER 0.5) ❌
 
-Coverage = 12/40 = 30%
+Coverage for UNDER 0.5 hits = 12/40 = 30%
 
-Bet: Lile UNDER 0.5 hits
-Rationale: Only gets hits 70% of time, so 30% chance he stays under
+Bet: Player UNDER 0.5 hits
+Rationale: Only gets hits 70% of time, so 30% chance stays under
 ```
 
-### **Coverage Calculation (Fixed May 13)**
+### **Coverage Calculation (Fixed May 13, 2026)**
 ```python
 def _count_coverage(game_logs, line, direction):
+    """
+    Calculate what % of games player went over/under the line.
+    
+    CRITICAL: Direction matters!
+    - OVER: Count games where stat >= line
+    - UNDER: Count games where stat < line
+    """
     qualifying_games = [g for g in game_logs if g['ab'] >= 3]
     
     if direction == "under":
@@ -156,18 +171,41 @@ def _count_coverage(game_logs, line, direction):
     return len(hit_games) / len(qualifying_games)
 ```
 
-**Key Fix (May 13):** Previously counted overs for both directions → inverted coverage for unders → selected wrong players.
+**Why This Matters:**
+
+Before the fix, the system calculated coverage as "% of times player went OVER" for ALL props. This meant:
+- ✅ OVER props: Correctly selected high performers
+- ❌ UNDER props: Incorrectly selected high performers (should select LOW performers)
+
+After the fix:
+- ✅ OVER props: Select players who frequently go over
+- ✅ UNDER props: Select players who frequently stay under
+
+This was the root cause of the 52% hit rate plateau — we were betting against our own data half the time.
 
 ---
 
 ## 🧠 Machine Learning Model
 
-### **Features (Top 10 by Importance)**
+### **Current Model: leg_scorer_v2.pkl**
+- **Type:** RandomForestClassifier with Platt scaling calibration
+- **Training data:** 81,282 samples (April-May 2026, re-scored with correct coverage)
+- **Trained:** May 13, 2026, 6:30 PM ET
+- **Size:** 673 KB
+
+### **Performance Metrics**
+- **AUC:** 0.8489 (excellent discrimination)
+- **Accuracy:** 77%
+- **Precision:** 73% (when we say "hit", 73% actually hit)
+- **Recall:** 62% (we catch 62% of all hits)
+- **Calibrated hit rate:** 45.7% (matches training distribution)
+
+### **Feature Importance (Top 10)**
 | Feature | Importance | Description |
 |---------|------------|-------------|
-| direction | 69.7% | Over vs under (known bias) |
+| direction | 69.7% | Over vs under (known bias from training data) |
 | strikeouts | 5.3% | Strikeout prop indicator |
-| coverage_overall | 4.3% | Historical performance |
+| coverage_overall | 4.3% | Historical performance (NOW CORRECT) |
 | line | 3.8% | Prop line value |
 | pitcher_era | 2.1% | Opponent pitcher quality |
 | walks | 1.9% | Walk prop indicator |
@@ -176,17 +214,8 @@ def _count_coverage(game_logs, line, direction):
 | batter_hand_R | 1.2% | Right-handed batter |
 | odds | 1.1% | Betting odds |
 
-### **Training Data**
-- **Size:** 81,282 samples (May 1 - May 13, 2026)
-- **Resolution rate:** 94% (legs with known outcomes)
-- **Hit rate in training:** 45.7%
-- **Class balance:** Slightly more misses than hits (realistic)
-
-### **Performance Metrics**
-- **AUC:** 0.8489 (excellent discrimination)
-- **Accuracy:** 77%
-- **Precision:** 73% (when we say "hit", 73% actually hit)
-- **Recall:** 62% (we catch 62% of all hits)
+### **Known Issue: Direction Bias**
+The model learned during training that direction was highly predictive because coverage was correlated with direction (due to the bug). Now that coverage is fixed, we're monitoring whether this bias self-corrects or requires retraining.
 
 ### **Model Retraining**
 ```bash
@@ -201,75 +230,37 @@ python scripts/train_ml_model.py --retrain
 ## 🗄️ Database Schema
 
 ### **mlb_scored_legs** (Main table)
-```sql
-CREATE TABLE mlb_scored_legs (
-    id SERIAL PRIMARY KEY,
-    run_date DATE,
-    player_name VARCHAR(100),
-    player_id INTEGER,
-    team VARCHAR(50),
-    opponent VARCHAR(50),
-    stat VARCHAR(50),          -- hits, strikeouts, rbi, etc.
-    direction VARCHAR(10),     -- over, under
-    line DECIMAL(5,2),
-    odds INTEGER,              -- American odds (e.g., -115, +140)
-    game_id INTEGER,
-    game_time TIMESTAMP,
-    
-    -- Enrichment
-    pitcher_id INTEGER,
-    pitcher_name VARCHAR(100),
-    pitcher_era DECIMAL(4,2),
-    batter_hand VARCHAR(1),    -- L, R, S (switch)
-    pitcher_hand VARCHAR(1),
-    
-    -- Coverage
-    coverage_overall DECIMAL(5,2),  -- 0-100
-    coverage_pct DECIMAL(5,2),      -- Same as above (legacy)
-    
-    -- Scoring
-    ml_prob DECIMAL(5,2),      -- Raw ML probability (0-100)
-    composite_score DECIMAL(5,2),  -- Adjusted score (0-100)
-    
-    -- Resolution
-    result VARCHAR(10),        -- hit, miss, push, pending
-    actual_value DECIMAL(5,2), -- Actual stat achieved
-    resolved_at TIMESTAMP,
-    
-    -- Metadata
-    source VARCHAR(50),        -- auto_9am, auto_12pm, auto_530pm, manual
-    is_scratched BOOLEAN,
-    created_at TIMESTAMP DEFAULT NOW()
-);
-```
+Each row = one prop leg scored by the system.
 
-### **mlb_parlay_recommendations_v2** (Parlay metadata)
-```sql
-CREATE TABLE mlb_parlay_recommendations_v2 (
-    id SERIAL PRIMARY KEY,
-    batch_id VARCHAR(100),     -- "2026-05-13_09:00:15"
-    run_date DATE,
-    total_odds INTEGER,        -- Combined American odds
-    leg_count INTEGER,         -- 4-6 typically
-    result VARCHAR(10),        -- hit, miss, push, pending
-    resolved_at TIMESTAMP,
-    created_at TIMESTAMP DEFAULT NOW()
-);
-```
+Key columns:
+- `player_name`, `stat`, `direction`, `line`, `odds`
+- `coverage_overall` - Historical performance % (0-100)
+- `composite_score` - Final ML score after adjustments (0-100)
+- `result` - 'hit', 'miss', 'push', 'pending'
+- `pitcher_id`, `pitcher_era`, `batter_hand`, `pitcher_hand` - Matchup context
+
+### **mlb_parlay_recommendations_v2** (Parlay headers)
+Each row = one complete parlay recommendation.
+
+Key columns:
+- `run_date`, `total_odds`, `leg_count`
+- `result` - 'hit', 'miss', 'push', 'pending'
+- `batch_id` - Groups parlays from same pipeline run
 
 ### **mlb_parlay_legs_v2** (Join table)
-```sql
-CREATE TABLE mlb_parlay_legs_v2 (
-    id SERIAL PRIMARY KEY,
-    parlay_id INTEGER REFERENCES mlb_parlay_recommendations_v2(id),
-    scored_leg_id INTEGER REFERENCES mlb_scored_legs(id),
-    created_at TIMESTAMP DEFAULT NOW()
-);
-```
+Links parlays to their individual legs via foreign keys.
+
+### **mlb_training_data** (ML training data)
+Historical resolved legs used for model training and calibration.
+
+**See [docs/SUPABASE_SCHEMA_REFERENCE.md](./docs/SUPABASE_SCHEMA_REFERENCE.md) for complete schema with type casting examples.**
 
 ---
 
 ## 🚀 Deployment
+
+### **Production URL**
+https://mlb-agent.up.railway.app
 
 ### **Railway Setup**
 1. Connect GitHub repo to Railway
@@ -278,14 +269,16 @@ CREATE TABLE mlb_parlay_legs_v2 (
    SUPABASE_URL=https://xxx.supabase.co
    SUPABASE_KEY=xxx
    ADMIN_PASSWORD=MLBparlays
+   ANTHROPIC_API_KEY=sk-ant-xxx
+   SPORTSGAMEODDS_API_KEY=xxx
    ```
-3. Auto-deploys on every commit to `master`
+3. Auto-deploys on every commit to `main` branch
 
 ### **Manual Deployment**
 ```bash
 git add .
 git commit -m "feat: your changes"
-git push origin master
+git push origin main
 ```
 
 Railway will automatically:
@@ -294,28 +287,29 @@ Railway will automatically:
 - Deploy to production
 - Run health checks
 
+**Deployment time:** ~2 minutes
+
 ---
 
 ## 🛠️ Development
 
-### **Setup**
+### **Local Setup**
 ```bash
 # Clone repo
-git clone https://github.com/yourusername/mlb-parlay-agent.git
-cd mlb-parlay-agent
+git clone https://github.com/MrGweeod/mlb-agent.git
+cd mlb-agent
 
 # Install dependencies
 pip install -r requirements.txt
 
-# Set environment variables
-export SUPABASE_URL="https://xxx.supabase.co"
-export SUPABASE_KEY="xxx"
-export ADMIN_PASSWORD="MLBparlays"
+# Copy environment template
+cp .env.example .env
+# Then edit .env with your actual keys
 ```
 
 ### **Run Locally**
 ```bash
-# Full pipeline
+# Full pipeline (9 AM mode)
 python main.py
 
 # Web server only
@@ -328,7 +322,10 @@ python src/web/server.py
 curl -X POST http://localhost:8080/api/admin/run_full_pipeline \
   -H "Authorization: Bearer MLBparlays"
 
-# Check today's recommendations
+# Check today's scored legs
+curl http://localhost:8080/api/legs?date=2026-05-14
+
+# Check parlay recommendations
 curl http://localhost:8080/api/recommendations
 ```
 
@@ -341,8 +338,9 @@ curl http://localhost:8080/api/recommendations
 # View live logs
 railway logs
 
-# Grep for specific events
+# Filter for specific events
 railway logs | grep "[parlay_builder]"
+railway logs | grep "ERROR"
 ```
 
 ### **Key Log Events**
@@ -355,20 +353,23 @@ railway logs | grep "[parlay_builder]"
 - `[7/8] Building parlay recommendations` - Construction
 - `[8/8] Saving to database` - Persistence
 
-### **Database Queries**
+### **Health Checks**
 ```sql
--- Today's performance
+-- Today's legs
+SELECT COUNT(*), AVG(composite_score) 
+FROM mlb_scored_legs 
+WHERE run_date = CURRENT_DATE::text;
+
+-- Recent parlay performance
 SELECT 
-    stat,
-    direction,
-    COUNT(*) as total,
-    SUM(CASE WHEN result = 'hit' THEN 1 ELSE 0 END) as hits,
-    ROUND(100.0 * SUM(CASE WHEN result = 'hit' THEN 1 ELSE 0 END) / COUNT(*), 1) as hit_rate
-FROM mlb_scored_legs
-WHERE run_date = CURRENT_DATE - INTERVAL '1 day'
-  AND result IN ('hit', 'miss')
-GROUP BY stat, direction
-ORDER BY hit_rate DESC;
+    run_date,
+    COUNT(*) as parlays,
+    COUNT(*) FILTER (WHERE result = 'hit') as wins,
+    COUNT(*) FILTER (WHERE result = 'miss') as losses
+FROM mlb_parlay_recommendations_v2
+WHERE run_date >= CURRENT_DATE - 14
+GROUP BY run_date
+ORDER BY run_date DESC;
 ```
 
 ---
@@ -379,73 +380,87 @@ ORDER BY hit_rate DESC;
 - **Status:** Monitoring
 - **Description:** ML model relies 70% on direction feature
 - **Why:** Coverage was bugged during training, correlated with direction
-- **Impact:** Model may still be biased toward overs
+- **Impact:** Model may still be biased; awaiting real-world validation
 - **Mitigation:** Monitor for 7 days, retrain if needed
 
 ### **Issue 2: Low Coverage Population**
-- **Status:** Expected limitation
+- **Status:** Expected, improves over time
 - **Description:** Only ~7% of legs have coverage calculated
-- **Why:** Requires 20+ games, early in season
+- **Why:** Requires 20+ games, early in season (May)
 - **Impact:** Most selection relies on ML without coverage signal
-- **Mitigation:** Improves as season progresses
+- **Mitigation:** Coverage % increases naturally as season progresses
 
-### **Issue 3: SGO API Quota**
-- **Status:** No immediate concern
-- **Description:** 100K objects/month quota, using ~2% per day
-- **Impact:** Could hit limit if adding more features
-- **Mitigation:** Monitor usage, optimize queries if needed
+### **Issue 3: API Quota Monitoring**
+- **SportsGameOdds:** 100K objects/month, using ~2K/day (66% headroom)
+- **Anthropic:** Claude API for parlay analysis, ~$3.50/month usage
+- **Status:** Both well within limits
 
 ---
 
 ## 🎯 Roadmap
 
-### **Phase 4: Post-Coverage Fix Validation (May 14-20)**
+### **Phase 4: Post-Coverage Fix Validation (May 14-20)** ⏳ IN PROGRESS
 - [ ] Validate coverage fix improves hit rates
 - [ ] Monitor hits_under performance (target: 65%+)
 - [ ] Track parlay hit rate improvement
 - [ ] Decide if model retraining needed
 
-### **Phase 5: Parlay Construction Optimization (May 20-27)**
-- [ ] Adjust scoring penalties (reduce magnitude)
-- [ ] Raise MIN_PARLAY_ODDS to 1200
-- [ ] Lower MAX_LEGS to 5
-- [ ] Target: 4-5 leg parlays at +1200-1400 consistently
+### **Phase 5: Scoring Adjustment Tuning (May 20-27)**
+- [ ] Reduce adjustment magnitudes (currently too aggressive)
+- [ ] OVER_BOOST: 18 → 8
+- [ ] UNDER_PENALTY: -26 → -12
+- [ ] Monitor score distribution vs outcomes
 
 ### **Phase 6: Coverage Expansion (June)**
 - [ ] Expand coverage to more stat types (rbi, walks)
 - [ ] Add pitcher-specific coverage (K/9, ERA trends)
 - [ ] Increase coverage population from 7% → 20%
 
-### **Future Ideas**
+### **Future Enhancements**
 - Live odds tracking (monitor line movements)
 - Multi-model ensemble (separate models per stat type)
 - Advanced pitcher metrics (FIP, xERA, K-BB%)
-- Weather integration (wind, temperature effects)
+- Weather integration (wind, temperature effects on run scoring)
 
 ---
 
 ## 📚 Documentation
 
-- **[SESSION_HANDOFF.md](SESSION_HANDOFF.md)** - Current status, next steps
-- **[BUILD_STATUS.md](BUILD_STATUS.md)** - System health, component status
-- **[ARCHITECTURE_DECISIONS.md](ARCHITECTURE_DECISIONS.md)** - Key technical decisions
-- **[SUPABASE_SCHEMA_REFERENCE.md](SUPABASE_SCHEMA_REFERENCE.md)** - Complete database schema
+All detailed documentation has been moved to `/docs` to reduce Claude Code cache size:
+
+- **[docs/SESSION_HANDOFF.md](./docs/SESSION_HANDOFF.md)** - Latest session context and next steps
+- **[docs/BUILD_STATUS.md](./docs/BUILD_STATUS.md)** - System health and component status
+- **[docs/ARCHITECTURE_DECISIONS.md](./docs/ARCHITECTURE_DECISIONS.md)** - Key technical decisions and rationale
+- **[docs/MLB_Parlay_Agent_Blueprint_v1.docx](./docs/MLB_Parlay_Agent_Blueprint_v1.docx)** - Original system design spec
+- **[docs/SUPABASE_SCHEMA_REFERENCE.md](./docs/SUPABASE_SCHEMA_REFERENCE.md)** - Complete database schema
+
+**[WORKFLOW_RULES.md](./WORKFLOW_RULES.md)** - How to work with the system (costs, git workflow, when to use what tool)
+
+---
+
+## 💰 Operating Costs
+
+### **Monthly Costs (as of May 2026)**
+- **Railway:** $5/month (Hobby plan)
+- **Supabase:** $0/month (Free tier, ~50MB used)
+- **SportsGameOdds API:** $0/month (Free tier, 100K objects)
+- **Anthropic API:** ~$3.50/month (automated parlay analysis)
+
+**Total: ~$8.50/month**
+
+### **Development Costs**
+- **Claude Code sessions:** ~$107/month (can reduce to ~$30/month by moving docs to /docs)
 
 ---
 
 ## 🤝 Contributing
 
-This is a personal project, but suggestions welcome!
+This is a personal project. Not accepting external contributions at this time.
 
-### **Bug Reports**
+### **For Issues or Questions**
 1. Check Railway logs for errors
-2. Run diagnostic SQL queries
-3. Create issue with details
-
-### **Feature Requests**
-1. Describe the feature and use case
-2. Estimate impact (low/medium/high)
-3. Consider data availability
+2. Run diagnostic SQL queries (see Monitoring section)
+3. Review [docs/SESSION_HANDOFF.md](./docs/SESSION_HANDOFF.md) for recent changes
 
 ---
 
@@ -458,19 +473,22 @@ Private project - All rights reserved
 ## 🙏 Acknowledgments
 
 - **MLB Stats API** - Free player and game data
-- **Sportsbook API** - Prop odds and lines
+- **SportsGameOdds API** - Prop odds and lines
 - **Supabase** - Backend infrastructure
 - **Railway** - Deployment platform
 - **Scikit-learn** - ML framework
+- **Anthropic Claude** - AI analysis and development assistance
 
 ---
 
-## 📞 Contact
+## 📞 Support
 
-For questions or issues, check the documentation first, then review Railway logs.
+For questions or issues:
+1. Check documentation in `/docs`
+2. Review Railway logs
+3. Run diagnostic queries
 
----
-
-**Last Updated:** May 13, 2026  
-**Version:** 2.0 (Coverage Fix Release)  
-**Status:** ✅ Operational, awaiting validation
+**System maintained by:** Matthew Guiod  
+**Last Updated:** May 14, 2026  
+**Version:** 2.1 (Post-Coverage Fix)  
+**Status:** ✅ Operational, validating coverage fix
