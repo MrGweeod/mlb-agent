@@ -1,6 +1,19 @@
 # MLB Parlay Agent — Supabase Schema Reference (ACCURATE)
-**Last Updated:** May 11, 2026  
+**Last Updated:** May 13, 2026  
 **Purpose:** Exact column types to prevent SQL query casting errors
+
+## 🎉 Recent Schema Updates (May 13, 2026)
+
+**Coverage Calculation Fixed:**
+- `coverage_overall` now correctly calculates based on direction
+- UNDER props: % times player stayed UNDER (not went over)
+- All historical data re-scored (4,599 legs backfilled)
+- Expected impact: 10-15 percentage point improvement in hit rates
+
+**New Columns Added:**
+- `pitcher_id`, `pitcher_name`, `pitcher_era`, `pitcher_k9`, `pitcher_whip` - Pitcher quality metrics
+- `pitcher_vs_batter_hand_era` - Handedness-specific matchup data
+- `batter_hand`, `pitcher_hand` - L/R/S indicators
 
 ---
 
@@ -20,33 +33,70 @@
 |--------|------|-------|--------------|
 | `run_date` | **TEXT** | Format: 'YYYY-MM-DD' | `run_date >= (CURRENT_DATE - INTERVAL '14 days')::text` |
 | `player_name` | TEXT | | No cast needed |
+| `player_id` | INTEGER | MLB Stats API player ID | No cast needed |
 | `team` | TEXT | | No cast needed |
+| `opponent` | TEXT | Opponent team abbreviation | No cast needed |
 | `stat` | TEXT | 'hits', 'strikeouts', 'totalBases', etc. | No cast needed |
 | `direction` | TEXT | 'over' or 'under' | No cast needed |
 | `line` | **TEXT** | Contains '0.5', '1.5', '2.5', etc. | `line::numeric >= 1.5` |
 | `odds` | **TEXT** | Contains '-110', '+150', etc. | `odds::numeric > 100` |
+| `game_id` | INTEGER | MLB Stats API game ID | No cast needed |
+| `game_start_time` | TIMESTAMP | Scheduled game start time | `game_start_time <= NOW()` |
+| `is_home` | BOOLEAN | True if player's team is home | No cast needed |
 | `composite_score` | NUMERIC | 0-100, ML model prediction | No cast needed |
+| `ml_prob` | NUMERIC | Raw ML probability (0-100) | No cast needed |
 | `actual_value` | NUMERIC | Actual stat result | No cast needed |
-| `coverage_overall` | NUMERIC | Coverage rate | No cast needed |
+| `coverage_overall` | NUMERIC | Coverage rate (% times went over/under based on direction) | No cast needed |
+| `coverage_pct` | NUMERIC | Alias for coverage_overall (legacy) | No cast needed |
 | `batter_vs_hand_coverage` | NUMERIC | Handedness-split coverage | No cast needed |
-| `result` | TEXT | **'won', 'lost', 'void', 'pending'** (NOT 'outcome') | No cast needed |
-| `game_start_time` | TIMESTAMP | | `game_start_time <= NOW()` |
+| `pitcher_id` | INTEGER | Opponent pitcher's MLB Stats API ID (NULL for pitcher props) | No cast needed |
+| `pitcher_name` | TEXT | Opponent pitcher's name (NULL for pitcher props) | No cast needed |
+| `pitcher_era` | NUMERIC | Opponent pitcher's ERA (NULL for pitcher props) | No cast needed |
+| `pitcher_k9` | NUMERIC | Opponent pitcher's K/9 rate | No cast needed |
+| `pitcher_whip` | NUMERIC | Opponent pitcher's WHIP | No cast needed |
+| `pitcher_vs_batter_hand_era` | NUMERIC | ERA vs specific batter handedness | No cast needed |
+| `batter_hand` | TEXT | Batter's handedness: 'L', 'R', 'S' (switch) | No cast needed |
+| `pitcher_hand` | TEXT | Pitcher's handedness: 'L', 'R' (NULL for pitcher props) | No cast needed |
+| `result` | TEXT | **'hit', 'miss', 'push', 'pending'** (NOT 'outcome') | No cast needed |
+| `resolved_at` | TIMESTAMP | When result was determined | No cast needed |
+| `source` | TEXT | 'auto_9am', 'auto_12pm', 'auto_530pm', 'manual' | No cast needed |
+| `is_scratched` | BOOLEAN | True if player scratched from lineup | No cast needed |
+| `created_at` | TIMESTAMP | When leg was created | No cast needed |
 
 **Common Query Patterns:**
 ```sql
 -- ✅ CORRECT
 SELECT * FROM mlb_scored_legs
 WHERE run_date >= (CURRENT_DATE - INTERVAL '14 days')::text
-  AND result IN ('won', 'lost')
+  AND result IN ('hit', 'miss')
   AND odds::numeric > 100
   AND line::numeric >= 1.5;
+
+-- Filter by pitcher quality
+SELECT * FROM mlb_scored_legs
+WHERE pitcher_era IS NOT NULL
+  AND pitcher_era::numeric < 3.5  -- Elite pitchers only
+  AND stat = 'hits'
+  AND direction = 'under';
+
+-- Coverage analysis by direction (post-fix)
+SELECT 
+    stat,
+    direction,
+    AVG(coverage_overall) as avg_coverage,
+    COUNT(*) FILTER (WHERE result = 'hit') * 100.0 / COUNT(*) as hit_rate
+FROM mlb_scored_legs
+WHERE coverage_overall IS NOT NULL
+  AND result IN ('hit', 'miss')
+GROUP BY stat, direction
+ORDER BY hit_rate DESC;
 
 -- ❌ WRONG
 SELECT * FROM mlb_scored_legs
 WHERE run_date >= CURRENT_DATE - INTERVAL '14 days'  -- Missing ::text
-  AND outcome IN ('won', 'lost')                      -- Column is 'result' not 'outcome'
-  AND odds > 100                                       -- odds is TEXT
-  AND line >= 1.5;                                     -- line is TEXT
+  AND outcome IN ('hit', 'miss')                     -- Column is 'result' not 'outcome'
+  AND odds > 100                                      -- odds is TEXT
+  AND line >= 1.5;                                    -- line is TEXT
 ```
 
 ---
@@ -61,7 +111,7 @@ WHERE run_date >= CURRENT_DATE - INTERVAL '14 days'  -- Missing ::text
 | `total_odds` | **TEXT** | Contains '1200', '1500', etc. | `total_odds::numeric > 1000` |
 | `avg_coverage` | NUMERIC | Average ML score of legs | No cast needed |
 | `num_legs` | INTEGER | Number of legs in parlay | No cast needed |
-| `outcome` | TEXT | **'won', 'lost', 'void', 'pending'** | No cast needed |
+| `outcome` | TEXT | **'hit', 'miss', 'push', 'pending'** | No cast needed |
 | `source` | TEXT | 'auto_9am', 'auto_12pm', 'auto_530pm', 'manual' | No cast needed |
 | `batch_id` | TEXT | | No cast needed |
 | `created_at` | TIMESTAMP | | No cast needed |
@@ -71,7 +121,7 @@ WHERE run_date >= CURRENT_DATE - INTERVAL '14 days'  -- Missing ::text
 -- ✅ CORRECT (run_date is DATE type)
 SELECT * FROM mlb_parlay_recommendations_v2
 WHERE run_date >= CURRENT_DATE - INTERVAL '14 days'  -- No ::text cast!
-  AND outcome IN ('won', 'lost')
+  AND outcome IN ('hit', 'miss')
   AND total_odds::numeric > 1000;
 
 -- Join to mlb_scored_legs (DATE → TEXT)
@@ -99,7 +149,7 @@ WHERE run_date >= (CURRENT_DATE - INTERVAL '14 days')::text  -- run_date is DATE
 | `line` | **TEXT** | Contains numbers | `line::numeric >= 1.5` |
 | `odds` | **TEXT** | Contains numbers | `odds::numeric > 100` |
 | `coverage` | NUMERIC | ML score for this leg | No cast needed |
-| `outcome` | TEXT | **'won', 'lost', 'void', 'pending'** | No cast needed |
+| `outcome` | TEXT | **'hit', 'miss', 'push', 'pending'** | No cast needed |
 | `result_value` | NUMERIC | Actual stat value | No cast needed |
 | `position` | INTEGER | Rank within parlay (1 = highest) | No cast needed |
 | `created_at` | TIMESTAMP | | `created_at >= NOW() - INTERVAL '14 days'` |
@@ -109,7 +159,7 @@ WHERE run_date >= (CURRENT_DATE - INTERVAL '14 days')::text  -- run_date is DATE
 -- ✅ CORRECT
 SELECT * FROM mlb_parlay_legs_v2
 WHERE created_at >= CURRENT_DATE - INTERVAL '14 days'
-  AND outcome IN ('won', 'lost')
+  AND outcome IN ('hit', 'miss')
   AND odds::numeric > 100;
 
 -- Join to mlb_scored_legs (TIMESTAMP → TEXT)
@@ -137,7 +187,7 @@ JOIN mlb_scored_legs s ON DATE(l.created_at) = s.run_date;  -- Missing ::text
 | `direction` | TEXT | | No cast needed |
 | `line` | NUMERIC | ✅ Actual NUMERIC | No cast needed |
 | `composite_score` | NUMERIC | | No cast needed |
-| `result` | TEXT | 'won' or 'lost' (resolved only) | No cast needed |
+| `result` | TEXT | 'hit' or 'miss' (resolved only) | No cast needed |
 | `coverage_overall` | NUMERIC | | No cast needed |
 | `batter_vs_hand_coverage` | NUMERIC | | No cast needed |
 
@@ -241,4 +291,4 @@ Before providing any SQL query, verify:
 
 ---
 
-**Last Updated:** May 11, 2026 after multiple casting error corrections
+**Last Updated:** May 13, 2026 - Coverage fix deployed, pitcher columns added, result values updated
