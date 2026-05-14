@@ -56,9 +56,63 @@ _RELEVANT_TXNS = frozenset({"SC", "DES", "OU", "CU"})
 # because pitcher prop coverage is not yet implemented.
 _PITCHER_POSITIONS = frozenset({"P", "SP", "RP", "TWP"})
 
+# Prop types that are almost always heavily juiced and unusable in parlays.
+_EXCLUDED_PROP_TYPES = frozenset([
+    ("stolenBases", "under"),  # avg odds -1023
+    ("walks", "under"),         # avg odds -370
+])
+
+# Hard odds boundaries — nothing outside this range is useful in parlays.
+_FILTER_MIN_ODDS = -500
+_FILTER_MAX_ODDS = +500
+
 # In-process caches (reset each process run)
 _player_id_cache: dict[str, int | None] = {}
 _team_abbr_cache: dict[int, str] = {}   # team_id → abbreviation
+
+
+# ── Pre-scoring prop filter ───────────────────────────────────────────────────
+
+def _filter_useless_props(raw_props: list[dict]) -> list[dict]:
+    """
+    Remove props before coverage calculation that will never be useful in parlays.
+
+    Filters out:
+    1. Specific prop types always heavily juiced (stolenBases_under, walks_under).
+    2. Props with standard_odds outside [-500, +500].
+    """
+    filtered = []
+    excluded_by_type = 0
+    excluded_by_odds = 0
+
+    for prop in raw_props:
+        stat      = prop.get("stat", "")
+        direction = prop.get("direction", "over")
+        odds      = prop.get("standard_odds")
+
+        if (stat, direction) in _EXCLUDED_PROP_TYPES:
+            excluded_by_type += 1
+            continue
+
+        if odds is not None:
+            try:
+                odds_int = int(float(odds))
+            except (TypeError, ValueError):
+                excluded_by_odds += 1
+                continue
+            if odds_int < _FILTER_MIN_ODDS or odds_int > _FILTER_MAX_ODDS:
+                excluded_by_odds += 1
+                continue
+
+        filtered.append(prop)
+
+    print(f"[filter_props] {len(raw_props)} raw → {len(filtered)} usable")
+    if excluded_by_type:
+        print(f"  Excluded {excluded_by_type} by prop type (stolenBases_under, walks_under)")
+    if excluded_by_odds:
+        print(f"  Excluded {excluded_by_odds} by odds range (< {_FILTER_MIN_ODDS} or > +{_FILTER_MAX_ODDS})")
+
+    return filtered
 
 
 # ── Player / team ID resolution ───────────────────────────────────────────────
@@ -522,6 +576,8 @@ def run_pipeline(starts_after_override=None, source: str | None = None) -> tuple
     if not all_sgo_props:
         print("  No props returned. Exiting.")
         return [], ""
+
+    all_sgo_props = _filter_useless_props(all_sgo_props)
 
     # ── Step 4: Coverage Gate ─────────────────────────────────────────────────
     print(f"\n[4/8] Computing coverage (min {MIN_COVERAGE_PCT}%)...")

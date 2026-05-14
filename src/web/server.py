@@ -104,10 +104,21 @@ async def handle_legs(request: web.Request) -> web.Response:
     date_param = request.rel_url.query.get("date", str(date.today()))
     try:
         legs = get_scored_legs(date_param)
+        # Only show legs with usable odds in the UI (-300 to +300).
+        # The parlay builder already filters by odds during construction; this
+        # keeps the Legs tab from displaying -1000+ garbage props.
+        filtered_legs = []
+        for leg in legs:
+            try:
+                odds_int = int(float(leg.get("odds") or 0))
+            except (TypeError, ValueError):
+                continue
+            if -300 <= odds_int <= 300:
+                filtered_legs.append(leg)
         est = pytz.timezone('America/New_York')
         current_time_est = datetime.now(est).strftime('%Y-%m-%d %H:%M:%S')
         return web.Response(
-            text=json.dumps({'legs': legs, 'current_time_est': current_time_est}, default=str),
+            text=json.dumps({'legs': filtered_legs, 'current_time_est': current_time_est}, default=str),
             content_type="application/json",
         )
     except Exception as exc:
