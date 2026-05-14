@@ -1,532 +1,476 @@
-Perfect! Here's the updated README.md:
-markdown# MLB Parlay Agent
+# MLB Parlay Agent 🎯⚾
 
-> AI-powered MLB parlay recommendation system using ML-based leg scoring with temporary bias adjustments, stat-specific calibrated predictions, pitcher-aware matchup logic, and quality-first selection
+**AI-Powered MLB Prop Bet Parlay Builder**
 
-[![Status](https://img.shields.io/badge/status-operational-green)](https://railway.app)
-[![Python](https://img.shields.io/badge/python-3.10-blue)](https://python.org)
-[![License](https://img.shields.io/badge/license-personal%20research-lightgrey)](LICENSE)
+An intelligent system that analyzes player statistics, historical performance, and matchup data to generate high-probability parlay recommendations for MLB prop bets.
 
 ---
 
-## 🎯 Overview
+## 📊 Current Performance (as of May 13, 2026)
 
-The MLB Parlay Agent is a production system that generates daily MLB parlay recommendations by:
-- Scoring 200-400 player props daily using a **calibrated ML model** with **temporary bias adjustments** (Brier: 0.2341, +16.6% improvement)
-- Applying **three scoring adjustments** to correct direction bias, odds signal, and same-game correlation (expected +60% hit rate improvement)
-- Using **pure quality-first selection** (diversity constraint removed May 11)
-- Applying pitcher-aware matchup analysis and handedness-split coverage rates
-- Filtering by **game start time** (fail-closed: only games starting >15 min from now)
-- Building optimized 4-6 leg parlays targeting +1000 to +1500 odds
-- Tracking outcomes and learning from 90,000+ historical resolved legs
+| Metric | Current | Target (Post-Fix) |
+|--------|---------|-------------------|
+| Individual Leg Hit Rate | 52% | 60-65% |
+| 4-Leg Parlay Hit Rate | 7% | 15-20% |
+| Parlays Generated Daily | 4-5 | 4-5 |
+| Average Parlay Odds | +1200-1400 | +1200-1400 |
 
-**Last Major Update:** May 12, 2026 — All critical systems operational, pitcher data infrastructure complete
-
----
-
-## 📊 Current Status
-
-### Production Health
-✅ Pipeline Runtime:      OPERATIONAL (3x daily + manual trigger)
-✅ ML Calibration:        Deployed (+16.6% Brier improvement)
-✅ coverage_overall:      Populating (96.8%)
-⏳ Pitcher Data:          Infrastructure complete (100% expected tmrw)
-✅ Database:              All systems operational
-✅ Web Dashboard:         Fully functional with real-time updates
-✅ Deployment:            Live (Railway)
-✅ Regenerate Button:     Working with polling UI
-
-### Recent Performance (May 12, 2026)
-
-**Pipeline Execution:**
-- Last run: 5:30 PM ET (auto_530pm)
-- Legs processed: 207
-- Fresh odds fetched: 25/25 players (100%)
-- Parlays built: 2 (rank 1-2, +1496/+1491 odds)
-- Regenerate button: Fully functional with ~25s runtime
-
-**System Fixes (May 12):**
-- ✅ Fixed game_start_time filter (datetime type handling)
-- ✅ Fixed lineup check (empty batting order handling)
-- ✅ Added manual pipeline trigger endpoint
-- ✅ Fixed player ID resolution (hybrid DB/API approach)
-- ✅ Fixed coverage_overall persistence (96.8% populated)
-- ✅ Fixed UI stale parlays (v1 batch shadowing)
-- ✅ Populated pitcher data fields (infrastructure complete)
-- ✅ Fixed Regenerate button (fresh odds + polling UI)
-
-**Expected (After Pitcher Data Complete + Phase 3):**
-- Parlay generation: 4-5 per run
-- Pitcher matchup intelligence: Fully operational
-- ML accuracy: Improved with pitcher features
+**🎉 MAJOR UPDATE (May 13):** Coverage calculation bug fixed! Expected 10-15 percentage point improvement in hit rates starting May 14.
 
 ---
 
 ## 🚀 Features
 
-### 1. **Calibrated ML Scoring with Temporary Adjustments** (May 11, 2026)
-Post-calibration adjustments to correct systematic biases:
-- **Direction bias:** Overs +18pp, Unders -26pp (model overfit to direction)
-- **Odds signal:** Long-odds unders penalized -15pp (≥150 odds) or -8pp (≥120)
-- **Same-game penalty:** Correlated props from same game -20pp
-- **Expected impact:** +60% parlay hit rate improvement (validation in progress)
+### **Intelligent Leg Selection**
+- Machine learning model trained on 81,000+ historical prop outcomes
+- Coverage analysis: "How often does this player go over/under this line?"
+- Pitcher quality integration: ERA-based matchup evaluation
+- Handedness matchups: Lefty vs righty performance adjustments
 
-### 2. **Stat-Specific ML Calibration** (May 10, 2026)
-Isotonic regression calibrators trained per stat type:
-- 7 calibrators: hits, strikeouts, totalBases, homeRuns, stolenBases, rbi, walks
-- Training data: 52,583 resolved legs
-- Brier improvement: +16.6% (0.2826 → 0.2341)
-- Average prediction: 45.5% (matches actual hit rate)
+### **Smart Filtering**
+- Lineup consistency check (minimum 60% games with 3+ AB)
+- Game start buffer (15 minutes) to avoid late scratches
+- IL/DFA transaction wire integration
+- Automatic odds verification via Sportsbook API
 
-### 3. **Reliable game_start_time Population** (May 12, 2026) **NEW**
-Multi-layer fallback system with type-safe filtering:
-- Fail-closed filter: NULL or unparseable times → excluded
-- Handles both datetime objects and strings (psycopg2 compatibility)
-- 15-minute forward buffer (only games starting >15 min from now)
-- Current: 100% of legs have valid game_start_time
+### **Parlay Construction**
+- Optimized for 4-6 leg parlays at +1000 to +1500 odds
+- Avoids same-game conflicts (e.g., pitcher + batter from same game)
+- Balances risk (over/under distribution, stat type diversity)
+- Branch-and-bound algorithm for optimal leg combinations
 
-### 4. **Hybrid Player ID Resolution** (May 12, 2026) **NEW**
-Two-stage resolution for SGO props:
-- Primary: Database name→ID mapping (O(1) lookup, 95%+ coverage)
-- Fallback: statsapi.lookup_player() for new players only
-- Current: 25/25 props resolved per run (0 API calls needed)
-
-### 5. **coverage_overall Persistence Fix** (May 12, 2026) **NEW**
-Fixed 100% NULL issue:
-- Root cause: db.py INSERT missing coverage_overall in column list
-- Fix: Added to INSERT + ON CONFLICT backfill
-- Current: 96.8% populated (333/344 legs)
-- Historical gap: May 5-11 (~1,820 legs) remain NULL permanently (accepted)
-
-### 6. **Pitcher Data Infrastructure** (May 12, 2026) **NEW**
-13 new columns added to support pitcher-aware matchup logic:
-- **Coverage signals:** coverage_overall, coverage_vs_hand, coverage_recent_10, coverage_recent_5
-- **Pitcher identification:** pitcher_id, pitcher_name, pitcher_team
-- **Pitcher stats:** pitcher_era, pitcher_k9, pitcher_whip
-- **Batter data:** batter_hand, pitcher_hand, pitcher_vs_batter_hand_era
-- Current: 27% populated (infrastructure complete, 100% expected tomorrow)
-
-### 7. **Regenerate Button with Fresh Odds** (May 12, 2026) **NEW**
-Complete overhaul for genuine fresh data:
-- **Before:** Loaded stale DB legs, returned same 2 parlays every time
-- **After:** Triggers run_targeted_pipeline() → fetches fresh SGO odds → different parlays
-- **UX:** Polling UI with "Regenerating Recommendations..." spinner
-- **Auto-refresh:** Polls every 2s, updates UI when complete (~25s runtime)
-- **Status:** Fully operational with professional UX
-
-### 8. **Manual Pipeline Trigger** (May 12, 2026) **NEW**
-On-demand pipeline execution for testing:
-```bash
-curl -X POST https://mlb-agent.up.railway.app/api/admin/run_pipeline \
-  -H "Authorization: Bearer MLBparlays"
-```
-- Runs run_targeted_pipeline(source="manual") in background thread
-- Returns immediately, logs to Railway
-- Use case: Immediate validation after deployments
-
-### 9. **V2 Normalized Schema** (May 7-12, 2026)
-Single parlay schema with per-leg outcome tracking:
-- ✅ 50 v1 parlays migrated to v2 (May 12)
-- ✅ Dashboard queries v2 exclusively (2x faster)
-- ✅ V1 tables deprecated (safe to drop after June 11)
-- ✅ Per-leg tracking enables advanced analytics
-
-### 10. **Pitcher-Aware Matchup Logic**
-- Batter coverage split by opposing pitcher handedness (RHP vs LHP)
-- Pitcher ERA/K9/WHIP rankings integrated
-- Prop-type routing (hits vs strikeouts)
-- **Status:** Infrastructure complete, Phase 3 wiring in progress
-
-### 11. **Three Daily Pipeline Runs**
-- **9:00 AM ET:** Resolution + full fetch + scoring + building
-- **12:00 PM ET:** Odds refresh + lineup checks + rebuild
-- **5:30 PM ET:** Final odds + adjustments
-
-### 12. **Web Dashboard (4 Tabs)**
-- **Legs:** Browse scored props with filters (shows adjusted scores)
-- **Dashboard:** Performance analytics (v2 parlays only)
-- **Training:** ML data quality monitoring (90K+ samples)
-- **Picks:** Daily recommendations with regenerate button + polling UI
-
-### 13. **Quality Validation Monitoring**
-- Real-time quality checks (top 20 vs top 50 legs)
-- Automatic logging of quality drop percentage
-- Warning alerts if degradation exceeds 10%
+### **Automated Pipeline**
+- **9 AM ET:** Resolve yesterday's bets, fetch full slate, build new parlays
+- **12 PM ET:** Refresh odds and check lineups for afternoon games
+- **5:30 PM ET:** Final refresh for evening games
+- Zero manual intervention required
 
 ---
 
 ## 🏗️ Architecture
 
-### **Data Pipeline (8 Steps)**
-1. Fetch transaction wire (IL/DFA via MLB-StatsAPI)
-2. Build schedule and pitcher maps
-3. Fetch props from TheOddsAPI
-4. Compute coverage (handedness-split aware)
-5. Filter blocked players (IL, low consistency, game start time)
-6. Enrich with pitcher matchup profiles
-7. Compute trend signals
-8. **Score with calibrated ML model + adjustments** → Build parlays
+### **Tech Stack**
+- **Backend:** Python 3.11
+- **Database:** Supabase (PostgreSQL)
+- **ML Model:** Scikit-learn RandomForestClassifier
+- **Deployment:** Railway (auto-deploy from GitHub)
+- **APIs:** 
+  - MLB Stats API (free tier)
+  - Sportsbook API (100K objects/month quota)
+  - Transactions Wire (IL/DFA tracking)
 
-### **ML Model Stack**
-- **Base Model:** `leg_scorer_v2.pkl` (trained April 30, 2026)
-  - AUC: 0.8532 (good discrimination)
-  - Features: 19 (direction, coverage, trends, opponent adjustment, pitcher stats, etc.)
-  - Known issue: Direction overfit (77% feature importance)
-  
-- **Calibrator:** `stat_specific_calibrator.pkl` (trained May 10, 2026)
-  - Type: Stat-specific isotonic regression
-  - Training Samples: 52,583 resolved legs
-  - Stat Types: 7 (hits, strikeouts, totalBases, homeRuns, stolenBases, rbi, walks)
+### **Core Components**
 
-- **Scoring Adjustments:** `apply_temporary_scoring_adjustments()` (deployed May 11, 2026)
-  - Direction bias: Overs +18pp, Unders -26pp
-  - Odds signal: Long-odds unders penalized
-  - Same-game: Correlated props penalized
-
-### **Database Schema**
-- **V2 Normalized Schema** (primary, deployed May 7):
-  - `mlb_parlay_recommendations_v2` - Parlay headers
-  - `mlb_parlay_legs_v2` - Per-leg tracking with outcomes
-- **V1 Schema** (deprecated May 12):
-  - `mlb_recommendations_deprecated_20260512`
-  - `mlb_parlay_legs_deprecated_20260512`
-  - Safe to drop after June 11, 2026
-- **Supporting Tables:**
-  - `mlb_scored_legs` - Daily props with coverage_overall, pitcher data
-  - `mlb_training_data` - 90K+ resolved legs for retraining
-  - `pitcher_profiles` - Cached pitcher stats (ERA, K/9, WHIP)
-
-### **Web App (4 Tabs)**
-1. **Legs** — Browse all scored legs, filter by stat/player/team
-2. **Dashboard** — 6-section performance analytics
-3. **Training** — ML data quality monitoring
-4. **Picks** — Daily parlay recommendations with regenerate button
+```
+mlb-parlay-agent/
+├── src/
+│   ├── engine/
+│   │   ├── ml_leg_scorer.py      # ML-based leg scoring
+│   │   ├── coverage.py            # Historical performance analysis
+│   │   └── parlay_builder.py     # Parlay construction logic
+│   ├── pipelines/
+│   │   ├── fetch_legs.py          # Fetch props from Sportsbook
+│   │   ├── enrich_legs.py         # Add context (pitcher, matchups)
+│   │   └── lineup_poller.py       # Lineup verification
+│   ├── db/
+│   │   └── supabase_client.py     # Database interface
+│   └── web/
+│       └── server.py              # Web UI + API endpoints
+├── scripts/
+│   ├── train_ml_model.py          # Model training script
+│   └── rescore_historical_legs.py # Backfill coverage data
+├── models/
+│   └── leg_scorer_v2.pkl          # Trained ML model (673 KB)
+└── main.py                        # Pipeline orchestration
+```
 
 ---
 
-## 📈 Performance Metrics
+## 📈 How It Works
 
-### **Baseline Performance (Last 14 Days, Pre-May 11 Fixes)**
-Parlays:
+### **1. Data Collection (9 AM)**
+```
+Fetch Props → Check Transactions → Enrich Context → Calculate Coverage
+    ↓               ↓                    ↓                   ↓
+  2,282 props    6 IL/DFA          Add pitcher         Historical
+   from SGO     placements         matchups            performance
+```
 
-Total Recommended: 124
-Won: 10 (8.1% hit rate)
-Lost: 114 (91.9%)
-Void: 0 (0% after May 6 fix)
+### **2. ML Scoring**
+```python
+# Core scoring formula
+composite_score = (
+    ml_model.predict_proba(features)[1] * 100  # Base ML score (0-100)
+    + OVER_BOOST if direction == "over"        # +18 for overs
+    + UNDER_PENALTY if direction == "under"    # -26 for unders
+    + LONG_ODDS_PENALTY if odds > +120         # -8 to -15
+    + SAME_GAME_PENALTY if conflict           # -20
+)
+```
 
-Legs (Last 14 Days):
+Legs with `composite_score >= 55` are eligible for parlays.
 
-Total: 4,400 legs
-Won: 2,276 (51.7%)
-Lost: 2,124 (48.3%)
+### **3. Parlay Building**
+```
+Eligible Legs → Sort by Score → Branch & Bound → Generate Parlays
+      ↓              ↓                ↓                 ↓
+   50-100 legs   Top 40 legs   Find 4-6 leg      4-5 parlays
+                              combinations        +1200-1400 odds
+```
 
-By Direction:
-
-Unders: 3,520 legs (80%) → 1,432 won (40.7%) ← Selected wrong ones
-Overs: 880 legs (20%) → 518 won (58.9%) ← Rejected right ones
-
-P&L:
-
-Net: +$3,044 on $100 stakes
-ROI: +24.5%
-Break-even at +1444 odds: 6.5%
-Actual: 8.1% (beating break-even)
-
-
-### **Expected Performance (Post-May 11 Fixes)**
-Parlays:
-
-Expected hit rate: 12-13% (+60% improvement)
-Composition: 60% overs / 40% unders (reversed)
-
-Legs:
-
-Expected win rate: 48-50% (lower but better selection)
-Overs: 55-60% win rate (avoiding bad overs)
-Unders: 40-45% win rate (avoiding long-odds losers)
-
-P&L:
-
-Target net: +$6,000-8,000 on $100 stakes
-Target ROI: 60-80%
-
-
-**Validation window:** May 12-18, 2026 (7 days)
+### **4. Odds Refresh (12 PM, 5:30 PM)**
+```
+Load Today's Legs → Fetch Fresh Odds → Check Lineups → Rebuild Parlays
+        ↓                  ↓                 ↓               ↓
+   210 from DB      Update 15 players   Mark scratches   Update UI
+```
 
 ---
 
-## 🛠️ Tech Stack
+## 🎯 Coverage System (The Secret Sauce)
 
-- **Language:** Python 3.10
-- **ML:** Scikit-learn (GradientBoostingClassifier + IsotonicRegression)
-- **Database:** Supabase PostgreSQL
-- **Hosting:** Railway (PaaS, auto-deploy from master)
-- **Data Sources:** 
-  - TheOddsAPI (MLB props)
-  - MLB-StatsAPI (game logs, schedules, box scores)
-- **Web:** Flask + vanilla HTML/CSS/JS
+**Coverage** = "What % of games does this player go over/under this line?"
+
+### **Example: Daylen Lile (hits_under 0.5)**
+```
+Last 40 games:
+- 12 games with 0 hits (stayed UNDER 0.5) ✅
+- 28 games with 1+ hits (went OVER 0.5) ❌
+
+Coverage = 12/40 = 30%
+
+Bet: Lile UNDER 0.5 hits
+Rationale: Only gets hits 70% of time, so 30% chance he stays under
+```
+
+### **Coverage Calculation (Fixed May 13)**
+```python
+def _count_coverage(game_logs, line, direction):
+    qualifying_games = [g for g in game_logs if g['ab'] >= 3]
+    
+    if direction == "under":
+        hit_games = [g for g in qualifying_games if g['stat'] < line]
+    else:  # over
+        hit_games = [g for g in qualifying_games if g['stat'] >= line]
+    
+    return len(hit_games) / len(qualifying_games)
+```
+
+**Key Fix (May 13):** Previously counted overs for both directions → inverted coverage for unders → selected wrong players.
 
 ---
 
-## 🚦 Getting Started
+## 🧠 Machine Learning Model
 
-### **Prerequisites**
-- Python 3.10+
-- Supabase account (free tier)
-- Railway account (free tier)
-- TheOddsAPI key (free tier: 500 req/month)
+### **Features (Top 10 by Importance)**
+| Feature | Importance | Description |
+|---------|------------|-------------|
+| direction | 69.7% | Over vs under (known bias) |
+| strikeouts | 5.3% | Strikeout prop indicator |
+| coverage_overall | 4.3% | Historical performance |
+| line | 3.8% | Prop line value |
+| pitcher_era | 2.1% | Opponent pitcher quality |
+| walks | 1.9% | Walk prop indicator |
+| hits | 1.8% | Hit prop indicator |
+| is_home | 1.5% | Home/away advantage |
+| batter_hand_R | 1.2% | Right-handed batter |
+| odds | 1.1% | Betting odds |
 
-### **Installation**
+### **Training Data**
+- **Size:** 81,282 samples (May 1 - May 13, 2026)
+- **Resolution rate:** 94% (legs with known outcomes)
+- **Hit rate in training:** 45.7%
+- **Class balance:** Slightly more misses than hits (realistic)
+
+### **Performance Metrics**
+- **AUC:** 0.8489 (excellent discrimination)
+- **Accuracy:** 77%
+- **Precision:** 73% (when we say "hit", 73% actually hit)
+- **Recall:** 62% (we catch 62% of all hits)
+
+### **Model Retraining**
 ```bash
-# Clone repository
-git clone https://github.com/MrGweeod/mlb-agent.git
-cd mlb-agent
+python scripts/train_ml_model.py --retrain
+```
+- Automatically pulls latest resolved legs from database
+- Saves to `models/leg_scorer_v2.pkl`
+- Deploy by committing to git (Railway auto-deploys)
 
-# Create virtual environment
-python3.10 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+---
+
+## 🗄️ Database Schema
+
+### **mlb_scored_legs** (Main table)
+```sql
+CREATE TABLE mlb_scored_legs (
+    id SERIAL PRIMARY KEY,
+    run_date DATE,
+    player_name VARCHAR(100),
+    player_id INTEGER,
+    team VARCHAR(50),
+    opponent VARCHAR(50),
+    stat VARCHAR(50),          -- hits, strikeouts, rbi, etc.
+    direction VARCHAR(10),     -- over, under
+    line DECIMAL(5,2),
+    odds INTEGER,              -- American odds (e.g., -115, +140)
+    game_id INTEGER,
+    game_time TIMESTAMP,
+    
+    -- Enrichment
+    pitcher_id INTEGER,
+    pitcher_name VARCHAR(100),
+    pitcher_era DECIMAL(4,2),
+    batter_hand VARCHAR(1),    -- L, R, S (switch)
+    pitcher_hand VARCHAR(1),
+    
+    -- Coverage
+    coverage_overall DECIMAL(5,2),  -- 0-100
+    coverage_pct DECIMAL(5,2),      -- Same as above (legacy)
+    
+    -- Scoring
+    ml_prob DECIMAL(5,2),      -- Raw ML probability (0-100)
+    composite_score DECIMAL(5,2),  -- Adjusted score (0-100)
+    
+    -- Resolution
+    result VARCHAR(10),        -- hit, miss, push, pending
+    actual_value DECIMAL(5,2), -- Actual stat achieved
+    resolved_at TIMESTAMP,
+    
+    -- Metadata
+    source VARCHAR(50),        -- auto_9am, auto_12pm, auto_530pm, manual
+    is_scratched BOOLEAN,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+### **mlb_parlay_recommendations_v2** (Parlay metadata)
+```sql
+CREATE TABLE mlb_parlay_recommendations_v2 (
+    id SERIAL PRIMARY KEY,
+    batch_id VARCHAR(100),     -- "2026-05-13_09:00:15"
+    run_date DATE,
+    total_odds INTEGER,        -- Combined American odds
+    leg_count INTEGER,         -- 4-6 typically
+    result VARCHAR(10),        -- hit, miss, push, pending
+    resolved_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+### **mlb_parlay_legs_v2** (Join table)
+```sql
+CREATE TABLE mlb_parlay_legs_v2 (
+    id SERIAL PRIMARY KEY,
+    parlay_id INTEGER REFERENCES mlb_parlay_recommendations_v2(id),
+    scored_leg_id INTEGER REFERENCES mlb_scored_legs(id),
+    created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+---
+
+## 🚀 Deployment
+
+### **Railway Setup**
+1. Connect GitHub repo to Railway
+2. Set environment variables:
+   ```
+   SUPABASE_URL=https://xxx.supabase.co
+   SUPABASE_KEY=xxx
+   ADMIN_PASSWORD=MLBparlays
+   ```
+3. Auto-deploys on every commit to `master`
+
+### **Manual Deployment**
+```bash
+git add .
+git commit -m "feat: your changes"
+git push origin master
+```
+
+Railway will automatically:
+- Detect changes
+- Build new container
+- Deploy to production
+- Run health checks
+
+---
+
+## 🛠️ Development
+
+### **Setup**
+```bash
+# Clone repo
+git clone https://github.com/yourusername/mlb-parlay-agent.git
+cd mlb-parlay-agent
 
 # Install dependencies
 pip install -r requirements.txt
 
-# Set up environment variables (copy from Railway)
-cp .env.example .env
-# Edit .env with your API keys
+# Set environment variables
+export SUPABASE_URL="https://xxx.supabase.co"
+export SUPABASE_KEY="xxx"
+export ADMIN_PASSWORD="MLBparlays"
+```
 
-# Run locally
+### **Run Locally**
+```bash
+# Full pipeline
 python main.py
+
+# Web server only
+python src/web/server.py
 ```
 
-### **Configuration**
-Required environment variables:
-- `SUPABASE_URL` - Supabase project URL
-- `SUPABASE_KEY` - Supabase service role key
-- `ODDS_API_KEY` - TheOddsAPI key
-- `PORT` - Port for Flask app (default: 8080)
-- `WEB_APP_PASSWORD` - Password for admin endpoints (manual trigger)
-
----
-
-## 📊 Usage
-
-### **Web Dashboard**
-Visit the Railway deployment URL to access the dashboard:
-- **Legs Tab:** Browse today's scored props (adjusted scores, coverage_overall)
-- **Dashboard Tab:** View performance analytics (v2 parlays only)
-- **Training Tab:** Monitor ML data quality (90K+ samples)
-- **Picks Tab:** See today's parlay recommendations + regenerate button
-
-### **Manual Regeneration**
-Click "Regenerate Now" button in Picks tab to trigger immediate parlay generation with fresh odds (fix deployed May 12).
-
-### **Manual Pipeline Trigger**
-For testing/debugging:
+### **Testing**
 ```bash
-curl -X POST https://mlb-agent.up.railway.app/api/admin/run_pipeline \
+# Manual pipeline trigger (requires server running)
+curl -X POST http://localhost:8080/api/admin/run_full_pipeline \
   -H "Authorization: Bearer MLBparlays"
-```
 
-### **Scheduled Pipeline Runs**
-Three automatic runs daily:
-- 9:00 AM ET (morning - resolution + full fetch)
-- 12:00 PM ET (midday - odds refresh)
-- 5:30 PM ET (evening - final odds)
+# Check today's recommendations
+curl http://localhost:8080/api/recommendations
+```
 
 ---
 
-## 🔧 Maintenance
+## 📊 Monitoring
 
-### **Monitor Scoring Adjustments**
+### **Railway Logs**
 ```bash
-# Check Railway logs for adjustment output
-grep "Applied temporary adjustments" railway.log
+# View live logs
+railway logs
 
-# Expected output:
-[ml_scorer] Applied temporary adjustments to 150/150 legs
-  Direction: avg -4.0pp (45 overs boosted, 105 unders penalized)
-  Odds signal: 28 long-odds unders penalized
-  Same-game: 42 legs penalized
+# Grep for specific events
+railway logs | grep "[parlay_builder]"
 ```
 
-### **Verify Regenerate Button**
-```bash
-# Check Railway logs after clicking button
-grep "regenerate" railway.log
+### **Key Log Events**
+- `[1/8] Fetching transaction wire` - IL/DFA check
+- `[2/8] Loading today's scored legs` - Database query
+- `[3/8] Game-start filter` - Remove started games
+- `[4/8] Fetching fresh SGO odds` - API call
+- `[5/8] Checking confirmed lineups` - Scratch detection
+- `[6/8] Re-running lineup consistency` - Filter check
+- `[7/8] Building parlay recommendations` - Construction
+- `[8/8] Saving to database` - Persistence
 
-# Expected output:
-[regenerate] Loaded 88 upcoming legs
-[regenerate] Fetching fresh SGO odds for 25 players...
-[regenerate] Updated odds for 25/25 legs (100%)
-[regenerate] Building parlays from 88 eligible legs...
-[regenerate] Built 2 parlays
-[regenerate] Pipeline completed successfully
-```
-
-### **Database Health Check**
+### **Database Queries**
 ```sql
--- Run in Supabase SQL Editor
-
--- Check coverage_overall and pitcher data population
+-- Today's performance
 SELECT 
-    run_date,
-    COUNT(*) as total_legs,
-    COUNT(coverage_overall) as have_coverage,
-    COUNT(pitcher_id) as have_pitcher,
-    COUNT(game_start_time) as have_time
+    stat,
+    direction,
+    COUNT(*) as total,
+    SUM(CASE WHEN result = 'hit' THEN 1 ELSE 0 END) as hits,
+    ROUND(100.0 * SUM(CASE WHEN result = 'hit' THEN 1 ELSE 0 END) / COUNT(*), 1) as hit_rate
 FROM mlb_scored_legs
-WHERE run_date >= (CURRENT_DATE - INTERVAL '3 days')::text
-GROUP BY run_date
-ORDER BY run_date DESC;
-
--- Should return: coverage ~97-100%, pitcher ~30-100%, time 100%
+WHERE run_date = CURRENT_DATE - INTERVAL '1 day'
+  AND result IN ('hit', 'miss')
+GROUP BY stat, direction
+ORDER BY hit_rate DESC;
 ```
+
+---
+
+## 🐛 Known Issues
+
+### **Issue 1: Direction Feature Dominance**
+- **Status:** Monitoring
+- **Description:** ML model relies 70% on direction feature
+- **Why:** Coverage was bugged during training, correlated with direction
+- **Impact:** Model may still be biased toward overs
+- **Mitigation:** Monitor for 7 days, retrain if needed
+
+### **Issue 2: Low Coverage Population**
+- **Status:** Expected limitation
+- **Description:** Only ~7% of legs have coverage calculated
+- **Why:** Requires 20+ games, early in season
+- **Impact:** Most selection relies on ML without coverage signal
+- **Mitigation:** Improves as season progresses
+
+### **Issue 3: SGO API Quota**
+- **Status:** No immediate concern
+- **Description:** 100K objects/month quota, using ~2% per day
+- **Impact:** Could hit limit if adding more features
+- **Mitigation:** Monitor usage, optimize queries if needed
+
+---
+
+## 🎯 Roadmap
+
+### **Phase 4: Post-Coverage Fix Validation (May 14-20)**
+- [ ] Validate coverage fix improves hit rates
+- [ ] Monitor hits_under performance (target: 65%+)
+- [ ] Track parlay hit rate improvement
+- [ ] Decide if model retraining needed
+
+### **Phase 5: Parlay Construction Optimization (May 20-27)**
+- [ ] Adjust scoring penalties (reduce magnitude)
+- [ ] Raise MIN_PARLAY_ODDS to 1200
+- [ ] Lower MAX_LEGS to 5
+- [ ] Target: 4-5 leg parlays at +1200-1400 consistently
+
+### **Phase 6: Coverage Expansion (June)**
+- [ ] Expand coverage to more stat types (rbi, walks)
+- [ ] Add pitcher-specific coverage (K/9, ERA trends)
+- [ ] Increase coverage population from 7% → 20%
+
+### **Future Ideas**
+- Live odds tracking (monitor line movements)
+- Multi-model ensemble (separate models per stat type)
+- Advanced pitcher metrics (FIP, xERA, K-BB%)
+- Weather integration (wind, temperature effects)
 
 ---
 
 ## 📚 Documentation
 
-Comprehensive documentation in `/docs`:
-- **SESSION_HANDOFF.md** - Current system state, what was accomplished May 12
-- **BUILD_STATUS.md** - Component health, operational status, known issues
-- **ARCHITECTURE_DECISIONS.md** - Design rationale, lessons learned, trade-offs
-- **SUPABASE_SCHEMA_REFERENCE.md** - Complete database schema with casting rules
-- **WORKFLOW_RULES.md** - When to use Chat vs Code vs Manual actions
-
----
-
-## 🎓 Key Concepts
-
-### **Scoring Adjustments (May 11)**
-Post-hoc modifications to ML predictions to correct systematic biases:
-- **Direction:** Model overfit to direction (77% feature importance) - correct by ±18-26pp
-- **Odds:** Long-odds unders lose despite high scores - penalize by -8 to -15pp
-- **Same-game:** Correlated props overscored - penalize by -20pp
-
-### **Calibration (May 10)**
-Post-hoc adjustment of ML predictions to align with actual outcomes. The base model discriminates well (AUC 0.85) but predicts poorly (34.6% avg). Calibration fixes this without retraining.
-
-### **Stat-Specific Calibration**
-Different prop types have different base rates (home runs 6.5%, stolen bases 95%). A single calibrator can't handle this variance. Stat-specific calibrators adapt to each prop type.
-
-### **Fail-Closed Filtering**
-When uncertain (missing game_start_time), exclude the leg rather than include it. Better to miss a betting opportunity than include a started game.
-
-### **Pure Quality Selection**
-No artificial diversity constraints. Select top 50 legs by composite_score. Let quality drive decisions, not arbitrary rules.
-
-### **Hybrid Player ID Resolution**
-Database mapping for known players (fast, reliable), API fallback for new players (complete, handles debuts). Two-stage system balances performance and completeness.
-
----
-
-## 🐛 Troubleshooting
-
-### **Common Issues**
-
-**Issue:** Regenerate button returns same parlays
-- **Cause:** May be using cached data (old behavior before May 12)
-- **Solution:** Verify deployment is latest (commit 41e1b11 or later), check Railway logs for "Fetching fresh SGO odds"
-
-**Issue:** All legs filtered out (0 eligible)
-- **Cause:** game_start_time filter issue or all games started
-- **Solution:** Check Railway logs for filter debug output, verify games are upcoming
-
-**Issue:** coverage_overall still NULL
-- **Cause:** May be looking at pre-fix legs (before May 12 12:38 PM)
-- **Solution:** Wait for next pipeline run, query legs with run_date = current date
-
-**Issue:** Pitcher data NULL
-- **Cause:** Expected until May 13 9 AM run (infrastructure deployed May 12 afternoon)
-- **Solution:** Check tomorrow's pipeline, verify pitcher fields populated
-
-**Issue:** Dashboard HTTP 500 errors
-- **Cause:** Should not occur after May 12 v2-only queries
-- **Solution:** Check Railway logs, verify no v1 UNION queries remaining
-
----
-
-### **Technical Limitations**
-1. **Pitcher data incomplete** (temporary until May 13 9 AM)
-   - Current: 27% populated (from pre-fix 12 PM run)
-   - Expected: 100% after tomorrow's morning pipeline
-
-2. **Historical coverage_overall gap**
-   - May 5-11 legs (1,820 samples) have NULL coverage_overall
-   - Will remain NULL permanently (no backfill planned)
-   - New data accumulates at ~150-200 legs/day
-
-3. **ML model not using pitcher features yet** (Phase 3 in progress)
-   - pitcher_quality, opponent_offense hardcoded to 50.0
-   - Phase 3 will wire pitcher_profiles into ML scoring
-   - ETA: 2-3 hours after pitcher data reaches 100%
+- **[SESSION_HANDOFF.md](SESSION_HANDOFF.md)** - Current status, next steps
+- **[BUILD_STATUS.md](BUILD_STATUS.md)** - System health, component status
+- **[ARCHITECTURE_DECISIONS.md](ARCHITECTURE_DECISIONS.md)** - Key technical decisions
+- **[SUPABASE_SCHEMA_REFERENCE.md](SUPABASE_SCHEMA_REFERENCE.md)** - Complete database schema
 
 ---
 
 ## 🤝 Contributing
 
-This is a personal research project. Contributions, issues, and feature requests are welcome via GitHub.
+This is a personal project, but suggestions welcome!
+
+### **Bug Reports**
+1. Check Railway logs for errors
+2. Run diagnostic SQL queries
+3. Create issue with details
+
+### **Feature Requests**
+1. Describe the feature and use case
+2. Estimate impact (low/medium/high)
+3. Consider data availability
 
 ---
 
 ## 📄 License
 
-Personal research use only. Please gamble responsibly.
+Private project - All rights reserved
 
 ---
 
-## 🔗 Resources
+## 🙏 Acknowledgments
 
-- **Railway Dashboard:** https://railway.app
-- **Supabase Console:** https://supabase.com
-- **GitHub Repo:** github.com/MrGweeod/mlb-agent
-- **Documentation:** `/docs` folder in repository
-
----
-
-## 🎉 Recent Updates
-
-### **May 12, 2026 - All Critical Systems Operational**
-- ✅ Fixed game_start_time filter (datetime type safety)
-- ✅ Fixed lineup check (empty batting order handling)
-- ✅ Added manual pipeline trigger endpoint
-- ✅ Fixed player ID resolution (hybrid DB/API approach)
-- ✅ Fixed coverage_overall persistence (96.8% populated)
-- ✅ Fixed UI stale parlays (v1 batch shadowing)
-- ✅ Populated pitcher data fields (infrastructure complete, 100% expected tomorrow)
-- ✅ Fixed Regenerate button (fresh odds + polling UI)
-- ✅ V1 schema deprecated (50 parlays migrated to v2)
-
-### **May 11, 2026 - Comprehensive Diagnostic Analysis + Scoring Fixes**
-- ✅ Ran comprehensive diagnostic analysis (124 parlays, 4,400 legs)
-- ✅ Identified three critical scoring biases (direction, odds, same-game)
-- ✅ Implemented scoring adjustments (+60% expected improvement)
-- ✅ Removed diversity constraint (+10-15% expected improvement)
-- ✅ Fixed odds type conversion bug
-- ✅ Fixed game_start_time population reliability
-- ⏳ Awaiting validation over next 7 days
-
-### **May 10, 2026 - ML Calibration + Game Filter**
-- ✅ Deployed stat-specific ML calibrator (+16.6% Brier improvement)
-- ✅ Fixed game start time filter (fail-closed logic)
-- ✅ Verified 100% of legs have valid game_start_time
-- ✅ System fully operational
-
-### **May 7, 2026 - V2 Schema**
-- ✅ V2 normalized schema deployed
-- ✅ Per-leg outcome tracking operational
-- ✅ Position tracking added (pitcher exemption)
+- **MLB Stats API** - Free player and game data
+- **Sportsbook API** - Prop odds and lines
+- **Supabase** - Backend infrastructure
+- **Railway** - Deployment platform
+- **Scikit-learn** - ML framework
 
 ---
 
-**Last Updated:** May 12, 2026  
-**Version:** 6.0 (All Critical Systems Operational + Pitcher Data Infrastructure)  
-**Status:** ✅ Fully Operational
+## 📞 Contact
+
+For questions or issues, check the documentation first, then review Railway logs.
 
 ---
 
-**Expected Timeline:**
-- **May 13, 9 AM ET:** First pipeline run with 100% pitcher data (monitor closely)
-- **May 13-14:** Complete Phase 3 (wire pitcher data into ML scoring)
-- **May 12-18:** Validation window for scoring adjustments (track hit rates daily)
-- **May 18:** Evaluate success criteria, decide on model retraining
-- **June 1:** Retrain base model (if adjustments validate successfully)
+**Last Updated:** May 13, 2026  
+**Version:** 2.0 (Coverage Fix Release)  
+**Status:** ✅ Operational, awaiting validation
