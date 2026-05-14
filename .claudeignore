@@ -1,0 +1,8 @@
+# Reduce Claude Code cache size
+models/*.pkl
+docs/
+__pycache__/
+*.pyc
+.venv/
+.git/
+*.log
