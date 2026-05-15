@@ -734,20 +734,23 @@ def run_pipeline(starts_after_override=None, source: str | None = None) -> tuple
         abbr_to_team_id,
     )
 
-    # ── ML Scoring (all qualifying legs, before logging and parlay builder) ──────
-    from src.engine.ml_leg_scorer import score_legs_ml
-    score_legs_ml(qualifying_legs)
+    # ── Simple Scoring (all qualifying legs, before logging and parlay builder) ──
+    from src.engine.simple_scorer import score_legs
+    score_legs(qualifying_legs)
     scored_count = sum(1 for l in qualifying_legs if l.get("composite_score") is not None)
-    avg_score = (
-        sum(l["composite_score"] for l in qualifying_legs if l.get("composite_score") is not None)
-        / scored_count
-        if scored_count else 0.0
-    )
-    above_65 = sum(1 for l in qualifying_legs if (l.get("composite_score") or 0) >= 65)
-    print(
-        f"  [ml_scorer] Scored {scored_count}/{len(qualifying_legs)} legs | "
-        f"avg={avg_score:.1f} | ≥65%: {above_65}"
-    )
+    if scored_count:
+        scores = [l["composite_score"] for l in qualifying_legs if l.get("composite_score") is not None]
+        print(f"[main] Score distribution: min={min(scores):.1f}, avg={sum(scores)/len(scores):.1f}, max={max(scores):.1f}")
+
+        by_stat = {}
+        for leg in qualifying_legs:
+            stat = leg["stat"]
+            if stat not in by_stat:
+                by_stat[stat] = []
+            by_stat[stat].append(leg["composite_score"])
+        for stat, stat_scores in by_stat.items():
+            avg = sum(stat_scores) / len(stat_scores)
+            print(f"[main]   {stat}: {len(stat_scores)} legs, avg score {avg:.1f}")
 
     # ── Step 8: Build Hybrid Parlays ──────────────────────────────────────────
     tier_info  = _tier_params(len(schedule))

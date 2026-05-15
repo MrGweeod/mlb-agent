@@ -1,21 +1,19 @@
 """
 parlay_builder.py — Single scored-pool parlay builder for MLB.
 
-All eligible legs (ML score >= 55%) are scored once by composite_score,
-then the top POOL_SIZE are searched for combinations of MIN_LEGS–MAX_LEGS
-whose combined parlay odds land in +1000 to +1500.
+All eligible legs (composite_score >= 65) are scored once by simple_scorer,
+then the top POOL_SIZE are searched for combinations of exactly 4 legs
+whose combined parlay odds land in +1000 to +1400.
 
 Constraints:
-  - Min 4 legs, max 6 legs per parlay.
-  - Target odds: +1000 to +1500 combined American odds.
-  - ML gatekeeper: only legs with composite_score >= 65% enter consideration.
+  - Exactly 4 legs per parlay.
+  - Target odds: +1000 to +1400 combined American odds.
+  - Score gatekeeper: only legs with composite_score >= 65 enter consideration.
   - Max 1 batter leg per player (pitchers exempt — multiple pitcher props allowed).
-  - Max 3 legs per game (keyed by game_pk, fallback to team abbreviation).
+  - Max 2 legs per game (keyed by game_pk, fallback to team abbreviation).
   - No duplicate odd_ids within a parlay.
-  - High-variance overs (homeRuns, stolenBases) require ML score >= 70.
-  - All other legs evaluated uniformly by ML score — no directional bias.
-  - The calibrated ML model (77K samples) already learned direction bias;
-    we do not impose additional directional filters on top of its predictions.
+  - High-variance props (homeRuns, stolenBases) require composite_score >= 70.
+  - No directional bias — score threshold is the only filter.
 
 Public API unchanged: build_hybrid_parlays(...) and _tier_params(...).
 """
@@ -25,10 +23,8 @@ from src.utils.db import get_players_used_today
 
 _PITCHER_POSITIONS = frozenset({"SP", "RP", "P"})
 
-# Stats whose overs require a higher ML score (>= 70) due to extreme variance.
-# homeRuns ~6.1% hit rate, stolenBases extremely volatile.
-# rbi and walks are no longer blocked — the ML model can score them on merit.
-_HIGH_VARIANCE_OVER_STATS = frozenset({"homeRuns", "stolenBases"})
+# High variance props that need extra caution (regardless of direction).
+_HIGH_VARIANCE_PROPS = frozenset({"homeRuns", "stolenBases"})
 
 
 def filter_already_used_players(legs: list, run_date: str) -> list:
@@ -73,65 +69,43 @@ def filter_already_used_players(legs: list, run_date: str) -> list:
     return filtered
 
 
-def filter_and_tag_legs(scored_legs: list) -> list:
+def _filter_legs(legs, min_coverage=65.0):
     """
-    Filter legs by ML score, enforcing strikeout line rules and a higher
-    threshold for genuinely high-variance over stats.
+    Filter legs by composite_score threshold.
 
-    High-variance overs (require composite_score >= 70):
-      homeRuns overs  ~6.1% hit rate
-      stolenBases overs extremely volatile
+    Simple unified filter:
+    1. composite_score >= min_coverage
+    2. Extra threshold for high-variance props (homeRuns, stolenBases)
 
-    Strikeout line rules (both directions):
-      hitter strikeouts: only line 0.5 allowed
-      pitcher strikeouts: only line >= 3.5 allowed
-
-    All other legs (overs and unders) are evaluated uniformly. The
-    calibrated ML model (77K samples, AUC 0.8532) already learned
-    directional bias — we do not override it with hand-coded filters.
+    No ML model adjustments. No direction bias. Just quality threshold.
     """
     filtered = []
-    blocked_hv     = 0
-    blocked_other  = 0
-    allowed_over   = 0
-    allowed_under  = 0
+    high_variance_blocked = 0
+    low_score_blocked = 0
 
-    for leg in scored_legs:
-        direction  = leg.get("direction", "")
-        stat       = leg.get("stat", "")
-        line       = leg.get("line") or leg.get("best_line")
-        score      = leg.get("composite_score", 0.0) or 0.0
-        position   = leg.get("position", "")
-        is_pitcher = position in _PITCHER_POSITIONS
+    for leg in legs:
+        score = leg.get("composite_score", 0)
+        stat = leg.get("stat", "").lower()
 
-        # Block invalid strikeout lines for both directions.
-        # Hitters: only 0.5 allowed. Pitchers: only ≥ 3.5 allowed.
-        if stat == "strikeouts":
-            if not is_pitcher and line != 0.5:
-                blocked_other += 1
-                continue
-            if is_pitcher and (line is None or line < 3.5):
-                blocked_other += 1
-                continue
+        # Universal score threshold
+        if score < min_coverage:
+            low_score_blocked += 1
+            continue
 
-        if direction == "over" and stat in _HIGH_VARIANCE_OVER_STATS:
+        # High-variance props need higher score
+        if stat in _HIGH_VARIANCE_PROPS:
             if score < 70:
-                blocked_hv += 1
+                high_variance_blocked += 1
                 continue
-
-        if direction == "over":
-            allowed_over += 1
-        else:
-            allowed_under += 1
 
         filtered.append(leg)
 
-    print(
-        f"  [filter_legs] blocked {blocked_hv} high-variance overs, "
-        f"{blocked_other} invalid lines | "
-        f"kept {allowed_under} unders + {allowed_over} overs "
-        f"→ {len(filtered)} legs"
-    )
+    over_count = len([x for x in filtered if x.get("direction", "").lower() == "over"])
+    under_count = len([x for x in filtered if x.get("direction", "").lower() == "under"])
+
+    print(f"  [filter_legs] Blocked {low_score_blocked} low score + {high_variance_blocked} high variance")
+    print(f"  [filter_legs] Kept {over_count} overs + {under_count} unders = {len(filtered)} total eligible")
+
     return filtered
 
 
@@ -142,11 +116,11 @@ def _tier_params(num_games: int) -> dict | None:
     Returns None for Tier 4 (≤1 game) — not enough to build a parlay.
     """
     if num_games >= 10:
-        return dict(min_legs=4, max_legs=6, tier=1)
+        return dict(min_legs=4, max_legs=4, tier=1)
     elif num_games >= 5:
-        return dict(min_legs=4, max_legs=6, tier=2)
+        return dict(min_legs=4, max_legs=4, tier=2)
     elif num_games >= 2:
-        return dict(min_legs=4, max_legs=6, tier=3)
+        return dict(min_legs=4, max_legs=4, tier=3)
     else:
         return None
 
@@ -179,8 +153,8 @@ def build_hybrid_parlays(
     TIER            = params["tier"]
     MIN_COV         = 65.0
     MIN_PARLAY_ODDS = 1000
-    MAX_PARLAY_ODDS = 1500
-    MAX_LEGS_PER_GAME = 3
+    MAX_PARLAY_ODDS = 1400
+    MAX_LEGS_PER_GAME = 2
     POOL_SIZE       = 50
     MAX_CANDIDATES  = 15
     TIMEOUT_SECS    = 90
@@ -188,21 +162,21 @@ def build_hybrid_parlays(
     # ── Pool construction ──────────────────────────────────────────────────────
     eligible = [
         l for l in all_legs
-        if l.get("best_odds") and l.get("coverage_pct", 0) >= MIN_COV
+        if l.get("best_odds") and (l.get("composite_score") or 0) >= MIN_COV
     ]
     if not eligible:
         return []
 
-    # Scoring is performed upstream in main.py (ML model, all qualifying legs).
+    # Scoring is performed upstream in main.py (simple_scorer, all qualifying legs).
     # Fallback: if any leg is still missing a score (e.g. regeneration path), score now.
     unscored = [l for l in eligible if l.get("composite_score") is None]
     if unscored:
-        from src.engine.ml_leg_scorer import score_legs_ml
-        score_legs_ml(unscored)
-        print(f"  [parlay_builder] Fallback-scored {len(unscored)} unscored legs with ML model")
+        from src.engine.simple_scorer import score_legs
+        score_legs(unscored)
+        print(f"  [parlay_builder] Fallback-scored {len(unscored)} unscored legs")
 
-    # Filter poison/non-qualifying overs; tag risky overs for B&B constraint.
-    eligible = filter_and_tag_legs(eligible)
+    # Filter by composite_score threshold.
+    eligible = _filter_legs(eligible)
     if not eligible:
         return []
 
