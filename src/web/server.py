@@ -798,13 +798,13 @@ async def handle_regenerate_recommendations(request: web.Request) -> web.Respons
         )
 
     try:
-        from main import run_targeted_pipeline
+        from main import run_full_refresh_pipeline
 
-        print("[regenerate] Triggering fresh pipeline run with SGO odds fetch")
+        print("[regenerate] Triggering full fresh pipeline run (fresh SGO fetch + re-score)")
 
         def _run():
             try:
-                run_targeted_pipeline(source="manual")
+                run_full_refresh_pipeline(source="manual")
                 print("[regenerate] Pipeline completed successfully")
             except Exception as _e:
                 import traceback

@@ -29,21 +29,18 @@ from __future__ import annotations
 
 import datetime
 
-import pytz
 import statsapi
 
 from src.apis.matchup import get_pitcher_matchup_profile
 
 
 def get_game_start_time(game_pk: int) -> str | None:
-    """Fetch game start time from MLB-StatsAPI. Returns ISO timestamp string in EST."""
+    """Fetch game start time from MLB-StatsAPI. Returns UTC ISO timestamp string."""
     try:
         game_data = statsapi.get('game', {'gamePk': game_pk})
         game_datetime = game_data['gameData']['datetime']['dateTime']
         utc_time = datetime.datetime.fromisoformat(game_datetime.replace('Z', '+00:00'))
-        est = pytz.timezone('America/New_York')
-        est_time = utc_time.astimezone(est)
-        return est_time.strftime('%Y-%m-%d %H:%M:%S')
+        return utc_time.isoformat()
     except Exception as e:
         print(f"Warning: Failed to fetch game time for game_pk {game_pk}: {e}")
         return None

@@ -695,8 +695,11 @@ def run_pipeline(starts_after_override=None, source: str | None = None) -> tuple
             _null_count += 1
             continue  # fail-closed: missing time = exclude
         try:
-            _gt = datetime.strptime(_gst, "%Y-%m-%d %H:%M:%S")
-            if _et_tz.localize(_gt) > _cutoff:
+            _gt = datetime.fromisoformat(str(_gst))
+            if _gt.tzinfo is None:
+                # Legacy naive ET timestamp — localize before comparing
+                _gt = _et_tz.localize(_gt)
+            if _gt > _cutoff:
                 upcoming_legs.append(_leg)
             else:
                 _started_count += 1
@@ -1059,8 +1062,11 @@ def run_targeted_pipeline(buffer_minutes: int = 15, source: str = "auto") -> Non
             null_count += 1
             continue  # fail-closed: missing time = exclude
         try:
-            gt = datetime.strptime(str(gst), "%Y-%m-%d %H:%M:%S")
-            if et_tz.localize(gt) > cutoff:
+            gt = datetime.fromisoformat(str(gst))
+            if gt.tzinfo is None:
+                # Legacy naive ET timestamp — localize before comparing
+                gt = et_tz.localize(gt)
+            if gt > cutoff:
                 upcoming.append(leg)
             else:
                 started_count += 1
@@ -1295,6 +1301,18 @@ def run_targeted_pipeline(buffer_minutes: int = 15, source: str = "auto") -> Non
         print(f"  [v2] dual-write failed (non-fatal): {_v2_err}")
 
     print("\nTargeted refresh pipeline complete.")
+
+
+def run_full_refresh_pipeline(source: str = "manual") -> None:
+    """
+    Full refresh pipeline for manual regenerate — fetches ALL fresh props from
+    SGO, re-calculates coverage, re-scores, stores new legs to DB, and rebuilds
+    parlay recommendations.
+
+    Unlike run_targeted_pipeline() which reuses stale DB legs, this runs the
+    complete fetch-score-store cycle so the web UI gets fresh data every time.
+    """
+    run_pipeline(source=source)
 
 
 def run():
