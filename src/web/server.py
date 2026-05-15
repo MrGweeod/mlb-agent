@@ -1172,12 +1172,12 @@ def create_app() -> web.Application:
 _ET = ZoneInfo("America/New_York")
 # Three daily pipeline runs (label, time-ET, function):
 #   morning  9:00 AM — resolve yesterday + full fetch/score/build for today (run_morning_pipeline)
-#   midday  12:00 PM — targeted refresh, no SGO (run_targeted_pipeline)
-#   evening  5:30 PM — targeted refresh, no SGO (run_targeted_pipeline)
+#   midday  12:00 PM — full fresh props fetch, no resolution (run_full_refresh_pipeline)
+#   evening  5:30 PM — full fresh props fetch, no resolution (run_full_refresh_pipeline)
 _PIPELINE_SCHEDULE = [
-    (dtime(9,  0),  "morning"),   # 9:00 AM ET — resolution only
-    (dtime(12, 0),  "midday"),    # 12:00 PM ET — fresh props + scoring
-    (dtime(17, 30), "evening"),   # 5:30 PM ET — final lineup refresh
+    (dtime(9,  0),  "morning"),   # 9:00 AM ET — resolution + full fetch/score/build
+    (dtime(12, 0),  "midday"),    # 12:00 PM ET — full fresh props, skip resolution
+    (dtime(17, 30), "evening"),   # 5:30 PM ET — full fresh props, skip resolution
 ]
 
 # Startup catch-up window: run if we restart within N minutes after a slot
@@ -1188,18 +1188,18 @@ async def _pipeline_scheduler() -> None:
     """
     Background task that runs scheduled pipelines at 9 AM, 12 PM, and 5:30 PM ET.
 
-    9 AM    → run_morning_pipeline()   (resolve yesterday + full fetch/score/build for today)
-    12 PM   → run_targeted_pipeline()  (targeted SGO fetch + lineup check)
-    5:30 PM → run_targeted_pipeline()  (targeted SGO fetch + lineup check)
+    9 AM    → run_morning_pipeline()      (resolve yesterday + full fetch/score/build for today)
+    12 PM   → run_full_refresh_pipeline() (full fresh props fetch, skip resolution)
+    5:30 PM → run_full_refresh_pipeline() (full fresh props fetch, skip resolution)
 
     On startup, if we're within _CATCHUP_WINDOW_MINS of a missed slot, runs
     that slot's pipeline immediately (Railway redeploy recovery).
     """
-    from main import run_morning_pipeline, run_targeted_pipeline
+    from main import run_morning_pipeline, run_full_refresh_pipeline
 
     print("[scheduler] Morning pipeline scheduled at 9:00 AM ET (resolution + full fetch/score/build)")
-    print("[scheduler] Midday pipeline scheduled at 12:00 PM ET (targeted SGO fetch + lineup check)")
-    print("[scheduler] Evening pipeline scheduled at 5:30 PM ET (targeted SGO fetch + lineup check)")
+    print("[scheduler] Midday pipeline scheduled at 12:00 PM ET (full fresh props, skip resolution)")
+    print("[scheduler] Evening pipeline scheduled at 5:30 PM ET (full fresh props, skip resolution)")
 
     # ── Startup catch-up ──────────────────────────────────────────────────────
     now_startup = datetime.now(_ET)
@@ -1217,7 +1217,7 @@ async def _pipeline_scheduler() -> None:
                 if slot_label == "morning":
                     await loop.run_in_executor(None, run_morning_pipeline)
                 else:
-                    await loop.run_in_executor(None, run_targeted_pipeline)
+                    await loop.run_in_executor(None, run_full_refresh_pipeline, slot_label)
                 print(f"[scheduler] Startup catch-up ({slot_label}) complete")
             except Exception as exc:
                 print(f"[scheduler] Startup catch-up ({slot_label}) error: {exc}")
@@ -1258,7 +1258,7 @@ async def _pipeline_scheduler() -> None:
             if next_label == "morning":
                 await loop.run_in_executor(None, run_morning_pipeline)
             else:
-                await loop.run_in_executor(None, run_targeted_pipeline)
+                await loop.run_in_executor(None, run_full_refresh_pipeline, next_label)
         except Exception as exc:
             print(f"[scheduler] {next_label} pipeline error: {exc}")
 
@@ -1278,7 +1278,7 @@ async def start_server() -> web.AppRunner:
 
     # Start the background pipeline scheduler
     asyncio.ensure_future(_pipeline_scheduler())
-    print("[web] Pipeline scheduler started (9 AM resolution + full fetch, 12 PM + 5:30 PM targeted refresh)")
+    print("[web] Pipeline scheduler started (9 AM resolution + full fetch, 12 PM + 5:30 PM full refresh, skip resolution)")
 
     return runner
 

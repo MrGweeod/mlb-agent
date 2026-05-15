@@ -517,7 +517,7 @@ def generate_recommendations(
 
 # ── Public pipeline function ──────────────────────────────────────────────────
 
-def run_pipeline(starts_after_override=None, source: str | None = None) -> tuple[list[dict], str]:
+def run_pipeline(starts_after_override=None, source: str | None = None, skip_resolution: bool = False) -> tuple[list[dict], str]:
     """
     Execute the full MLB parlay pipeline and return (parlays, analysis).
 
@@ -539,6 +539,9 @@ def run_pipeline(starts_after_override=None, source: str | None = None) -> tuple
 
     print(f"\nMLB Parlay Agent — {today}")
     print("=" * 50)
+
+    if skip_resolution:
+        print("\n[1/8] Skipping resolution (not a morning run)")
 
     # Load team ID → abbreviation map once (used across multiple steps)
     team_id_to_abbr = _load_team_abbr_map()
@@ -982,6 +985,13 @@ def run_morning_pipeline(source: str | None = None) -> None:
 
 def run_targeted_pipeline(buffer_minutes: int = 15, source: str = "auto") -> None:
     """
+    DEPRECATED: Use run_pipeline(skip_resolution=True) instead.
+
+    This function reuses stale database legs and only updates odds.
+    The new approach fetches fresh props every time for better reliability.
+
+    Kept for reference only - not used in production.
+
     Midday/evening targeted refresh — fetches fresh SGO odds for eligible players.
 
     Steps:
@@ -1311,13 +1321,15 @@ def run_full_refresh_pipeline(source: str = "manual") -> None:
 
     Unlike run_targeted_pipeline() which reuses stale DB legs, this runs the
     complete fetch-score-store cycle so the web UI gets fresh data every time.
+
+    SKIPS resolution step - that only happens in the 9 AM morning run.
     """
-    run_pipeline(source=source)
+    run_pipeline(source=source, skip_resolution=True)
 
 
 def run():
-    """CLI entry point — calls run_pipeline() and prints output."""
-    run_pipeline()
+    """CLI entry point — calls run_pipeline() with resolution (morning behavior)."""
+    run_pipeline(source="manual", skip_resolution=False)
 
 
 # ── Testing notes ─────────────────────────────────────────────────────────────
