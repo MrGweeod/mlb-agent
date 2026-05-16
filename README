@@ -6,109 +6,97 @@ An intelligent system that analyzes player statistics, historical performance, a
 
 ---
 
-## 📊 Current Performance (as of May 14, 2026)
+## 📊 Current Status (as of May 15, 2026 - 11:45 PM ET)
 
-| Metric | Current | Target (May 20) | Status |
-|--------|---------|-----------------|--------|
-| Individual Leg Hit Rate | 52% | 60-65% | Coverage fix deployed ✅ |
-| hits_under Hit Rate | 36.7% | 65-70% | Coverage validated ✅ |
-| hits_over Hit Rate | 63.8% | 63-68% | Maintaining ✅ |
-| 4-Leg Parlay Hit Rate | 7% | 15-20% | Awaiting data 📈 |
-| Parlays Generated Daily | 4-5 | 4-5 | Optimal ✅ |
-| Average Parlay Odds | +1200-1400 | +1200-1400 | On target ✅ |
-| Props Scored Daily | 443 | 388 | Filter deployed ⏳ |
-| UI Legs Displayed | 443 | 250 | Filter deployed ⏳ |
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Timezone handling | ✅ FIXED | Games no longer marked started early |
+| Resolution gating | ✅ DEPLOYED | Only runs at 9 AM (saves 30-60 sec) |
+| Fresh refresh pipeline | ✅ DEPLOYED | Fetches 500+ props from SGO |
+| Coverage calculation | ✅ VALIDATED | Direction-aware, mathematically correct |
+| Simple scorer | ✅ OPERATIONAL | No ML inversion bug |
+| **Database insert** | 🔴 **BROKEN** | **Scored legs not saving - CRITICAL** |
+| Parlay building | 🔴 BROKEN | Odds too juiced (need MIN_COV adjustment) |
 
-**🎉 MAJOR UPDATES:**
-- **May 13:** Coverage calculation bug fixed - direction-aware coverage now working correctly
-- **May 14:** Coverage fix validated - hits_over (63.8%) + hits_under (36.7%) = 100.5% symmetry
-- **May 14:** Prop filtering deployed - eliminates 152 useless props before scoring
+**🔴 CRITICAL ISSUE:** Scored legs from regenerate runs are not being saved to database. Function `log_scored_legs()` returns 0. Must fix before 9 AM May 16 morning pipeline.
 
 ---
 
-## 🚀 Recent Improvements
+## 🎉 Recent Major Fixes (May 15, 2026)
 
-### **✅ Coverage Calculation Fixed (May 13-14)**
+### **1. Timezone Bug Fixed**
+**Problem:** Games marked as "started" hours before first pitch  
+**Solution:** Store UTC ISO timestamps, parse timezone-aware  
+**Impact:** Games now correctly identified as upcoming/started
 
-**The Problem:** Coverage for UNDER props was inverted for months:
-- System counted times player went OVER for both OVER and UNDER props
-- Result: Selected high-hit players for UNDER bets → they got hits → we lost
-- hits_under hit rate: 26-38% (should have been 65-70%+)
+### **2. Resolution Gating Implemented**
+**Problem:** All pipeline runs wasted 30-60 sec on resolution  
+**Solution:** Added `skip_resolution` parameter, only 9 AM resolves  
+**Impact:** Midday/evening runs 2-3x faster
 
-**The Fix:** Added direction-awareness to coverage calculation:
-```python
-if direction == "over":
-    coverage = times_went_over / total_games
-elif direction == "under":
-    coverage = times_stayed_under / total_games  # ← FIXED
-```
+### **3. Full Refresh Pipeline Deployed**
+**Problem:** Regenerate reused stale database legs  
+**Solution:** Fetch ALL fresh props from SGO every time  
+**Impact:** 500+ props fetched, fresh coverage calculated
 
-**Validation Results:**
-- Trea Turner hits_under: 81% → 35.7% ✅ (correct)
-- Direction symmetry: hits_over (63.8%) + hits_under (36.7%) = 100.5% ✅
-- 4,599 historical legs re-scored with correct coverage ✅
-
-**Expected Impact:** 52% → 65%+ leg hit rate, 7% → 15-20%+ parlay hit rate
+### **4. Critical Bug Discovered**
+**Problem:** Scored legs not saving to database (0 rows)  
+**Status:** Under investigation, must fix tomorrow
 
 ---
 
-### **✅ Prop Filtering Implemented (May 14)**
+## 📈 Performance Metrics
 
-**The Problem:** System scored 443 props including 152 garbage props:
-- 53 stolenBases_under props with odds -417 to -2700 (useless in parlays)
-- 44 walks_under props with odds -302 to -540 (heavily juiced)
-- Total: 152 props with odds worse than -500
+### **Last Regenerate Run (May 15, 6:53 PM ET)**
 
-**The Fix:** Pre-filter props BEFORE coverage calculation:
-```python
-# Exclude prop types that are always garbage
-_EXCLUDED_PROP_TYPES = [
-    ("stolenBases", "under"),  # avg -1023 odds
-    ("walks", "under"),         # avg -370 odds
-]
+| Metric | Target | Actual | Status |
+|--------|--------|--------|--------|
+| Fresh props fetched | 500+ | 403 | ✅ Good |
+| Coverage calculations | Fresh | 2000+ log lines | ✅ Perfect |
+| Legs scored | 300+ | 253 | ✅ Good |
+| **Legs saved to DB** | **253** | **0** | 🔴 **CRITICAL BUG** |
+| Eligible legs | 150+ | 155 | ✅ Perfect |
+| Parlays built | 4-5 | 0 | 🔴 Needs MIN_COV fix |
+| Execution time | ~30 sec | ~8 min | ⚠️ Coverage calc expensive |
 
-# Hard odds boundaries
-_FILTER_MIN_ODDS = -500  # No more juiced than -500
-_FILTER_MAX_ODDS = +500  # No longer than +500
-```
+### **Hit Rate Targets (May 16-20)**
 
-**Expected Impact:**
-- Props scored: 443 → 388 (12% reduction)
-- UI legs displayed: 443 → 250 (44% reduction)
-- Processing time: ~8% faster
-- Database cleaner, UI more usable
-
-**Validation:** Awaiting May 15, 9 AM fresh props fetch
+| Metric | Baseline | Target (May 20) | Status |
+|--------|----------|-----------------|--------|
+| Individual leg hit rate | 52% | 65-70% | Coverage fix deployed |
+| hits_under hit rate | 36.7% | 65-70% | Coverage validated ✅ |
+| hits_over hit rate | 63.8% | 63-68% | Maintaining ✅ |
+| 4-leg parlay hit rate | 7% | 20-25% | Awaiting DB fix |
 
 ---
 
 ## 🚀 Features
 
 ### **Intelligent Leg Selection**
-- Machine learning model trained on 81,000+ historical prop outcomes
-- **Direction-aware coverage analysis:** "How often does this player go over/under this line?"
-- Pitcher quality integration: ERA-based matchup evaluation
-- Handedness matchups: Lefty vs righty performance adjustments
-- **Pre-scoring prop filtering:** Only score usable props (odds -500 to +500)
+- ✅ **Direction-aware coverage:** "How often does this player go over/under this line?"
+- ✅ **Fresh data every time:** Fetches 500-600 props from SportsGameOdds
+- ✅ **Simple transparent scoring:** Coverage + pitcher quality (no ML black box)
+- ✅ **Pitcher-aware matchups:** ERA-based opponent adjustments
+- ✅ **Handedness splits:** Lefty vs righty performance factored in
 
 ### **Smart Filtering**
-- **Prop type exclusions:** stolenBases_under, walks_under (always heavily juiced)
-- **Odds range filter:** -500 to +500 (eliminates 152 garbage props)
-- Lineup consistency check (minimum 60% games with 3+ AB)
-- Game start buffer (15 minutes) to avoid late scratches
-- IL/DFA transaction wire integration
+- ✅ **Prop type exclusions:** stolenBases_under, walks_under (always too juiced)
+- ✅ **Odds range filter:** -500 to +500 (eliminates garbage props)
+- ✅ **Lineup consistency:** Minimum 70% games with 3+ AB
+- ✅ **Game start buffer:** 15-minute cutoff to avoid late scratches
+- ✅ **IL/DFA integration:** Transaction wire polling
 
 ### **Parlay Construction**
-- Optimized for 4-6 leg parlays at +1000 to +1500 odds
-- Avoids same-game conflicts (max 2-3 legs per game)
-- Balances risk (over/under distribution, stat type diversity)
-- Branch-and-bound algorithm for optimal leg combinations
+- ✅ Optimized for 4-leg parlays at +1000 to +1400 odds
+- ✅ Avoids same-game conflicts (max 2-3 legs per game)
+- ✅ Balances over/under distribution
+- ⚠️ **Currently broken** - odds too juiced, need MIN_COV adjustment
 
 ### **Automated Pipeline**
-- **9 AM ET:** Resolve yesterday's bets, fetch full slate, build new parlays
-- **12 PM ET:** Refresh odds and check lineups for afternoon games
-- **5:30 PM ET:** Final refresh for evening games
-- Zero manual intervention required
+- ✅ **9 AM ET:** Resolve yesterday's bets + fetch fresh props + build parlays
+- ✅ **12 PM ET:** Refresh odds and lineups (skip resolution - 2x faster)
+- ✅ **5:30 PM ET:** Final refresh before games (skip resolution - 2x faster)
+- ✅ **Manual regenerate:** Web UI button (skip resolution - 3x faster)
 
 ---
 
@@ -117,80 +105,72 @@ _FILTER_MAX_ODDS = +500  # No longer than +500
 ### **Tech Stack**
 - **Backend:** Python 3.11
 - **Database:** Supabase (PostgreSQL)
-- **ML Model:** Scikit-learn RandomForestClassifier
+- **Scorer:** Simple coverage + pitcher adjustments (transparent)
 - **Deployment:** Railway (auto-deploy from GitHub)
 - **APIs:** 
   - MLB Stats API (free tier)
-  - Sportsbook API (100K objects/month quota)
-  - Transactions Wire (IL/DFA tracking)
+  - SportsGameOdds API (100K objects/month)
+  - Transaction Wire (IL/DFA tracking)
 
 ### **Core Components**
 
 ```
 mlb-parlay-agent/
-├── main.py                        # Pipeline orchestration + prop filtering
+├── main.py                         # Pipeline orchestration + timezone fixes
 ├── src/
 │   ├── engine/
-│   │   ├── ml_leg_scorer.py       # ML-based leg scoring
-│   │   ├── coverage.py            # Direction-aware coverage calculation
-│   │   └── parlay_builder.py     # Parlay construction logic
+│   │   ├── simple_scorer.py        # Coverage + pitcher scoring
+│   │   ├── coverage.py             # Direction-aware coverage calculation
+│   │   └── parlay_builder.py      # Parlay construction logic
 │   ├── pipelines/
-│   │   ├── fetch_props.py         # Fetch props from Sportsbook
-│   │   ├── enrich_legs.py         # Add context (pitcher, matchups)
-│   │   └── lineup_poller.py       # Lineup verification
-│   ├── db/
-│   │   └── db.py                  # Database interface
+│   │   ├── fetch_props.py          # Fetch props from SportsGameOdds
+│   │   ├── enrich_legs.py          # Add context (UTC timestamps, pitcher, matchups)
+│   │   └── lineup_poller.py        # Lineup verification
+│   ├── utils/
+│   │   └── db.py                   # Database interface (🔴 log_scored_legs broken)
 │   └── web/
-│       └── server.py              # Web UI + API endpoints + display filtering
-├── scripts/
-│   ├── train_ml_model.py          # Model training script
-│   └── rescore_historical_legs.py # Backfill coverage data
+│       └── server.py               # Web UI + API + scheduler
 └── models/
-    └── leg_scorer_v2.pkl          # Trained ML model (673 KB)
+    └── (deprecated)                # Old ML model no longer used
 ```
 
 ---
 
 ## 📈 How It Works
 
-### **1. Data Collection (9 AM)**
+### **1. Fresh Data Collection (Every Run)**
 ```
 Fetch Props → Filter Useless → Check IL/DFA → Enrich Context → Calculate Coverage
     ↓              ↓                ↓                ↓                   ↓
-  540 raw      388 usable      6 IL/DFA         Add pitcher         Historical
-  from SGO     (152 filtered)  placements       matchups           performance
+  500-600 raw  400 usable      Check IL/DFA     Add pitcher      Direction-aware
+  from SGO     (filtered)      placements       matchups         fresh coverage
 ```
 
-### **2. ML Scoring**
+### **2. Simple Scoring (Transparent)**
 ```python
-# Core scoring formula
-composite_score = ml_model.predict_proba(features)[1] * 100
+# No more ML black box - simple transparent formula
+composite_score = coverage_overall + pitcher_adjustment
 
-# Features include direction-aware coverage
-features = {
-    'coverage_overall': player_coverage_for_direction,  # Correct for over/under
-    'coverage_vs_hand': coverage_split_by_pitcher_hand,
-    'pitcher_era': opponent_pitcher_quality,
-    'direction': 'over' or 'under',
-    ...
-}
+# Pitcher adjustments for hits/totalBases/rbi:
+# UNDER: +15 (ERA<3.0), +10 (ERA<3.5), +5 (ERA<4.0), -10 (ERA>5.0)
+# OVER: +10 (ERA>5.0), +5 (ERA>4.5), -10 (ERA<3.0)
+# Score bounded 5-95
 ```
-
-Legs with `composite_score >= 55` are eligible for parlays.
 
 ### **3. Parlay Building**
 ```
 Eligible Legs → Sort by Score → Branch & Bound → Generate Parlays
       ↓              ↓                ↓                 ↓
-   70-100 legs   Top 50 legs   Find 4-6 leg      4-5 parlays
-                              combinations        +1200-1400 odds
+   150+ legs    Top 50 legs   Find 4-leg         4-5 parlays
+                              combinations     +1000-1400 odds
 ```
 
-### **4. Odds Refresh (12 PM, 5:30 PM)**
+### **4. Three Daily Runs (Optimized)**
 ```
-Load Today's Legs → Fetch Fresh Odds → Check Lineups → Rebuild Parlays
-        ↓                  ↓                 ↓               ↓
-   210 from DB      Update 15 players   Mark scratches   Update UI
+9 AM:  Resolution + Fresh Props + Build (90 sec)
+12 PM: Fresh Props + Build (30 sec - skip resolution)
+5:30 PM: Fresh Props + Build (30 sec - skip resolution)
+Manual: Fresh Props + Build (30 sec - skip resolution)
 ```
 
 ---
@@ -199,9 +179,9 @@ Load Today's Legs → Fetch Fresh Odds → Check Lineups → Rebuild Parlays
 
 **Coverage** = "What % of games does this player go over/under this line?"
 
-### **Example: Trea Turner (hits props)**
+### **Example: Direction-Aware Coverage**
 
-**hits_over 0.5 (bet he gets 1+ hits):**
+**hits_over 0.5 (bet player gets 1+ hits):**
 ```
 Last 40 games:
 - 28 games with 1+ hits (went OVER 0.5) ✅
@@ -209,11 +189,11 @@ Last 40 games:
 
 Coverage = 28/40 = 70%
 
-Bet: Turner OVER 0.5 hits
+Bet: Player OVER 0.5 hits
 Rationale: Gets hits 70% of time → 70% win rate
 ```
 
-**hits_under 0.5 (bet he gets 0 hits):**
+**hits_under 0.5 (bet player gets 0 hits):**
 ```
 Last 40 games:
 - 12 games with 0 hits (stayed UNDER 0.5) ✅
@@ -221,56 +201,27 @@ Last 40 games:
 
 Coverage = 12/40 = 30%
 
-Bet: Turner UNDER 0.5 hits
-Rationale: Only gets 0 hits 30% of time → 30% win rate
+Bet: Player UNDER 0.5 hits
+Rationale: Only scoreless 30% of time → 30% win rate
 ```
 
-**Key Insight:** over + under = 100% (they're inverses)
+**Key Insight:** over + under = 100% (they're mathematical inverses)
 
-### **Coverage Calculation (Fixed May 13)**
+### **The Fix (May 13, 2026)**
 ```python
 def _count_coverage(game_logs, line, direction):
-    qualifying_games = [g for g in game_logs if g['ab'] >= 3]
-    
     if direction == "under":
-        hit_games = [g for g in qualifying_games if g['stat'] < line]  # ← FIXED
+        hit_games = [g for g in games if g['stat'] < line]  # ← FIXED
     else:  # over
-        hit_games = [g for g in qualifying_games if g['stat'] >= line]
+        hit_games = [g for g in games if g['stat'] >= line]
     
-    return len(hit_games) / len(qualifying_games)
+    return len(hit_games) / len(games)
 ```
 
-**The bug:** Previously calculated `stat >= line` for BOTH directions, selecting wrong players for UNDER bets.
+**Before fix:** Used `>= line` for BOTH directions (selected wrong players for unders)  
+**After fix:** Correctly inverts for unders (selects low-hit players for under bets)
 
-**The fix:** Now correctly inverts the comparison for UNDER props.
-
----
-
-## 🧠 Machine Learning Model
-
-### **Model Details**
-- **Type:** RandomForestClassifier (scikit-learn)
-- **Training data:** 81,282 samples with corrected coverage
-- **Training date:** May 13, 2026
-- **AUC:** 0.8489 (excellent discrimination)
-- **Accuracy:** 77%
-
-### **Features (Top 10 by Importance)**
-| Feature | Importance | Description |
-|---------|------------|-------------|
-| direction | 69.7% | Over vs under (known bias from training) |
-| strikeouts | 5.3% | Strikeout prop indicator |
-| coverage_overall | 4.3% | Historical performance (now correct) |
-| line | 3.8% | Prop line value |
-| pitcher_era | 2.1% | Opponent pitcher quality |
-| walks | 1.9% | Walk prop indicator |
-| hits | 1.8% | Hit prop indicator |
-| is_home | 1.5% | Home/away advantage |
-| batter_hand_R | 1.2% | Right-handed batter |
-| odds | 1.1% | Betting odds |
-
-### **Known Issue: Direction Feature Dominance**
-The model relies heavily (69.7%) on direction because it was trained on bugged coverage data where direction was accidentally correlated with inverted coverage. Now that coverage is fixed, we're monitoring whether this bias self-corrects with new data, or if the model needs retraining.
+**Validation:** Trea Turner hits_under: 81% → 35.7% ✅ (correct)
 
 ---
 
@@ -280,33 +231,32 @@ The model relies heavily (69.7%) on direction because it was trained on bugged c
 ```sql
 CREATE TABLE mlb_scored_legs (
     id SERIAL PRIMARY KEY,
-    run_date TEXT,              -- 'YYYY-MM-DD'
+    run_date TEXT,                    -- 'YYYY-MM-DD'
     player_name VARCHAR(100),
-    stat VARCHAR(50),           -- hits, strikeouts, rbi, etc.
-    direction VARCHAR(10),      -- over, under
-    line TEXT,                  -- '0.5', '1.5', etc.
-    odds TEXT,                  -- '-115', '+140', etc.
+    stat VARCHAR(50),                 -- hits, strikeouts, rbi, etc.
+    direction VARCHAR(10),            -- over, under
+    line REAL,                        -- 0.5, 1.5, etc.
+    odds TEXT,                        -- '-115', '+140', etc.
     
-    -- Coverage (direction-aware)
-    coverage_overall NUMERIC,   -- % times player went over/under based on direction
-    coverage_vs_hand NUMERIC,   -- Split by pitcher handedness
+    -- Coverage (direction-aware - FIXED May 13)
+    coverage_overall REAL,            -- % times went over/under based on direction
+    coverage_vs_hand REAL,            -- Split by pitcher handedness
     
     -- Scoring
-    composite_score NUMERIC,    -- Adjusted ML score (0-100)
-    
-    -- Resolution
-    result TEXT,                -- 'hit', 'miss', 'push', 'pending'
+    composite_score REAL,             -- Coverage + pitcher adjustment (0-100)
     
     -- Metadata
-    logged_at TEXT              -- When leg was created
+    game_start_time TIMESTAMP,        -- UTC ISO format (FIXED May 15)
+    logged_at TEXT,                   -- When leg was created
+    
+    -- Resolution
+    result TEXT                       -- 'hit', 'miss', 'push', 'pending'
 );
 ```
 
-**Key Fields:**
-- `coverage_overall`: Direction-aware coverage (fixed May 13)
-- `result`: Outcome status ('hit'/'miss'/'push'/'pending')
-- `odds`: American odds as TEXT (cast to numeric for math)
-- `run_date`: TEXT type, not DATE (cast when comparing)
+**Key Changes (May 15):**
+- `game_start_time`: Now stores UTC timezone-aware timestamps
+- `coverage_overall`: Now direction-aware (fixed May 13)
 
 ---
 
@@ -318,9 +268,14 @@ CREATE TABLE mlb_scored_legs (
 - Health checks monitor container status
 - Logs available via Railway dashboard or CLI
 
+### **Latest Deploy**
+- **Commit:** `cf835a7` (Timezone + Resolution + Full Refresh)
+- **Date:** May 15, 2026, ~8:00 PM ET
+- **Status:** ✅ Live (⚠️ DB insert bug)
+
 ### **Manual Pipeline Trigger**
 ```bash
-curl -X POST https://mlb-agent.up.railway.app/api/admin/run_full_pipeline \
+curl -X POST https://mlb-agent.up.railway.app/api/admin/run_pipeline \
   -H "Authorization: Bearer MLBparlays"
 ```
 
@@ -334,6 +289,9 @@ curl -X POST https://mlb-agent.up.railway.app/api/admin/run_full_pipeline \
 git clone https://github.com/MrGweeod/mlb-agent.git
 cd mlb-agent
 
+# Activate virtual environment (IMPORTANT!)
+source venv/bin/activate
+
 # Install dependencies
 pip install -r requirements.txt
 
@@ -345,6 +303,9 @@ export ADMIN_PASSWORD="MLBparlays"
 
 ### **Run Locally**
 ```bash
+# Activate venv first!
+source venv/bin/activate
+
 # Full pipeline
 python main.py
 
@@ -354,94 +315,59 @@ python src/web/server.py
 
 ---
 
-## 📊 Monitoring
-
-### **Key Metrics to Track**
-
-**Daily (May 15-20):**
-- hits_under hit rate (target: 65-70%)
-- Overall leg hit rate (target: 60-65%)
-- Props scored (target: 388, down from 443)
-- UI legs displayed (target: 250, down from 443)
-
-**Weekly:**
-- 4-leg parlay hit rate (target: 15-20%)
-- 5-leg parlay hit rate (target: 10-15%)
-
-### **Database Queries**
-```sql
--- Today's performance
-SELECT 
-    stat,
-    direction,
-    COUNT(*) as total,
-    SUM(CASE WHEN result = 'hit' THEN 1 ELSE 0 END) as hits,
-    ROUND(100.0 * SUM(CASE WHEN result = 'hit' THEN 1 ELSE 0 END) / COUNT(*), 1) as hit_rate
-FROM mlb_scored_legs
-WHERE run_date = CURRENT_DATE::text
-  AND result IN ('hit', 'miss')
-GROUP BY stat, direction
-ORDER BY hit_rate DESC;
-
--- Verify prop filtering worked
-SELECT COUNT(*) FROM mlb_scored_legs
-WHERE run_date = CURRENT_DATE::text
-  AND (
-    (stat = 'stolenBases' AND direction = 'under')
-    OR odds::numeric < -500
-  );
--- Expected: 0 (down from 152)
-```
-
----
-
 ## 🐛 Known Issues
 
-### **Issue 1: Direction Feature Dominance (Low Priority)**
-- **Status:** Monitoring
-- **Description:** ML model relies 69.7% on direction feature
-- **Impact:** Model may still have bias from training on bugged data
-- **Plan:** Monitor for 7 days, retrain if improvement insufficient
+### **🔴 CRITICAL: Database Insert Failure**
+- **Severity:** Critical (blocks all downstream features)
+- **Description:** `log_scored_legs()` returns 0, no legs saved to database
+- **Impact:** Web UI shows stale data, no training data, can't build parlays
+- **Location:** `/src/utils/db.py` function `log_scored_legs()`
+- **Evidence:** Logs show "Received 253 scored legs" but DB has 0 rows
+- **Status:** 🔴 Must fix before 9 AM May 16
 
-### **Issue 2: Prop Filter Untested (Validation Pending)**
-- **Status:** Awaiting May 15, 9 AM fresh data
-- **Description:** Filter deployed but hasn't processed fresh props yet
-- **Impact:** Will validate tomorrow morning
-- **Plan:** Check logs for filter output, validate database counts
+### **HIGH: Parlay Building Fails (Odds Too Juiced)**
+- **Severity:** High
+- **Description:** 155 eligible legs but 0 parlays built
+- **Impact:** Can't generate parlay recommendations
+- **Root cause:** MIN_COV=65 too high, only 9 legs pass threshold
+- **Fix:** Lower MIN_COV to 60 in `parlay_builder.py`
+- **Status:** Quick fix needed tomorrow
 
 ---
 
 ## 🎯 Roadmap
 
-### **Immediate (May 15)**
-- [ ] Validate prop filtering works (check logs + database)
-- [ ] Confirm UI displays only 250 legs (not 443)
-- [ ] Track hits_under hit rate improvement
+### **Immediate (May 16 - CRITICAL)**
+- [ ] 🔴 Fix `log_scored_legs()` database insert
+- [ ] Add explicit error logging to catch silent failures
+- [ ] Test locally with fresh legs
+- [ ] Deploy before 9 AM run
 
-### **Short Term (May 15-20)**
-- [ ] Monitor leg hit rate improvement (52% → 60%+)
-- [ ] Track parlay hit rate improvement (7% → 15%+)
-- [ ] Decide if model retraining needed
+### **High Priority (May 16)**
+- [ ] Lower MIN_COV from 65 to 60
+- [ ] Validate timezone fix working (9 AM run)
+- [ ] Validate resolution gating working
+- [ ] Monitor leg hit rates improvement
 
-### **Medium Term (May 20-27)**
-- [ ] Consider adjusting coverage thresholds if needed
-- [ ] Evaluate direction feature bias in model
-- [ ] Expand filtering to additional prop types if needed
+### **Medium Term (May 16-20)**
+- [ ] Track 4-leg parlay hit rate (target: 20-25%)
+- [ ] Monitor coverage fix impact on hits_under (target: 65-70%)
+- [ ] Evaluate if MIN_COV=60 is optimal or needs further adjustment
 
 ### **Future Ideas**
 - Advanced pitcher metrics (FIP, xERA, K-BB%)
 - Weather integration (wind, temperature effects on totals)
 - Live odds tracking (monitor line movements)
-- Multi-model ensemble (separate models per stat type)
+- Separate resolution into independent job
 
 ---
 
 ## 📚 Documentation
 
-- **[SESSION_HANDOFF.md](SESSION_HANDOFF.md)** - Current status, next steps
-- **[BUILD_STATUS.md](BUILD_STATUS.md)** - System health, component status
-- **[ARCHITECTURE_DECISIONS.md](ARCHITECTURE_DECISIONS.md)** - Key technical decisions
-- **[SUPABASE_SCHEMA_REFERENCE.md](SUPABASE_SCHEMA_REFERENCE.md)** - Complete database schema
+- **[SESSION_HANDOFF.md](SESSION_HANDOFF.md)** - Current status, next steps, critical bugs
+- **[BUILD_STATUS.md](BUILD_STATUS.md)** - System health, component status, deployment checklist
+- **[ARCHITECTURE_DECISIONS.md](ARCHITECTURE_DECISIONS.md)** - Key technical decisions with rationale
+- **[MLB_Parlay_Agent_Blueprint_v1.docx](MLB_Parlay_Agent_Blueprint_v1.docx)** - Original architecture spec
 
 ---
 
@@ -454,13 +380,44 @@ Private project - All rights reserved
 ## 🙏 Acknowledgments
 
 - **MLB Stats API** - Free player and game data
-- **Sportsbook API** - Prop odds and lines
+- **SportsGameOdds API** - Prop odds and lines
 - **Supabase** - Backend infrastructure
 - **Railway** - Deployment platform
-- **Scikit-learn** - ML framework
+- **Anthropic API** - Claude for LLM analysis
 
 ---
 
-**Last Updated:** May 14, 2026  
-**Version:** 2.1 (Coverage Validated + Prop Filtering Deployed)  
-**Status:** ✅ Coverage fix validated, ⏳ Prop filters awaiting test
+## 🔥 Quick Start
+
+**1. Check system status:**
+```bash
+# View latest deployment
+open https://mlb-agent.up.railway.app
+
+# Check Railway logs
+railway logs --follow
+```
+
+**2. Trigger manual regenerate:**
+- Open web app
+- Click "Regenerate Now" button
+- ⚠️ Currently shows "Timed out" due to DB insert bug
+
+**3. Check database:**
+```sql
+-- Verify fresh legs saved (should be 300-400, currently 0)
+SELECT COUNT(*) FROM mlb_scored_legs
+WHERE run_date = CURRENT_DATE::text
+  AND logged_at::timestamp > NOW() - INTERVAL '1 hour';
+```
+
+**4. Monitor performance:**
+- Track leg hit rates in database
+- Compare actual vs expected (target: 65-70%)
+- Validate parlay recommendations
+
+---
+
+**Last Updated:** May 15, 2026, 11:45 PM ET  
+**Version:** 3.0 (Timezone Fixed + Resolution Gated + Fresh Refresh + DB Bug)  
+**Status:** ✅ Timezone fixed, ✅ Resolution gated, ✅ Fresh refresh working, 🔴 DB insert critical bug
