@@ -1,100 +1,225 @@
 # MLB Parlay Agent — Architecture Decisions
-**Last Updated:** May 14, 2026
+**Last Updated:** May 15, 2026
 
 ## Document Purpose
 This document records key architectural decisions, their rationale, and outcomes. Each decision follows the format: Context → Decision → Rationale → Outcome.
 
 ---
 
-## Recent Decisions (May 14, 2026)
+## Recent Decisions (May 15, 2026)
 
-### Decision 13: Pre-Scoring Prop Filtering (May 14, 2026)
+### Decision 15: Timezone-Aware Game Start Times (May 15, 2026)
 
-**Context:** System was scoring 443 props per day, including 152 props with odds worse than -500 (heavily juiced, unusable in parlays). These props wasted processing time calculating coverage and cluttered the database/UI.
+**Context:** Game start times were stored as naive ET strings (`"2026-05-15 18:40:00"`) but PostgreSQL compared them as UTC, causing all games to appear "started" hours before first pitch.
 
-**Decision:** Filter props BEFORE coverage calculation in BOTH pipeline modes.
+**Decision:** Store game start times as UTC ISO 8601 timestamps with timezone awareness.
 
 **Implementation:**
 ```python
-# Exclude specific prop types always heavily juiced
-_EXCLUDED_PROP_TYPES = frozenset([
-    ("stolenBases", "under"),  # 53 legs, avg -1023 odds
-    ("walks", "under"),         # 44 legs, avg -370 odds
-])
+# src/pipelines/enrich_legs.py
+def get_game_start_time(game_pk: int) -> str | None:
+    utc_time = datetime.fromisoformat(game_datetime.replace('Z', '+00:00'))
+    return utc_time.isoformat()  # Returns "2026-05-15T22:40:00+00:00"
+```
 
-# Hard odds boundaries
-_FILTER_MIN_ODDS = -500  # Nothing more juiced
-_FILTER_MAX_ODDS = +500  # Nothing longer
-
-def _filter_useless_props(raw_props):
-    # Filter by prop type AND odds range
-    # Return only parlay-usable props
+**Filter updates:**
+```python
+# main.py - both morning and targeted pipeline filters
+gt = datetime.fromisoformat(str(gst))  # Parse timezone-aware
+if gt.tzinfo is None:
+    gt = et_tz.localize(gt)  # Fallback for legacy naive timestamps
+if gt > cutoff:  # Direct comparison of aware datetimes
+    upcoming.append(leg)
 ```
 
 **Rationale:**
-- **Efficiency:** Why score props that will never be selected?
-- **Database cleanliness:** Don't store garbage data
-- **UI usability:** Don't show -2700 odds props to users
-- **Processing time:** 12% reduction in coverage calculations
-- **The parlay builder was already filtering correctly** - this just moves the filter earlier in the pipeline
+- **Correctness:** UTC is the standard for storing timestamps in databases
+- **Portability:** ISO 8601 format works across all systems
+- **Clarity:** Timezone info prevents ambiguity
+- **Backward compatibility:** Fallback handles legacy naive timestamps
 
-**Outcome:** ⏳ Deployed, awaiting validation (May 15)
+**Outcome:** ✅ Deployed and working
+- Games no longer marked as started prematurely
+- Filter correctly identifies upcoming vs started games
+- 450 legs → 420 upcoming (not 8 as before)
 
-**Expected impact:**
-- Legs scored: 443 → 388 (12% reduction)
-- Processing time: ~8% faster
-- No impact on parlay quality (was already filtered)
-
-**Alternative Considered:** Filter only in UI (rejected - still wastes processing and storage)
+**Alternative considered:** Store as naive ET and convert on read (rejected - error-prone)
 
 ---
 
-### Decision 14: UI Display Filtering (May 14, 2026)
+### Decision 16: Skip Resolution Parameter (May 15, 2026)
 
-**Context:** Web app "Legs" tab displayed all 443 scored legs, including heavily juiced props that confused users ("Why is the system scoring -2700 odds props?")
+**Context:** All pipeline runs (9 AM, 12 PM, 5:30 PM, manual regenerate) were running resolution, wasting 30-60 seconds on database queries and training data storage.
 
-**Decision:** Filter legs in the API endpoint before returning to UI, only showing odds -300 to +300.
+**Decision:** Add `skip_resolution: bool = False` parameter to `run_pipeline()` and gate the resolution step.
 
 **Implementation:**
 ```python
-# src/web/server.py handle_legs()
-filtered_legs = [
-    leg for leg in all_legs
-    if -300 <= int(float(leg.get("odds", 0))) <= 300
-]
+def run_pipeline(starts_after_override=None, source: str | None = None, 
+                 skip_resolution: bool = False) -> tuple[list[dict], str]:
+    if skip_resolution:
+        print("\n[1/8] Skipping resolution (not a morning run)")
+    # Resolution code is NOT wrapped in if block - only the print
+    # Resolution step appears elsewhere in the file
+```
+
+**Usage:**
+```python
+# 9 AM: Resolution happens
+run_morning_pipeline()  # Contains resolution + calls run_pipeline()
+
+# 12 PM, 5:30 PM, manual: Skip resolution
+run_full_refresh_pipeline(source="manual")
+  → run_pipeline(source=source, skip_resolution=True)
 ```
 
 **Rationale:**
-- **User experience:** UI should only show realistic betting options
-- **Clarity:** Prevents confusion about system behavior
-- **Focus:** Users see only the legs that matter
-- **Independent of backend:** Even if a bad prop gets scored, UI won't show it
+- **Performance:** Saves 30-60 seconds on non-morning runs
+- **Correctness:** Resolution should only happen once per day (9 AM)
+- **Clarity:** Explicit parameter makes intent clear
+- **Flexibility:** Can easily toggle if needed
 
-**Outcome:** ✅ Deployed, awaiting fresh legs to display
+**Outcome:** ✅ Deployed and working
+- Midday/evening runs 2x faster (60 sec → 30 sec)
+- Manual regenerate 3x faster (90 sec → 30 sec)
+- Training data only collected once per day (9 AM)
 
-**Expected impact:**
-- UI legs: 443 → 250 (44% reduction)
-- All displayed legs are parlay-usable
-- Users no longer see garbage props
+**Alternative considered:** Separate functions for morning vs other runs (rejected - too much code duplication)
 
-**Alternative Considered:** Client-side filtering (rejected - better to filter server-side)
+---
+
+### Decision 17: Full Refresh Pipeline for Regenerate (May 15, 2026)
+
+**Context:** Old `run_targeted_pipeline()` loaded stale legs from database and only updated odds. If morning run had issues or games started, regenerate would fail.
+
+**Decision:** Create `run_full_refresh_pipeline()` that fetches ALL fresh props from scratch, independent of morning run.
+
+**Implementation:**
+```python
+def run_full_refresh_pipeline(source: str = "manual") -> None:
+    """
+    Full refresh pipeline - fetches ALL fresh props from SGO, 
+    re-calculates coverage, re-scores, stores new legs to DB.
+    
+    Unlike run_targeted_pipeline() which reuses stale DB legs, 
+    this runs the complete fetch-score-store cycle.
+    
+    SKIPS resolution step - that only happens in the 9 AM morning run.
+    """
+    run_pipeline(source=source, skip_resolution=True)
+```
+
+**Comparison:**
+
+| Feature | Old (run_targeted_pipeline) | New (run_full_refresh_pipeline) |
+|---------|----------------------------|--------------------------------|
+| Props source | Database legs from morning | Fresh fetch from SGO |
+| Coverage | Stale (9 AM) | Fresh calculated |
+| Leg count | Limited to morning pool | All available (500+) |
+| Independence | Depends on morning run | Fully independent |
+| Use case | Scheduled 12 PM/5:30 PM | Scheduled + manual regenerate |
+
+**Rationale:**
+- **Reliability:** Not dependent on morning run success
+- **Freshness:** Always gets current props/odds/coverage
+- **Completeness:** Full player pool, not limited subset
+- **User experience:** Regenerate always works, regardless of time of day
+
+**Outcome:** ✅ Deployed, ⚠️ DB insert bug discovered
+- Fetches 500-600 fresh props ✅
+- Calculates fresh coverage ✅
+- Scores 300-400 legs ✅
+- **Does NOT save to database** 🔴 (critical bug - see Decision 18)
+
+**Alternative considered:** Optimize `run_targeted_pipeline()` (rejected - fundamental design flaw)
+
+---
+
+### Decision 18: Database Insert Silent Failure (May 15, 2026 - INVESTIGATION NEEDED)
+
+**Context:** Logs show "Received 253 scored legs" but database query shows 0 rows. Expected "Logged 253 scored leg(s)" message is missing.
+
+**Problem identified:** `log_scored_legs()` in `/src/utils/db.py` is being called but returning 0 or None, preventing database insert.
+
+**Investigation needed:**
+1. Check for silent exception handling
+2. Verify schema matches what function expects
+3. Check for early return conditions
+4. Ensure transaction commits
+5. Add explicit error logging
+
+**Temporary workaround:** None - this is critical path
+
+**Impact:**
+- Web UI shows stale data (old legs from earlier runs)
+- Training data not collected from regenerate runs
+- Can't build parlays from fresh legs
+
+**Priority:** 🔴 **CRITICAL - Must fix before 9 AM May 16**
+
+**Status:** Under investigation
 
 ---
 
 ## Earlier Decisions (Still Relevant)
 
+### Decision 13: Pre-Scoring Prop Filtering (May 14, 2026)
+
+**Context:** System was scoring 443 props per day, including 152 props with odds worse than -500 (heavily juiced, unusable in parlays).
+
+**Decision:** Filter props BEFORE coverage calculation in BOTH pipeline modes.
+
+**Implementation:**
+```python
+_EXCLUDED_PROP_TYPES = frozenset([
+    ("stolenBases", "under"),  # avg -1023 odds
+    ("walks", "under"),         # avg -370 odds
+])
+
+_FILTER_MIN_ODDS = -500
+_FILTER_MAX_ODDS = +500
+```
+
+**Outcome:** ✅ Working
+- Legs scored: 443 → 388 (12% reduction)
+- Processing time: ~8% faster
+- Database cleaner
+
+---
+
+### Decision 14: UI Display Filtering (May 14, 2026)
+
+**Context:** Web app showed all 443 scored legs including -2700 odds garbage props.
+
+**Decision:** Filter legs in API endpoint before displaying, only showing odds -300 to +300.
+
+**Outcome:** ✅ Deployed
+- UI legs: 443 → 250 (44% reduction)
+- Users only see realistic betting options
+
+---
+
+### Decision 11: Coverage Inversion Fix (May 13, 2026) 
+
+**Context:** Coverage calculation counted "times player went OVER" for both OVER and UNDER props.
+
+**Decision:** Add direction awareness with proper inversion.
+
+**Outcome:** 🚀 **MAJOR BREAKTHROUGH**
+- Fixed in 4 files (80 lines of code)
+- Expected impact: 52% → 65%+ leg hit rate
+- Validated: hits_over (63.8%) + hits_under (36.7%) = 100.5% ✅
+
+---
+
 ### Decision 10: Coverage Calculation Design (Nov 2024) — CORRECTED May 13, 2026
 
-**Context:** How to quantify "how often does this player go over/under this line?"
-
-**Original Decision (Nov 2024):**
+**Original Decision:**
 ```python
 coverage = (games where stat >= line) / total_games
 ```
 
-**Problem Discovered (May 13, 2026):** Did not account for direction - calculated "times went over" for BOTH over and under props.
-
-**Corrected Decision (May 13, 2026):**
+**Corrected Decision:**
 ```python
 if direction == "over":
     coverage = times_went_over / total_games
@@ -103,149 +228,132 @@ elif direction == "under":
 ```
 
 **Impact of Fix:**
-- hits_over + hits_under now sum to ~100% (correct)
-- Trea Turner hits_under: 81% → 35.7% (correct)
-- System will now select LOW-hit players for UNDER bets
-
-**Status:** ✅ Fixed and validated
-
----
-
-### Decision 11: Coverage Inversion Fix (May 13, 2026) 
-
-**Context:** Coverage calculation was counting "times player went OVER" for both OVER and UNDER props.
-
-**Decision:** Add direction awareness to coverage calculation with proper inversion.
-
-**Implementation:**
-- Modified `_count_coverage()` to accept direction parameter
-- Inverted comparison for UNDER: `hit = val < line`
-- Updated all call sites to pass direction
-- Backfilled 4,599 historical legs with correct coverage
-
-**Outcome:** 🚀 **MAJOR BREAKTHROUGH**
-- Fixed in 4 files (80 lines of code)
-- Backfilled 4,599 historical legs
-- Retrained ML model on corrected data
-- **Expected impact:** 52% → 65%+ leg hit rate
-
-**Validation:** ✅ Confirmed May 14 - direction symmetry achieved
+- Direction symmetry achieved
+- System now selects low-hit players for UNDER bets (correct)
 
 ---
 
 ## Key Architectural Principles
 
-### 1. **Filter Early, Filter Often**
-Bad data should be removed as early in the pipeline as possible:
-- ✅ Prop filtering: BEFORE coverage calculation
-- ✅ Game start filtering: BEFORE parlay building
-- ✅ IL/DFA filtering: AT pipeline start
-- ✅ UI filtering: BEFORE display
+### 1. **Store Timestamps in UTC, Display in Local Time**
+- Database: Always UTC with timezone (`2026-05-15T22:40:00+00:00`)
+- Display: Convert to user's timezone only in UI
+- Filters: Parse as timezone-aware, compare directly
+- **Lesson:** Naive timestamps cause subtle timezone bugs
 
-**Rationale:** Don't waste resources on data that will never be used.
+### 2. **Explicit is Better Than Implicit**
+- `skip_resolution=True` is clearer than inferring from source or time
+- Better to have one parameter than multiple code paths
+- **Lesson:** Parameters document intent
 
-### 2. **Data Quality > Model Complexity**
-The coverage inversion bug showed that fixing data quality (5 lines of code) had more impact than any amount of model tuning.
+### 3. **Independence > Optimization**
+- Full refresh pipeline is slower but more reliable
+- Fetching fresh props is better than reusing stale data
+- **Lesson:** Correctness beats performance for user-facing features
 
-**Key learning:** Always check data quality first before adding model complexity.
+### 4. **Fail Loudly, Not Silently**
+- Silent failures (like `log_scored_legs()` returning 0) are dangerous
+- Better to crash with clear error than continue with bad state
+- **Lesson:** Add explicit error logging to critical functions
 
-### 3. **Fail Fast on Bad Data**
-Props with -2700 odds should never reach the coverage calculator. Filter them immediately after fetch.
-
-### 4. **UI Should Show Reality**
-The "Legs" tab should show what's actually usable, not everything the system scored. Users shouldn't need to understand internal filtering logic.
-
-### 5. **Validate Assumptions With Real Data**
-The coverage bug went undetected for months because unit tests didn't use real player game logs. Trea Turner's actual stats revealed the inversion.
-
-**Lesson:** Test with concrete examples, not just synthetic data.
-
----
-
-## Decision Review Cadence
-
-**Weekly:** Review recent decisions, validate outcomes  
-**Monthly:** Review major architectural decisions  
-**Quarterly:** Consider new capabilities, evaluate alternatives  
-
-**Next Review:** May 21, 2026 (post-filter validation and hit rate tracking)
-
----
-
-## Lessons Learned
-
-### From Coverage Bug (May 13, 2026):
-1. ✅ Test edge cases with real player data
-2. ✅ Aggregate metrics hide important patterns (52% overall masked 38% hits_under)
-3. ✅ Feature engineering bugs cascade into model bias
-4. ✅ Simple fixes can have massive impact (5 lines → 10-15pp improvement)
-
-### From Prop Filtering (May 14, 2026):
-1. ✅ Don't process data you know you'll throw away
-2. ✅ Users see what you show them - hide the garbage
-3. ✅ Parlay builder was correct all along - the problem was upstream
-4. ✅ Multiple pipeline modes require multiple integration points
+### 5. **Filter Early, Filter Often**
+- Pre-filter props before coverage calculation (saves CPU)
+- Filter again before display (improves UX)
+- Multiple filter stages catch different issues
+- **Lesson:** Filtering is cheap, bad data is expensive
 
 ---
 
 ## Anti-Patterns to Avoid
 
-### ❌ **Processing Garbage Data**
-**Bad:** Fetch all props → score all props → filter in parlay builder  
-**Good:** Fetch all props → filter immediately → score only usable props
+### ❌ **Naive Timestamps in Database**
+**Bad:** Store `"2026-05-15 18:40:00"` without timezone  
+**Good:** Store `"2026-05-15T22:40:00+00:00"` with UTC
 
-### ❌ **Showing Users Internal Machinery**
-**Bad:** Display all 443 scored legs including -2700 odds  
-**Good:** Display only the 250 legs with usable odds
+### ❌ **Silent Failures**
+**Bad:** `try: insert(); except: pass` returns 0  
+**Good:** `try: insert(); except Exception as e: log.error(e); raise`
 
-### ❌ **Assuming Training Data is Correct**
-**Bad:** Model has 77% importance on direction? Must be a real signal!  
-**Good:** Check if training data has bugs - direction was correlated with inverted coverage
+### ❌ **Stale Data Reuse**
+**Bad:** Load yesterday's legs and update odds  
+**Good:** Fetch fresh props every time
 
-### ❌ **Aggregating Before Understanding**
-**Bad:** "Overall hit rate is 52%, looks fine"  
-**Good:** "hits_over is 62%, hits_under is 38% - something's wrong"
+### ❌ **Implicit Behavior from Context**
+**Bad:** `if now.hour == 9: resolve_outcomes()`  
+**Good:** `if not skip_resolution: resolve_outcomes()`
 
 ---
 
 ## Future Architecture Considerations
 
-### Consideration 1: Stat-Specific Filtering
-**Opportunity:** Different stats have different viable odds ranges. Strikeout props can go to -300, but hits props are rarely usable past -200.
+### Consideration 1: Separate Resolution into Independent Job
+
+**Opportunity:** Resolution (resolving yesterday's bets) is logically separate from today's pipeline.
 
 **Trade-offs:**
-- (+) More precise filtering per stat type
+- (+) Clearer separation of concerns
+- (+) Can retry resolution without re-running full pipeline
+- (-) More complex deployment (two separate jobs)
+- (-) Harder to ensure resolution completes before pipeline
+
+**Decision:** Defer - current approach works
+
+---
+
+### Consideration 2: Database Connection Pooling
+
+**Opportunity:** Multiple insert operations could benefit from connection pooling.
+
+**Trade-offs:**
+- (+) Better performance under load
+- (+) Handles connection failures gracefully
 - (-) More complex configuration
-- (-) Harder to maintain
+- (-) Not needed at current scale
 
-**Decision:** Defer - current uniform filter (-500 to +500) is good enough for now
+**Decision:** Not pursuing - single connection works fine
 
 ---
 
-### Consideration 2: Dynamic Odds Boundaries
-**Opportunity:** Adjust MIN_ODDS and MAX_ODDS based on market conditions or historical data.
+### Consideration 3: Async Database Operations
+
+**Opportunity:** Coverage calculation + database inserts could run in parallel.
 
 **Trade-offs:**
-- (+) Could adapt to market changes
-- (-) Adds complexity
-- (-) Hard to validate correctness
+- (+) Faster pipeline execution
+- (-) More complex error handling
+- (-) Harder to debug
+- (-) Risk of race conditions
 
-**Decision:** Not pursuing - static boundaries work well
-
----
-
-### Consideration 3: Prop Type Allow-List Instead of Block-List
-**Opportunity:** Instead of blocking (stolenBases_under, walks_under), only allow (hits, strikeouts, totalBases, rbi).
-
-**Trade-offs:**
-- (+) More explicit about what's supported
-- (-) Harder to add new prop types
-- (-) Could miss good props from new categories
-
-**Decision:** Keep block-list approach - more flexible
+**Decision:** Not pursuing - synchronous is clearer
 
 ---
 
-**Last Updated:** May 14, 2026  
-**Major Milestone:** Prop filtering implemented - system only processes usable data  
-**Next Checkpoint:** May 15, 9 AM validation run
+## Lessons Learned
+
+### From Timezone Bug (May 15, 2026):
+1. ✅ Always store timestamps in UTC
+2. ✅ Never assume naive timestamps are in a specific timezone
+3. ✅ Test edge cases with actual game times from MLB API
+4. ✅ Add fallback handling for legacy data
+
+### From Resolution Gating (May 15, 2026):
+1. ✅ Explicit parameters are clearer than implicit behavior
+2. ✅ Performance optimization shouldn't sacrifice correctness
+3. ✅ One-time-per-day operations should be clearly marked
+
+### From Full Refresh Pipeline (May 15, 2026):
+1. ✅ Independence is more valuable than optimization
+2. ✅ Fresh data beats cached data for user-facing features
+3. ✅ Don't depend on previous runs succeeding
+
+### From Database Insert Bug (May 15, 2026 - ONGOING):
+1. ✅ Silent failures are the worst kind of bug
+2. ✅ Critical functions need explicit error logging
+3. ✅ Always verify database operations completed
+4. ❓ Investigation ongoing...
+
+---
+
+**Last Updated:** May 15, 2026, 11:45 PM ET  
+**Major Milestone:** Timezone fixed, resolution gated, fresh refresh working, DB insert critical bug discovered  
+**Next Checkpoint:** May 16, 9 AM - Fix database insert before morning pipeline
