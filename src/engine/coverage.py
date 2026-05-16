@@ -240,9 +240,17 @@ def calculate_coverage(
     )
 
     if is_pitcher:
-        return _pitcher_coverage(player_id, prop_type, line, season, direction)
+        result = _pitcher_coverage(player_id, prop_type, line, season, direction)
     else:
-        return _hitter_coverage(player_id, prop_type, line, opposing_pitcher_id, season, direction)
+        result = _hitter_coverage(player_id, prop_type, line, opposing_pitcher_id, season, direction)
+
+    # Warn on suspiciously high coverage for risky props
+    if result and prop_type == "strikeouts":
+        cov = result.get("coverage_overall", 0) or 0
+        if cov > 90 and direction == "over" and line > 0.5 and not is_pitcher:
+            print(f"  [coverage WARNING] player={player_id} SO {direction} {line} = {cov:.1f}% — hitter with >0.5 line, verify data")
+
+    return result
 
 
 def _hitter_coverage(

@@ -24,6 +24,7 @@ import statsapi
 from src.apis.mlb_stats import (
     get_schedule,
     get_batter_game_log,
+    get_pitcher_game_log,
     get_player_info,
     get_transactions,
     is_il_placement,
@@ -758,6 +759,68 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
             avg = sum(stat_scores) / len(stat_scores)
             print(f"[main]   {stat}: {len(stat_scores)} legs, avg score {avg:.1f}")
 
+    # ── Step 7.5: Filter invalid strikeout lines + reliever patterns ─────────
+    print("\n[7.5/8] Filtering strikeouts: invalid lines + reliever patterns...")
+
+    def _valid_strikeout_line(leg: dict) -> bool:
+        if leg.get("stat") != "strikeouts":
+            return True
+        position = leg.get("position", "")
+        is_pitcher = position in _PITCHER_POSITIONS
+        line = leg.get("best_line")
+        if is_pitcher:
+            return line is not None and float(line) >= 3.5
+        else:
+            # Hitters: ONLY 0.5 line allowed (>0.5 is too risky)
+            return line is not None and float(line) == 0.5
+
+    def _has_starter_consistency(leg: dict) -> bool:
+        """Block pitchers with reliever-level IP history (<4 IP in 7+ of last 10 games)."""
+        if leg.get("stat") != "strikeouts":
+            return True
+        position = leg.get("position", "")
+        if position not in _PITCHER_POSITIONS:
+            return True
+        player_id = leg.get("player_id")
+        if not player_id:
+            return False
+        try:
+            game_logs = get_pitcher_game_log(int(player_id), season)
+            if not game_logs or len(game_logs) < 5:
+                return False  # Not enough data — be conservative and block
+            recent = game_logs[-10:]
+            short_outings = sum(
+                1 for g in recent
+                if float(g.get("stat", {}).get("inningsPitched", "0") or "0") < 4.0
+            )
+            return short_outings < 7  # Block if 7+ of last 10 were <4 IP
+        except Exception as e:
+            print(f"  [ip_check] Failed for {leg.get('player_name')}: {e}")
+            return True  # Allow on data error
+
+    def _valid_strikeout_leg(leg: dict) -> bool:
+        return _valid_strikeout_line(leg) and _has_starter_consistency(leg)
+
+    all_so_legs = [l for l in qualifying_legs if l.get("stat") == "strikeouts"]
+    before_so_filter = len(qualifying_legs)
+    qualifying_legs = [l for l in qualifying_legs if _valid_strikeout_leg(l)]
+    so_removed = before_so_filter - len(qualifying_legs)
+    if so_removed > 0:
+        invalid_lines = [l for l in all_so_legs if not _valid_strikeout_line(l)]
+        relievers = [l for l in all_so_legs if _valid_strikeout_line(l) and not _has_starter_consistency(l)]
+        print(f"  Removed {so_removed} strikeout prop(s)")
+        if invalid_lines:
+            print(f"    {len(invalid_lines)} invalid lines (hitters >0.5 or pitchers <3.5):")
+            for leg in invalid_lines[:3]:
+                print(f"      {leg['player_name']} ({leg.get('position', 'UNK')}) SO {leg.get('direction')} {leg.get('best_line')}")
+        if relievers:
+            print(f"    {len(relievers)} reliever patterns detected (<4 IP in 7+ of last 10):")
+            for leg in relievers[:3]:
+                print(f"      {leg['player_name']} ({leg.get('position', 'UNK')}) SO {leg.get('direction')} {leg.get('best_line')}")
+    else:
+        print(f"  No invalid strikeout props found")
+    print(f"  {len(qualifying_legs)} qualifying leg(s) remaining")
+
     # ── Step 8: Build Hybrid Parlays ──────────────────────────────────────────
     tier_info  = _tier_params(len(schedule))
     tier_label = f"Tier {tier_info['tier']}" if tier_info else "Tier 4 (thin slate)"
@@ -769,25 +832,6 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
         team_to_blocked=team_to_blocked,
     )
     print(f"  Built {len(parlays)} parlay(s)")
-
-    # Filter invalid strikeout lines before saving to DB
-    # Hitter strikeouts: only line 0.5 allowed
-    # Pitcher strikeouts: only line >= 3.5 allowed
-    def _valid_strikeout_line(leg: dict) -> bool:
-        if leg.get("stat") != "strikeouts":
-            return True
-        position = leg.get("position", "")
-        is_pitcher = position in _PITCHER_POSITIONS
-        line = leg.get("best_line")
-        if is_pitcher:
-            return line is not None and float(line) >= 3.5
-        else:
-            return line is not None and float(line) == 0.5
-
-    before_so_filter = len(qualifying_legs)
-    qualifying_legs = [l for l in qualifying_legs if _valid_strikeout_line(l)]
-    if before_so_filter != len(qualifying_legs):
-        print(f"  [so_filter] removed {before_so_filter - len(qualifying_legs)} invalid strikeout line(s)")
 
     # Log all scored legs regardless of parlay outcome
     parlay_odd_ids = {leg["odd_id"] for p in parlays for leg in p.get("legs", [])}
