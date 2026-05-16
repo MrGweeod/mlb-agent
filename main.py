@@ -583,6 +583,29 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
 
     all_sgo_props = _filter_useless_props(all_sgo_props)
 
+    # ── Step 3.5: Pre-filter invalid strikeout lines (before coverage) ────────
+    # Use line value to classify hitter vs pitcher SO props — avoids position
+    # ambiguity for two-way players (e.g. Ohtani whose position is "TWP").
+    #   Lines < 3.0  → hitter prop: only 0.5 allowed
+    #   Lines >= 3.5 → pitcher prop: allowed here (reliever IP check at Step 7.5)
+    _before_so_prefilter = len(all_sgo_props)
+    def _valid_so_line_prefilter(prop: dict) -> bool:
+        if prop.get("stat") != "strikeouts":
+            return True
+        line = prop.get("standard_line")
+        if line is None:
+            return False
+        line_f = float(line)
+        if line_f < 3.0:
+            return line_f == 0.5
+        return line_f >= 3.5
+
+    all_sgo_props = [p for p in all_sgo_props if _valid_so_line_prefilter(p)]
+    _so_prefilter_removed = _before_so_prefilter - len(all_sgo_props)
+    if _so_prefilter_removed:
+        print(f"\n[3.5/8] Pre-filtered {_so_prefilter_removed} invalid strikeout line(s) before coverage")
+        print(f"  {len(all_sgo_props)} props remaining")
+
     # ── Step 4: Coverage Gate ─────────────────────────────────────────────────
     print(f"\n[4/8] Computing coverage (min {MIN_COVERAGE_PCT}%)...")
     qualifying_legs = _find_qualifying_legs(
