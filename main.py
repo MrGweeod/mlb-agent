@@ -817,7 +817,27 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
 
     # ── Step 9: Generate and save recommendations ─────────────────────────────
     print("\n[9/9] Generating parlay recommendations...")
-    recommendations = generate_recommendations(qualifying_legs, run_date=today)
+    # Build recommendations by enriching the already-built parlays.
+    # NOTE: generate_recommendations() was calling build_hybrid_parlays() a
+    # second time on the post-strikeout-filter qualifying_legs, which could
+    # return 0 results if the filter shrank the pool below the minimum needed
+    # to form valid 4-leg parlays in the +1000–+1400 odds window.
+    recommendations = []
+    for p in parlays:
+        legs = p["legs"]
+        combined_odds = int(p["parlay_odds"].lstrip("+"))
+        win_prob = 1.0
+        for leg in legs:
+            score = leg.get("composite_score") or 50.0
+            win_prob *= score / 100.0
+        win_prob_pct = round(win_prob * 100, 2)
+        edge_pct = round(win_prob_pct * (combined_odds / 100) - 100, 2)
+        recommendations.append({
+            "legs":            legs,
+            "combined_odds":   combined_odds,
+            "win_probability": win_prob_pct,
+            "edge_pct":        edge_pct,
+        })
 
     run_time = datetime.now(timezone.utc)
     for rank, rec in enumerate(recommendations, start=1):
@@ -844,6 +864,7 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
 
     # Dual-write to v2 normalized schema
     if recommendations:
+        print(f"  [debug] About to save {len(recommendations)} recommendation(s) to v2")
         try:
             if source:
                 _source = source
