@@ -164,6 +164,20 @@ def build_hybrid_parlays(
         l for l in all_legs
         if l.get("best_odds") and (l.get("composite_score") or 0) >= MIN_COV
     ]
+
+    # DEBUG: Diagnose best_odds filter issue
+    print(f"  [parlay_builder DEBUG] all_legs count: {len(all_legs)}")
+    print(f"  [parlay_builder DEBUG] legs with best_odds field: {len([l for l in all_legs if 'best_odds' in l])}")
+    print(f"  [parlay_builder DEBUG] legs with truthy best_odds: {len([l for l in all_legs if l.get('best_odds')])}")
+    print(f"  [parlay_builder DEBUG] legs with score >= {MIN_COV}: {len([l for l in all_legs if (l.get('composite_score') or 0) >= MIN_COV])}")
+    if all_legs:
+        sample = all_legs[0]
+        print(f"  [parlay_builder DEBUG] sample leg keys: {list(sample.keys())[:10]}")  # First 10 keys
+        print(f"  [parlay_builder DEBUG] sample best_odds value: {repr(sample.get('best_odds'))}")
+        print(f"  [parlay_builder DEBUG] sample odds value: {repr(sample.get('odds'))}")
+        print(f"  [parlay_builder DEBUG] sample composite_score: {sample.get('composite_score')}")
+    print(f"  [parlay_builder DEBUG] eligible count after BOTH filters: {len(eligible)}")
+
     if not eligible:
         return []
 
