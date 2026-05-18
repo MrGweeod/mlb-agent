@@ -32,7 +32,6 @@ from src.apis.mlb_stats import (
 from src.apis.pitcher_stats import get_pitcher_ranks
 from src.apis.sportsgameodds import get_todays_games, get_player_props
 from src.apis.team_stats import get_team_offensive_ranks
-from src.engine.claude_agent import analyze_parlays
 from src.engine.coverage import calculate_coverage, PROP_STAT_MAP
 from src.engine.parlay_builder import build_hybrid_parlays, _tier_params
 from src.pipelines.enrich_legs import enrich_legs
@@ -533,9 +532,9 @@ def generate_recommendations(
 
 # ── Public pipeline function ──────────────────────────────────────────────────
 
-def run_pipeline(starts_after_override=None, source: str | None = None, skip_resolution: bool = False) -> tuple[list[dict], str]:
+def run_pipeline(starts_after_override=None, source: str | None = None, skip_resolution: bool = False) -> list[dict]:
     """
-    Execute the full MLB parlay pipeline and return (parlays, analysis).
+    Execute the full MLB parlay pipeline and return parlays.
 
     Called by the web server scheduler in a background thread. All console
     output is visible in Railway logs.
@@ -546,9 +545,8 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
             skip games starting within the next N hours and minimise API quota).
 
     Returns:
-        (parlays, analysis) — parlays is a list of hybrid parlay dicts;
-        analysis is Claude's plain-English summary. Both are empty when no
-        qualifying output is produced.
+        parlays — list of hybrid parlay dicts; empty when no qualifying output
+        is produced.
     """
     today  = str(date.today())
     season = date.today().year
@@ -989,16 +987,7 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
     # Persist recommendations for calibration tracking
     log_recommendations(parlays)
 
-    # LLM plain-English analysis
-    print("\nSending to Claude for analysis...")
-    try:
-        analysis = analyze_parlays(parlays)
-        print(analysis)
-    except Exception as e:
-        analysis = f"LLM analysis failed: {e}"
-        print(f"  [claude_agent] error: {e}")
-
-    return parlays, analysis
+    return parlays
 
 
 def run_morning_pipeline(source: str | None = None) -> None:
@@ -1445,8 +1434,6 @@ def run():
 #   3. Verify DB rows:         SELECT * FROM mlb_parlay_recommendations ORDER BY rank;
 #   4. Hit the API:            GET http://localhost:PORT/api/recommendations
 #      Should return {"recommendations": [...]} with hydrated leg details.
-#   5. Test on-demand analysis: POST http://localhost:PORT/api/analyze-recommendation
-#      Body: {"recommendation_id": <id from step 3>}
 
 
 if __name__ == "__main__":

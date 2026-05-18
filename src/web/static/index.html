@@ -486,21 +486,6 @@
   }
   .leg-count-hint.ready { color: var(--green); }
 
-  #submit-btn {
-    width: 100%;
-    padding: 13px;
-    background: var(--accent);
-    border: none;
-    border-radius: 8px;
-    color: #fff;
-    font-size: 14px;
-    font-weight: 700;
-    cursor: pointer;
-    transition: opacity 0.15s;
-  }
-  #submit-btn:disabled { opacity: 0.35; cursor: not-allowed; }
-  #submit-btn:not(:disabled):active { opacity: 0.8; }
-
   #clear-btn {
     width: 100%;
     margin-top: 8px;
@@ -1044,7 +1029,6 @@
           <div class="odds-value" id="combined-odds">—</div>
         </div>
         <div class="leg-count-hint" id="leg-count-hint">Select 4–8 legs</div>
-        <button id="submit-btn" disabled>Analyze Parlay</button>
         <button id="clear-btn">Clear all</button>
       </div>
     </div>
@@ -1494,12 +1478,9 @@ function updatePanel() {
     hint.textContent = `${count}/8 legs — need ${4 - count} more`;
     hint.className = 'leg-count-hint';
   } else {
-    hint.textContent = `${count}/8 legs — ready to analyze`;
+    hint.textContent = `${count}/8 legs selected`;
     hint.className = 'leg-count-hint ready';
   }
-
-  // Submit button
-  document.getElementById('submit-btn').disabled = count < 4 || count > 8;
 }
 
 document.getElementById('panel-close-btn').addEventListener('click', () => {
@@ -1517,67 +1498,6 @@ document.getElementById('clear-btn').addEventListener('click', () => {
   updatePanel();
   render();
 });
-
-// ── Submit / Analyze ─────────────────────────────────────────────────────────
-document.getElementById('submit-btn').addEventListener('click', submitParlay);
-
-async function submitParlay() {
-  const selected = getSelectedLegs();
-  if (selected.length < 4 || selected.length > 8) return;
-
-  const btn = document.getElementById('submit-btn');
-  const originalText = btn.textContent;
-  btn.textContent = 'Analyzing…';
-  btn.disabled = true;
-
-  const combinedOdds = calcCombinedOdds(selected);
-
-  try {
-    const response = await fetch('/api/analyze', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${password}`,
-      },
-      body: JSON.stringify({
-        legs: selected.map(leg => ({
-          player_name: leg.player_name,
-          stat:        leg.stat,
-          line:        leg.line,
-          direction:   leg.direction,
-          odds:        leg.odds,
-          coverage_pct: leg.coverage_pct,
-          team:        leg.team,
-          opponent:    leg.opponent,
-          position:    leg.position,
-          ev_per_unit: leg.ev_per_unit,
-          trend_score: leg.trend_score,
-          opponent_adjustment: leg.opponent_adjustment,
-        })),
-        combined_odds: fmtAmerican(combinedOdds),
-      }),
-    });
-
-    const data = await response.json();
-
-    if (data.error) {
-      showToast(`Error: ${data.error}`);
-      return;
-    }
-
-    // Show analysis in existing modal (repurposed from prompt copy flow)
-    document.querySelector('.modal h3').textContent = 'Claude Analysis';
-    document.getElementById('prompt-preview').textContent = data.analysis;
-    document.getElementById('modal-copy-btn').textContent = 'Copy Analysis';
-    document.getElementById('overlay').classList.add('visible');
-
-  } catch (err) {
-    showToast(`Failed to analyze: ${err.message}`);
-  } finally {
-    btn.textContent = originalText;
-    btn.disabled = selected.length < 4 || selected.length > 8;
-  }
-}
 
 document.getElementById('modal-cancel-btn').addEventListener('click', () => {
   document.getElementById('overlay').classList.remove('visible');
@@ -2464,49 +2384,13 @@ function renderRecommendations(recs) {
           </div>
         </div>
         <div class="rec-legs">${legsHtml}</div>
-        <div class="rec-analysis" id="rec-analysis-${rec.id}">
-          <div class="rec-analysis-label">Analysis</div>
-          <div id="rec-analysis-text-${rec.id}"></div>
-        </div>
         <div class="rec-actions">
           <button class="rec-btn rec-btn-secondary" onclick="viewLegsInBuilder(${rec.id})">
             View in Builder
           </button>
-          <button class="rec-btn rec-btn-primary" onclick="analyzeRecommendation(${rec.id})">
-            Analyze Parlay
-          </button>
         </div>
       </div>`;
   }).join('');
-}
-
-async function analyzeRecommendation(recId) {
-  const analysisDiv  = document.getElementById(`rec-analysis-${recId}`);
-  const analysisText = document.getElementById(`rec-analysis-text-${recId}`);
-  analysisDiv.style.display = 'block';
-  analysisText.innerHTML = '<span style="color:var(--muted)">Generating analysis…</span>';
-
-  try {
-    const parlay = _currentParlays.find(p => p.id === recId);
-    const res = await fetch('/api/analyze-recommendation', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${password}`,
-      },
-      body: JSON.stringify(parlay ? { parlay } : { recommendation_id: recId }),
-    });
-    const data = await res.json();
-
-    if (data.analysis) {
-      analysisText.textContent = data.analysis;
-    } else {
-      analysisText.innerHTML = '<span style="color:var(--red)">Failed to generate analysis.</span>';
-    }
-  } catch (err) {
-    console.error('analyzeRecommendation error:', err);
-    analysisText.innerHTML = '<span style="color:var(--red)">Error: ' + esc(err.message) + '</span>';
-  }
 }
 
 function viewLegsInBuilder(recId) {
