@@ -844,6 +844,12 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
         print(f"  No invalid strikeout props found")
     print(f"  {len(qualifying_legs)} qualifying leg(s) remaining")
 
+    # Bridge field names for parlay_builder compatibility
+    qualifying_legs = [
+        {**leg, "best_odds": leg.get("odds"), "best_line": leg.get("line")}
+        for leg in qualifying_legs
+    ]
+
     # ── Step 8: Build Hybrid Parlays ──────────────────────────────────────────
     tier_info  = _tier_params(len(schedule))
     tier_label = f"Tier {tier_info['tier']}" if tier_info else "Tier 4 (thin slate)"
