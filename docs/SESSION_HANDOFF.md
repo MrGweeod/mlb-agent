@@ -1,536 +1,621 @@
-# MLB Parlay Agent — Session Handoff
-**Last Updated:** May 16, 2026 (End of Day - Double-Build Bug Diagnosed, Fixes Ready But Not Deployed)
+# MLB Parlay Agent 🔥⚾
 
-## Current Status
-🔴 **CRITICAL: Fixes Committed Locally But Not Pushed to Production**
-✅ **Root Cause Identified - Double build_hybrid_parlays() Call**
-✅ **Strikeout Filter Logic Implemented**
-✅ **Reliever Consistency Check Added**
-⏳ **Next Milestone:** Push commits to GitHub → Railway auto-deploy → Validate parlays saving to database
+**Intelligent MLB player prop parlay builder using statistical coverage analysis**
 
----
+[![Status](https://img.shields.io/badge/status-operational-brightgreen)]()
+[![Python](https://img.shields.io/badge/python-3.11+-blue)]()
+[![License](https://img.shields.io/badge/license-MIT-green)]()
 
-## What Happened on May 16, 2026
-
-### **Morning 9 AM Pipeline Run**
-
-**Observed behavior:**
-- Railway logs showed: "Built 5 parlays" with Ohtani SO over 1.5, Teng SO under 3.5
-- Database query showed: **0 rows** in `mlb_parlay_recommendations_v2` for May 16
-- Web app displayed: 0 parlay recommendations
-
-**Initial investigation focus:** Database insert bug (assumed `save_parlay_recommendations_v2()` was failing)
+> **Current Status (May 18, 2026):** ✅ Operational - Generating 4-5 parlays daily at +1000-1400 odds
 
 ---
 
-## Root Cause Discovery
+## What It Does
 
-### **The Double-Build Bug**
+The MLB Parlay Agent builds **4-leg MLB player prop parlays** by:
 
-**Problem identified:** The pipeline was calling `build_hybrid_parlays()` TWICE with different inputs:
+1. **Fetching player props** from SportsGameOdds (hits, strikeouts, walks)
+2. **Calculating coverage** — "How often does this player hit this line?" (direction-aware)
+3. **Scoring legs** based on coverage + opponent pitcher quality + trends
+4. **Building parlays** that combine high-probability legs within target odds (+1000-1400)
+5. **Refreshing 3x daily** (9 AM, 12 PM, 5:30 PM ET) to capture odds movement
 
-```python
-# Line 766: First build (with UNFILTERED qualifying_legs)
-parlays = build_hybrid_parlays(qualifying_legs, num_games=len(schedule), ...)
-# Result: 5 parlays built successfully ✅
-
-# Lines 787-790: SO filter runs AFTER first build
-qualifying_legs = [l for l in qualifying_legs if _valid_strikeout_line(l)]
-# Result: Ohtani SO 1.5, Teng SO 3.5 removed from qualifying_legs
-
-# Line 820: Second build (inside generate_recommendations() with FILTERED legs)
-recommendations = generate_recommendations(qualifying_legs, run_date=today)
-    └─> calls build_hybrid_parlays(qualifying_legs, top_n=50)
-# Result: 0 parlays built (best anchor legs were filtered out) ❌
-
-# Line 859: Save the empty list from second build
-save_parlay_recommendations_v2(recommendations, today, source=source)
-# Result: 0 parlays saved to database ❌
+**Example Output:**
 ```
-
-**Key insight from 9 AM logs:**
+Parlay 1: +1398 | 4 legs | avg coverage 77.1%
+  - Walbert Ureña (LAA) strikeouts u4.5 @ -125 | 71.4% coverage
+  - Freddy Fermin (SD) hits u0.5 @ +110 | 74.3% coverage
+  - Shane McClanahan (TB) strikeouts u5.5 @ -115 | 75.0% coverage
+  - Bo Naylor (CLE) walks o0.5 @ +130 | 87.9% coverage
 ```
-13:02:38 [parlay_builder] Built 5 parlays (first build)
-13:02:38 Built 5 parlay(s) (displayed to console)
-13:02:39 [parlay_builder] ⚠ 0 parlays built from 50 pool legs (second build)
-13:02:39 No recommendations generated
-```
-
-The logs showed TWO separate build attempts - first succeeded, second failed, second one's result was saved.
 
 ---
 
-## Fixes Implemented (Locally, Not Yet Deployed)
+## Quick Start
 
-### **Fix 1: Replace generate_recommendations() with Inline Conversion**
+### **Prerequisites**
+- Python 3.11+
+- PostgreSQL database (Supabase recommended)
+- SportsGameOdds API key (free tier: 100K objects/month)
 
-**Commit:** `f59bb40` (local only, not pushed)
+### **Installation**
 
-**Changes:** Lines 892-907 in `main.py` now convert the already-built `parlays` directly:
-
-```python
-# Instead of calling generate_recommendations() which rebuilds:
-recommendations = []
-for p in parlays:  # Reuse parlays from line 852
-    legs = p["legs"]
-    combined_odds = int(p["parlay_odds"].lstrip("+"))
-    
-    # Calculate win probability from composite scores
-    win_prob = 1.0
-    for leg in legs:
-        score = leg.get("composite_score") or 50.0
-        win_prob *= (score / 100.0)
-    
-    win_prob_pct = round(win_prob * 100, 2)
-    edge_pct = round(win_prob_pct * (combined_odds / 100) - 100, 2)
-    
-    recommendations.append({
-        "legs": legs,
-        "combined_odds": combined_odds,
-        "win_probability": win_prob_pct,
-        "edge_pct": edge_pct,
-    })
-```
-
-**Impact:** Eliminates second build attempt, uses parlays from first build.
-
----
-
-### **Fix 2: Strikeout Line Pre-Filter**
-
-**Commit:** `21839d5` (local only, not pushed)
-
-**Changes:** Added Step 3.5 pre-filter in `main.py` BEFORE coverage calculation:
-
-```python
-def _valid_so_line_prefilter(prop: dict) -> bool:
-    """Block invalid strikeout lines BEFORE coverage calculation.
-    
-    Rules:
-    - Hitter SO props: ONLY line 0.5 allowed (betting hitters to K multiple times is too risky)
-    - Pitcher SO props: Minimum line 3.5 (lines <3.5 indicate short outing/reliever)
-    """
-    if prop.get("stat") != "strikeouts":
-        return True
-    
-    line = prop.get("standard_line")
-    if line is None:
-        return False
-    
-    line_f = float(line)
-    
-    # Classify by line value (not position - avoids TWP bug)
-    if line_f < 3.0:
-        return line_f == 0.5  # Hitter props: ONLY 0.5
-    return line_f >= 3.5       # Pitcher props: minimum 3.5
-```
-
-**Impact:** 
-- Blocks Ohtani SO over 1.5 (TWP position bug - treated as pitcher prop)
-- Blocks Cole Young SO over 0.5 (pitcher with low line)
-- Allows hitter SO over/under 0.5 (historically worked fine)
-
----
-
-### **Fix 3: Reliever Consistency Check**
-
-**Commit:** `402a5b9` (local only, not pushed)
-
-**Changes:** Added Step 7.5 filter for pitcher IP consistency:
-
-```python
-def _has_starter_consistency(leg: dict) -> bool:
-    """Block relievers getting spot starts.
-    
-    Check: In last 10 games, how many times did pitcher record <4.0 IP?
-    If 7+ short outings → likely a reliever, block the prop.
-    """
-    player_id = leg.get("player_id")
-    if not player_id:
-        return True
-    
-    game_logs = get_pitcher_game_log(int(player_id), season=2026)
-    recent = game_logs[-10:] if len(game_logs) >= 10 else game_logs
-    
-    short_outings = sum(1 for g in recent if g.get("IP", 9.0) < 4.0)
-    return short_outings < 7  # Block if 7+ short outings in last 10
-```
-
-**Impact:**
-- Blocked Eduardo Rodriguez SO under 4.5 (7 of 10 recent games <4 IP)
-- Blocked Kai-Wei Teng SO under 3.5 (reliever pattern)
-- Blocked Connor Prielipp SO over 4.5 (inconsistent starter)
-
----
-
-## Why Parlays Are Still Not Building (Even With Fixes)
-
-### **The Anchor Leg Problem**
-
-**Morning 9 AM run had:**
-- Ohtani SO over 1.5: 100% coverage, +123 odds (ANCHOR LEG)
-- Teng SO under 3.5: 100% coverage, +120 odds (ANCHOR LEG)
-- Rodriguez SO under 5.5: 100% coverage (ANCHOR LEG)
-
-**These were the foundation of every parlay** - perfect historical records made them easy to combine into +1000 parlays.
-
-**After filters deployed:**
-- Removed all three anchor legs (correctly - they were misleading)
-- Remaining legs: 60-90% coverage, mostly negative odds
-- Branch-and-Bound search: "⚠ 0 parlays built from 50 pool legs — check odds range (+1000–+1400)"
-
-**Latest regenerate logs (5:00 PM):**
-```
-[filter_legs] Kept 61 overs + 245 unders = 306 total eligible
-[parlay_builder] 306 eligible legs → top 50 scored (Tier 1)
-[parlay_builder] ⚠ 0 parlays built from 50 pool legs
-```
-
-**Analysis:** The 4:1 under/over ratio suggests most remaining legs are heavy favorites (negative odds). Can't combine 4 heavy favorites to reach +1000 minimum.
-
----
-
-## What Needs to Happen Next
-
-### **IMMEDIATE: Push Local Commits to GitHub**
-
-**Status:** Three commits are ready locally but not pushed:
-- `f59bb40` - Replace generate_recommendations() with inline loop
-- `402a5b9` - Add SO filter logic  
-- `21839d5` - Move SO filter to Step 3.5 (before coverage)
-
-**Action required:**
 ```bash
-# Verify commits are ready
-git log origin/master..HEAD --oneline
+# Clone repository
+git clone https://github.com/MrGweeod/mlb-agent.git
+cd mlb-agent
 
-# Push to GitHub (triggers Railway auto-deploy)
-git push origin master
+# Install dependencies
+pip install -r requirements.txt
 
-# Monitor Railway deployment
-railway logs --follow
+# Set environment variables
+export DATABASE_URL="postgresql://..."
+export SPORTSGAMEODDS_API_KEY="your_key_here"
+export WEB_APP_PASSWORD="your_password_here"
+
+# Initialize database tables
+python -c "from src.db.setup import init_db; init_db()"
+
+# Run pipeline manually
+python main.py
+
+# Or start web server (includes scheduler)
+python src/web/server.py
 ```
 
-**Expected result after push:**
-- ✅ Double-build bug eliminated
-- ✅ Invalid SO props filtered before building
-- ✅ Parlays (if any) will save to database correctly
-- ⚠️ May still get 0 parlays if remaining legs can't form +1000 combinations
-
----
-
-### **DECISION NEEDED: Accept Zero Parlays or Adjust Thresholds?**
-
-**Option 1: Accept Zero Parlays When Data Quality Is Poor**
-- Keep current filters (correct filtering of misleading props)
-- Accept that some days won't have enough quality to build parlays
-- Wait for better props on future days
-- **Philosophy:** Better to miss a day than bet on bad data
-
-**Option 2: Lower MIN_COV to Enable Building**
-- Change `MIN_COV = 65.0` to `60.0` in `src/engine/parlay_builder.py`
-- More legs in parlay pool (60-120 instead of top 50)
-- Higher chance of finding +1000 combinations
-- **Risk:** Lower quality legs might reduce win rate
-
-**Option 3: Expand Odds Range**
-- Change `MIN_PARLAY_ODDS = 1000` to `800` in `src/engine/parlay_builder.py`
-- Change `MAX_PARLAY_ODDS = 1400` to `1600`
-- Easier to find combinations with heavy favorites
-- **Risk:** Lower payout multiples, potentially less profitable
-
-**Option 4: Investigate Filter Aggressiveness**
-- Check if 7-of-10 IP threshold is too strict
-- Maybe some blocked pitchers ARE legitimate starters today
-- Query database to see which legs were filtered and their actual stats
-
----
-
-## Files Changed This Session
-
-### **Fixed (Local Commits, Not Deployed):**
-- `main.py` (lines 829, 852, 892-907) - SO filter placement + inline conversion
-- Comments added documenting the double-build bug
-
-### **No Changes Needed:**
-- `src/engine/parlay_builder.py` - Working correctly
-- `src/utils/db.py` - Working correctly (save function is fine)
-- `src/web/server.py` - Working correctly
-
-### **Investigation Files (Uploaded for Reference):**
-- `logs_1778946349065.log` - 9 AM pipeline run (showed double-build)
-- `logs_1778949951170.log` - Post-filter regenerate
-- `logs_1778954436990.log` - Final regenerate (0 parlays)
-- `db__2_.py` - Database layer examination
-- `main__4_.py` - Pipeline code examination
-
----
-
-## Key Debugging Insights
-
-### **Log Output Interleaving**
-
-**Discovery:** Python stdout buffering causes log messages to print out of chronological order.
-
-**Example from logs:**
+### **Access Web UI**
 ```
-17:00:33.302090 [7.5/8] Filtering strikeouts...
-17:00:33.302103 [7/8] Computing trend signals...  ← Wrong order!
-17:00:33.302116     Cole Young (P) SO over 0.5   ← From Step 7.5
-17:00:33.302125   4 reliever patterns detected:
-17:00:33.302128 Fetching pitcher quality...      ← From scoring step
+http://localhost:8080?password=your_password_here
 ```
 
-**Lesson:** Don't assume log order = execution order. Look at step numbers and context.
+---
+
+## Features
+
+### **🎯 Core Pipeline**
+- ✅ **Direction-Aware Coverage:** Calculates "How often player goes OVER/UNDER this line"
+- ✅ **Handedness Splits:** Tracks batter performance vs RHP/LHP separately
+- ✅ **Opponent Adjustments:** Elite pitchers reduce coverage, poor pitchers increase it
+- ✅ **Prop Filtering:** Only 0.5 hits, 0.5 hitter SO, 3.5+ pitcher SO, 0.5 walks
+- ✅ **DraftKings Rules:** No walks + strikeouts from same player
+- ✅ **Correlation Limits:** Max 2 legs per game
+
+### **📊 Web Interface**
+- **Legs Tab:** Browse all scored legs, filter by stat/team, see coverage %
+- **Picks Tab:** View parlay recommendations with full leg details
+- **Dashboard:** System metrics, trends, performance tracking
+- **Training Tab:** Data health metrics (future ML features)
+- **Regenerate Button:** Manually trigger pipeline refresh
+
+### **🔄 Automated Scheduling**
+- **9 AM ET:** Resolve yesterday's outcomes, build today's parlays
+- **12 PM ET:** Refresh with latest odds/lineups
+- **5:30 PM ET:** Final refresh before games start
+
+### **💾 Data Persistence**
+- All scored legs logged to `mlb_scored_legs`
+- Parlay recommendations saved to `mlb_parlay_recommendations_v2`
+- Training data collected in `mlb_training_data` (future ML model)
 
 ---
 
-### **Position Classification Bug (Shohei Ohtani TWP)**
+## How It Works
 
-**Discovery:** Ohtani's position is "TWP" (Two-Way Player) in `_PITCHER_POSITIONS`.
+### **Pipeline Flow**
 
-**Impact:** Coverage calculator treated Ohtani SO over 1.5 as PITCHER prop, used Poisson model, returned 100% coverage.
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 1. Data Collection (30-60 sec)                             │
+│    - Fetch today's MLB schedule (14 games)                 │
+│    - Fetch player props from SportsGameOdds (~600 props)   │
+│    - Fetch player game logs (last 100 games via MLB API)   │
+└─────────────────────────────────────────────────────────────┘
+                           ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 2. Prop Filtering (instant)                                │
+│    - Only: hits 0.5, hitter SO 0.5, pitcher SO 3.5+, walks│
+│    - Remove: RBI, Total Bases, Home Runs                   │
+└─────────────────────────────────────────────────────────────┘
+                           ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 3. Coverage Calculation (60-90 sec)                        │
+│    - Direction-aware: "How often OVER/UNDER this line?"    │
+│    - Handedness splits: vs RHP/LHP tracked separately      │
+│    - Minimum: 20 games total, 10 vs handedness             │
+└─────────────────────────────────────────────────────────────┘
+                           ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 4. Coverage Gate (instant)                                 │
+│    - Filter: Only legs >= 65% coverage                     │
+│    - Typical output: 250-350 qualifying legs               │
+└─────────────────────────────────────────────────────────────┘
+                           ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 5. Lineup Consistency Filter (5-10 sec)                    │
+│    - Hitters: 3+ AB in 7 of last 10 games                 │
+│    - Pitchers: 4+ IP in 7 of last 10 starts               │
+└─────────────────────────────────────────────────────────────┘
+                           ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 6. Opponent Enrichment (10-15 sec)                         │
+│    - Fetch pitcher ranks (K%, WHIP, ERA)                   │
+│    - Fetch team offensive ranks (OPS, wOBA)                │
+│    - Attach opponent data to each leg                       │
+└─────────────────────────────────────────────────────────────┘
+                           ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 7. Scoring (instant)                                       │
+│    composite_score = coverage_pct                           │
+│                    + opponent_pitcher_adjustment            │
+│                    + trend_consistency_bonus                │
+│                                                             │
+│    - Elite pitcher (top 10%): -20 to -30%                  │
+│    - Poor pitcher (bottom 10%): +20 to +30%                │
+└─────────────────────────────────────────────────────────────┘
+                           ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 8. Parlay Construction (<1 sec)                            │
+│    - Branch-and-bound algorithm                             │
+│    - DraftKings rules enforced                              │
+│    - Max 2 legs per game                                    │
+│    - Target odds: +1000 to +1400                            │
+│    - Output: 4-5 parlays                                    │
+└─────────────────────────────────────────────────────────────┘
+                           ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 9. Persistence & Display                                    │
+│    - Save legs to mlb_scored_legs                           │
+│    - Save parlays to mlb_parlay_recommendations_v2          │
+│    - Display in web UI                                      │
+└─────────────────────────────────────────────────────────────┘
+```
 
-**Fix:** Pre-filter uses LINE VALUE instead of position to classify:
-- Lines <3.0 = hitter SO props
-- Lines ≥3.5 = pitcher SO props
-
-**Lesson:** Don't trust position field alone for dual-role players.
+**Total Time:** ~2-3 minutes (morning with resolution), ~2 minutes (refresh without resolution)
 
 ---
 
-### **The "Fixed But Not Deployed" Pattern**
+## Key Concepts
 
-**Discovery:** Claude Code analyzed LOCAL codebase (already fixed), but Railway production still runs OLD code.
+### **Coverage (Direction-Aware)**
 
-**Impact:** Spent time investigating why "fixed" code still had bugs, when actually fixes weren't deployed yet.
+**Definition:** "How often does this player go OVER/UNDER this line based on last 100 games?"
 
-**Lesson:** Always confirm git status (pushed vs local commits) before investigating bugs.
+**Example:**
+- **Trea Turner hits over 0.5:** 63.8% (gets 1+ hits in 64 of 100 games)
+- **Trea Turner hits under 0.5:** 36.2% (gets 0 hits in 36 of 100 games)
+- **Validation:** over + under ≈ 100% ✅
 
----
-
-## System Health Summary
-
-### **What's Working (After Local Fixes):**
-✅ **Double-build bug** - Fixed locally (inline conversion)
-✅ **SO filter logic** - Blocks invalid hitter/pitcher SO lines
-✅ **Reliever filter** - Blocks spot-start relievers
-✅ **Timezone handling** - UTC timestamps working
-✅ **Resolution gating** - Only runs at 9 AM
-✅ **Coverage calculation** - Direction-aware, mathematically correct
-✅ **Simple scorer** - Transparent coverage + pitcher adjustments
-
-### **What's Not Working (Production):**
-🔴 **Production code** - Still running OLD buggy code (commits not pushed)
-🔴 **Parlay generation** - 0 parlays building (even with fixes, may be expected)
-🔴 **Database saves** - 0 parlays saved (due to double-build bug in production)
-
-### **Unknown Status:**
-⚠️ **After deployment** - Will fixes enable parlay building, or will we need threshold adjustments?
+**Why Direction Matters:**
+- Non-directional coverage ("how often 1+ hits") gives same % for both over and under → WRONG
+- Direction-aware calculates separately for each side → CORRECT
 
 ---
 
-## SQL Queries Used This Session
+### **Opponent Pitcher Adjustment**
 
-### **Check Parlay Recommendations for May 16:**
+**Rationale:** A hitter's coverage vs an elite pitcher (Gerrit Cole) should be lower than vs a poor pitcher (5+ ERA).
+
+**Implementation:**
+```python
+if opponent_pitcher_rank_pct < 10:  # Elite (top 10%)
+    adjustment = -25
+elif opponent_pitcher_rank_pct < 30:  # Above average
+    adjustment = -15
+elif opponent_pitcher_rank_pct < 70:  # Average
+    adjustment = 0
+else:  # Below average / poor
+    adjustment = +15 to +25
+```
+
+**Example:**
+- Julio Rodríguez hits over 0.5 vs Gerrit Cole: 68% → 68% - 25% = **43%** (adjusted)
+- Julio Rodríguez hits over 0.5 vs poor pitcher: 68% → 68% + 20% = **88%** (adjusted)
+
+---
+
+### **Composite Score**
+
+**Formula:**
+```
+composite_score = coverage_pct + opponent_adjustment + trend_bonus
+```
+
+**Example Leg:**
+- **Player:** Freddy Fermin
+- **Prop:** hits under 0.5 @ +110
+- **Coverage:** 74.3% (gets 0 hits in 74 of 100 games)
+- **Opponent:** Facing average pitcher → adjustment = 0%
+- **Trend:** Consistent 0-hit games recently → bonus = +3%
+- **Composite Score:** 74.3 + 0 + 3 = **77.3%**
+
+---
+
+### **Parlay Construction**
+
+**Branch-and-Bound Algorithm:**
+1. Sort all legs by composite_score descending
+2. Start with highest-scoring leg as anchor
+3. Greedily add legs that:
+   - Don't violate DraftKings rules (walks + SO same player)
+   - Don't exceed correlation limits (max 2 legs per game)
+   - Keep parlay odds in +1000-1400 range
+4. Once 4 legs assembled, save parlay and continue
+5. Generate top 5 distinct parlays
+
+**Why This Works:**
+- Fast: Completes in <1 second for 300 legs
+- Deterministic: Same inputs → same outputs
+- Respects constraints: DK rules, correlation limits, odds range
+
+**Known Issue:** High overlap (same 3 legs in all parlays)
+- **Why:** Algorithm anchors on best legs naturally
+- **Fix:** Add diversity constraint in Phase 1 if needed
+
+---
+
+## Prop Type Filtering
+
+### **Included Props**
+
+| Stat | Line(s) | Rationale |
+|------|---------|-----------|
+| Hits | 0.5 only | Clean yes/no, reasonable odds (-120 to +120) |
+| Hitter Strikeouts | 0.5 only | Most hitters strike out 0-1 times per game |
+| Pitcher Strikeouts | 3.5+ | Starters face 20-30 batters, 3.5 is median |
+| Walks | 0.5 | Less common but clean outcome |
+
+### **Excluded Props**
+
+| Stat | Why Excluded |
+|------|--------------|
+| Hits 1.5+ | Heavily juiced unders (-300+) or risky overs |
+| Hitter SO 1.5+ | Betting hitter strikes out 2+ times - too rare |
+| RBI | Too volatile, dependent on team offense |
+| Total Bases | Complex, dependent on hit type (single vs HR) |
+| Home Runs | Extremely low probability, not suitable for parlays |
+
+---
+
+## Database Schema
+
+### **mlb_scored_legs**
+All legs that passed coverage threshold (>= 65%).
+
 ```sql
-SELECT COUNT(*) 
-FROM mlb_parlay_recommendations_v2 
-WHERE run_date = '2026-05-16';
--- Result: 0 rows
+CREATE TABLE mlb_scored_legs (
+    id SERIAL PRIMARY KEY,
+    run_date TEXT,
+    player_name TEXT,
+    stat TEXT,
+    line REAL,
+    direction TEXT,  -- 'over' or 'under'
+    odds TEXT,
+    coverage_pct REAL,
+    composite_score REAL,
+    result TEXT,  -- 'hit', 'miss', NULL (pending)
+    -- ... additional metadata
+);
 ```
 
-### **Historical Parlay Pattern:**
+### **mlb_parlay_recommendations_v2**
+Daily parlay recommendations displayed in web UI.
+
 ```sql
-SELECT run_date, COUNT(*) as parlay_count, 
-       MIN(created_at) as earliest_time,
-       MAX(total_odds) as max_odds
-FROM mlb_parlay_recommendations_v2
-WHERE run_date >= '2026-05-09'
-GROUP BY run_date 
-ORDER BY run_date DESC;
--- Shows May 9-15 had 6-66 parlays daily
--- May 16 has 0 (bug confirmed)
+CREATE TABLE mlb_parlay_recommendations_v2 (
+    id SERIAL PRIMARY KEY,
+    recommendation_date DATE,
+    run_date TEXT,
+    rank INTEGER,
+    legs JSONB,  -- Array of leg objects
+    combined_odds INTEGER,  -- American odds (+1398)
+    win_probability REAL,  -- 0.0-1.0
+    edge_pct REAL,
+    result TEXT,  -- 'won', 'lost', NULL (pending)
+    -- ... additional metadata
+);
 ```
 
-### **Check Ohtani Strikeout Props (After Filter):**
+### **mlb_training_data**
+All legs with full metadata for future ML model training.
+
 ```sql
-SELECT player_name, stat, direction, line, position, composite_score
-FROM mlb_scored_legs
-WHERE run_date = '2026-05-16' 
-  AND player_name ILIKE '%ohtani%' 
-  AND stat = 'strikeouts';
--- Result: 0 rows (correctly filtered)
+CREATE TABLE mlb_training_data (
+    id SERIAL PRIMARY KEY,
+    prediction_date DATE,
+    player_name TEXT,
+    stat TEXT,
+    line REAL,
+    direction TEXT,
+    coverage_pct REAL,
+    outcome TEXT,  -- 'hit', 'miss', NULL (pending)
+    -- ... extensive metadata for ML features
+);
 ```
 
 ---
 
-## Performance Metrics (May 16)
+## API Usage
 
-### **Morning 9 AM Run (Before Fixes):**
-| Metric | Target | Actual | Status |
-|--------|--------|--------|--------|
-| Props fetched | 500+ | ~450 | ✅ Good |
-| Legs scored | 300+ | ~400 | ✅ Good |
-| Parlays built (1st) | 4-5 | 5 | ✅ Success |
-| Parlays built (2nd) | — | 0 | 🔴 Bug |
-| **Parlays saved to DB** | **5** | **0** | 🔴 **Double-build bug** |
+### **SportsGameOdds**
+- **Endpoint:** `/mlb/odds/player-props`
+- **Rate Limit:** 100K objects/month (free tier)
+- **Current Usage:** ~54K/month (600 props × 3 runs × 30 days)
+- **Cost:** $0/month ✅
 
-### **Latest Regenerate (5:00 PM, After Filter Commits):**
-| Metric | Target | Actual | Status |
-|--------|--------|--------|--------|
-| Props fetched | 500+ | 403 | ✅ Good |
-| Eligible legs | 150+ | 306 | ✅ Good |
-| Top pool legs | 50 | 50 | ✅ Good |
-| Parlays built | 4-5 | 0 | 🔴 No valid combinations |
-| Reason | — | Heavy favorite odds | ⚠️ Expected after filter |
+### **MLB-StatsAPI**
+- **Purpose:** Game logs, transactions, schedule
+- **Rate Limit:** Reasonable (no strict limit)
+- **Cost:** $0/month (no API key required) ✅
+
+### **Anthropic Claude API**
+- **Status:** ❌ Removed May 18, 2026
+- **Previous Usage:** Parlay analysis after generation
+- **Reason for Removal:** Cost optimization, analysis disconnected from scoring
+- **Savings:** ~$1/month
 
 ---
 
-## Next Session Action Plan
+## Configuration
 
-### **Step 1: Deploy Fixes (CRITICAL)**
+### **Environment Variables**
 
-**Before anything else:**
 ```bash
-# 1. Verify commits are present
-git log --oneline -3
+# Required
+DATABASE_URL="postgresql://user:pass@host:5432/db"
+SPORTSGAMEODDS_API_KEY="your_key_here"
 
-# Should show:
-# 21839d5 fix: pre-filter invalid strikeout lines before coverage calculation
-# 402a5b9 fix: block invalid hitter SO lines and reliever pitcher props  
-# f59bb40 fix: reuse parlays from first build instead of calling generate_recommendations
-
-# 2. Push to GitHub
-git push origin master
-
-# 3. Monitor Railway deployment
-railway logs --follow
-
-# 4. Wait for "Deployment successful" message
+# Optional
+WEB_APP_PASSWORD="your_password"  # Default: ""
+PORT="8080"  # Default: 8080
+ODDS_API_KEY=""  # Fallback odds provider (not used currently)
+DISCORD_BOT_TOKEN=""  # Future feature
 ```
 
-**Validation after deploy:**
-```bash
-# Check Railway logs for next scheduled run (12 PM or 5:30 PM ET)
-# Look for:
-# - "Built X parlays" (only once, not twice)
-# - "Logged X parlay recommendations" (non-zero if parlays built)
+### **Pipeline Configuration (main.py)**
+
+```python
+# Coverage threshold
+MIN_COVERAGE_PCT = 65.0  # Only legs >= 65% coverage
+
+# Consistency thresholds
+MIN_HITTER_CONSISTENCY_PCT = 70.0  # 7 of 10 games with 3+ AB
+MIN_PITCHER_CONSISTENCY_PCT = 70.0  # 7 of 10 starts with 4+ IP
+
+# Parlay construction
+TARGET_ODDS_MIN = 1000  # +1000
+TARGET_ODDS_MAX = 1400  # +1400
+LEGS_PER_PARLAY = 4
+MAX_LEGS_PER_GAME = 2
+
+# Strikeout filters
+MIN_PITCHER_SO_LINE = 3.5  # Only pitcher SO >= 3.5
 ```
 
 ---
 
-### **Step 2: Assess Parlay Building (DECISION POINT)**
+## Deployment
 
-**After fixes deploy, check if parlays build:**
+### **Railway (Current)**
 
-**If parlays build successfully:**
-- ✅ Fixes worked
-- ✅ Continue normal operation
-- Monitor hit rates over next few days
+**Setup:**
+1. Connect GitHub repo to Railway
+2. Set environment variables in Railway dashboard
+3. Railway auto-deploys on push to `master`
+4. Scheduler runs 3x daily automatically
 
-**If still 0 parlays:**
-- Query database for top 20 eligible legs
-- Check odds distribution (are they all heavy favorites?)
-- Decide: Accept zero, lower MIN_COV, or expand odds range
+**Cost:** $5/month (Hobby plan)
 
-**SQL to diagnose:**
+**URL:** https://mlb-agent.up.railway.app
+
+---
+
+### **Local Development**
+
+```bash
+# Run pipeline once
+python main.py
+
+# Run web server with scheduler
+python src/web/server.py
+
+# Access UI
+open http://localhost:8080?password=your_password
+```
+
+---
+
+## Monitoring
+
+### **Daily Checklist**
+
+**Morning (After 9 AM run):**
+1. Check Railway logs: `railway logs --follow`
+2. Verify parlays built: Should see "Built 4-5 parlay(s)"
+3. Check web UI: https://mlb-agent.up.railway.app?password=...
+
+**Evening (After games complete):**
+- No action needed - resolution happens next morning
+
+**Next Morning:**
+1. Check resolution: How many legs/parlays hit?
+2. Track hit rates vs predicted coverage
+
+### **Key Metrics**
+
+**System Health:**
+- ✅ Parlays built per run: 4-5 expected
+- ✅ Qualified legs per day: 250-350 expected
+- ✅ Pipeline execution time: 2-3 minutes expected
+- ⚠️ 0 parlays built: Investigate immediately
+
+**Performance:**
+- 🎯 Leg hit rate: Should match coverage % (±5%)
+- 🎯 4-leg parlay win rate: 15-25% target
+- 🎯 Core leg hit rate: Monitor top 3-5 most-used legs
+
+### **Validation Queries**
+
+**Check today's parlays:**
 ```sql
--- Check top eligible legs
-SELECT player_name, stat, direction, line, odds, composite_score, coverage_pct
+SELECT * FROM mlb_parlay_recommendations_v2 
+WHERE run_date = CURRENT_DATE 
+ORDER BY rank;
+```
+
+**Check today's legs:**
+```sql
+SELECT player_name, stat, direction, line, coverage_pct, composite_score
 FROM mlb_scored_legs
 WHERE run_date = CURRENT_DATE::text
-  AND composite_score >= 60
 ORDER BY composite_score DESC
 LIMIT 20;
+```
 
--- Check odds distribution
-SELECT 
-    CASE 
-        WHEN odds::numeric < -200 THEN 'heavy_fav'
-        WHEN odds::numeric < -110 THEN 'light_fav'
-        WHEN odds::numeric < 110 THEN 'even'
-        ELSE 'underdog'
-    END as odds_bucket,
-    COUNT(*) as legs
+**Check prop type distribution:**
+```sql
+SELECT stat, direction, COUNT(*) as count
 FROM mlb_scored_legs
 WHERE run_date = CURRENT_DATE::text
-  AND composite_score >= 65
-GROUP BY odds_bucket;
+GROUP BY stat, direction
+ORDER BY stat, direction;
+-- Expected: Only hits 0.5, SO (0.5/3.5+), walks 0.5
 ```
 
 ---
 
-### **Step 3: Monitor and Validate**
+## Known Issues
 
-**Watch for next 3 days:**
-- Daily parlay count (expect 0-5 per day, not 5 every day)
-- Leg hit rates (should improve with cleaner filtering)
-- No more Ohtani SO 1.5 or Teng SO 3.5 appearances
+### **⚠️ High Overlap (Same 3 Legs in All Parlays)**
 
-**If hit rates don't improve:**
-- Filters are correct but we lost the "100% coverage" anchor legs
-- Those legs were inflated by bad data (position bugs, reliever misclassification)
-- System is now working correctly, just more conservative
+**Current State:** Same core legs appear in all 5 parlays (e.g., Ureña, Fermin, McClanahan)
 
----
+**Why It Happens:** Branch-and-bound naturally selects highest-scoring legs as anchors.
 
-## Git Commits Ready to Push
+**Is It Bad?** 
+- ✅ If core legs are truly the best, this might be optimal strategy
+- ❌ If any core leg misses, all 5 parlays lose
 
-### **Commit f59bb40**
-```
-fix: reuse parlays from first build instead of calling generate_recommendations
-
-- generate_recommendations() was calling build_hybrid_parlays() a second time
-- Second call received filtered qualifying_legs (after SO filter)
-- Second build returned 0 parlays, so 0 recommendations saved
-- Now: convert parlays from first build directly to recommendations
-- Fixes May 16 bug where 5 parlays built but 0 saved to database
-```
-
-### **Commit 402a5b9**
-```
-fix: block invalid hitter SO lines and reliever pitcher props
-
-- Block hitter SO props with line >0.5 (too risky to bet multiple Ks)
-- Block pitcher SO props with line <3.5 (indicates short outing)
-- Add IP consistency check for pitchers (7+ of last 10 <4 IP = reliever)
-- Fixes Ohtani SO 1.5, Teng SO 3.5, Rodriguez SO 4.5 appearing in parlays
-```
-
-### **Commit 21839d5**
-```
-fix: pre-filter invalid strikeout lines before coverage calculation
-
-- Added Step 3.5 filter BEFORE coverage calculation
-- Uses line value (not position) to classify hitter vs pitcher props
-- Lines <3.0 = hitter (only 0.5 allowed)
-- Lines >=3.5 = pitcher (minimum threshold)
-- Prevents position bugs (TWP) from causing invalid coverage scores
-```
+**Resolution:** Monitor May 19-23. If core legs hit >70%, keep strategy. If <60%, add diversity constraint.
 
 ---
 
-## Context for Next Session
+### **⚠️ Negative EV Legs**
 
-**When you return, you'll need to:**
+**Current State:** Some legs have high coverage but negative EV (e.g., -9.7% for Ureña SO u4.5)
 
-1. **Push the three commits to GitHub** (see Step 1 above)
-2. **Wait for Railway to deploy** (usually 2-3 minutes)
-3. **Monitor next scheduled run** (12 PM or 5:30 PM ET)
-4. **Check if parlays build and save** to database
-5. **Make threshold decision** if still 0 parlays (see Step 2 above)
+**Why It Happens:** System optimizes for "most likely to hit" (coverage), not "best value" (EV).
 
-**The fixes are ready - they just need to be deployed!**
+**Is It Bad?** No - this is working as designed. Parlays multiply probabilities, so hit rate > value.
 
-**Key questions to answer after deployment:**
-- Do parlays save to database? (Should be YES if fixes work)
-- Do parlays build at all? (May be NO due to leg quality)
-- If no parlays, is that acceptable or do we adjust thresholds?
+**Resolution:** Track actual win rates vs predicted. If system is profitable despite negative EV, continue.
 
 ---
 
-**Last Updated:** May 16, 2026, End of Day  
-**Status:** 🔴 Fixes ready but not deployed, ⏳ Waiting for git push  
-**Next Critical Action:** `git push origin master` → Monitor Railway deployment  
-**Session ended:** User stepped away for weekend, returning Monday
+### **⚠️ Same-Game Correlation**
+
+**Current State:** Some parlays have 2 legs from same game (e.g., both pitchers from LAA vs ATH)
+
+**Why It Happens:** Max 2 legs per game rule allows this. Opposing pitchers both betting unders is reasonable (defensive duel thesis).
+
+**Is It Bad?** Unclear - need to quantify actual correlation impact.
+
+**Resolution:** Track same-game parlay outcomes. If significantly underperforming, add correlation penalties.
+
+---
+
+## Roadmap
+
+### **Phase 1: Diversity Improvements (4-6 hours)**
+- Add "max appearances per player" constraint (e.g., max 3 parlays per player)
+- Implement parlay diversity score to avoid near-identical parlays
+- **Trigger:** If core legs hit <60% over May 19-23
+
+### **Phase 2: Correlation Handling (3-4 hours)**
+- Add same-game pitcher correlation penalty (-5 to -10 points)
+- Weight EV as tiebreaker when coverage is similar
+- **Trigger:** After quantifying same-game correlation impact
+
+### **Phase 3: Learning Loop (1-2 days)**
+- After 500+ resolved legs: regression analysis on coverage accuracy
+- Recalibrate coverage calculation weights
+- Implement dynamic threshold adjustment
+- **Trigger:** After 50+ days of operation
+
+### **Future Features**
+- Discord bot for push notifications
+- Mobile app (if user base grows)
+- Advanced analytics dashboard
+- Backtesting framework (if historical odds data available)
+
+---
+
+## Contributing
+
+This is a personal project, but contributions are welcome!
+
+**Areas for Contribution:**
+- Improved correlation detection
+- Alternative scoring algorithms
+- ML model for leg predictions
+- Better web UI design
+- Backtesting framework
+
+**Before Contributing:**
+1. Read `ARCHITECTURE_DECISIONS.md` to understand design choices
+2. Check `SESSION_HANDOFF.md` for current status
+3. Open an issue to discuss your idea
+4. Submit a PR with clear description and tests
+
+---
+
+## FAQ
+
+### **Q: Why only 0.5 hit lines?**
+**A:** Lines above 0.5 (1.5, 2.5) are either heavily juiced unders (-300+) or risky overs. 0.5 is a clean yes/no outcome with reasonable odds.
+
+### **Q: Why not use machine learning?**
+**A:** Simple additive scorer working well so far. Will revisit after 500+ resolved legs for reliable training data.
+
+### **Q: Why 4 legs instead of 3 or 5?**
+**A:** 3 legs don't reach +1000 odds. 5 legs push parlay win rate too low (<10%). 4 legs is the sweet spot.
+
+### **Q: Why remove Claude analysis?**
+**A:** Cost optimization ($1/month) + analysis was disconnected from scoring logic. Scoring breakdown more useful than LLM text.
+
+### **Q: How accurate is coverage?**
+**A:** Validated May 14 with direction-aware fix. Expecting 65-70% actual hit rate for 65% coverage legs (±5% is acceptable).
+
+### **Q: What's the expected ROI?**
+**A:** Unknown - system is optimized for hit probability, not ROI. Monitoring will determine profitability.
+
+### **Q: Can I use this for betting?**
+**A:** This is for educational/entertainment purposes. Bet responsibly and within your means. Not financial advice.
+
+---
+
+## License
+
+MIT License - see LICENSE file for details.
+
+---
+
+## Acknowledgments
+
+- **MLB-StatsAPI:** Free game logs and stats
+- **SportsGameOdds:** Comprehensive player props data
+- **Railway:** Simple deployment platform
+- **Supabase:** Reliable PostgreSQL hosting
+
+---
+
+## Contact
+
+- **GitHub Issues:** For bugs, feature requests, questions
+- **Email:** [Your email if you want to include]
+
+---
+
+**Last Updated:** May 18, 2026  
+**System Status:** ✅ Operational  
+**Current Version:** 1.0.0 (Post-Surgical Fixes)  
+**Next Milestone:** May 23, 2026 (5-day monitoring review)
