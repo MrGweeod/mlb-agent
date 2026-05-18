@@ -43,8 +43,8 @@ from src.utils.db import log_scored_legs, log_training_data_legs, save_parlay_re
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 # Minimum raw coverage rate (%) to enter the candidate pool.
-# The parlay builder applies a stricter internal threshold (60% minimum).
-MIN_COVERAGE_PCT = 55.0
+# Unified with parlay builder threshold to avoid scoring legs that won't be used.
+MIN_COVERAGE_PCT = 65.0
 
 # Transaction typeCodes that affect player availability.
 # SC = Status Change (IL placements/reinstatements)
@@ -279,6 +279,21 @@ def _find_qualifying_legs(
         if standard_line is None or not standard_odds:
             continue
         line = float(standard_line)
+
+        # Only allow the prop types the parlay system targets.
+        ALLOWED_STATS = {"hits", "strikeouts", "walks"}
+        if stat not in ALLOWED_STATS:
+            continue
+
+        # Hits: only the 0.5 line (1.5/2.5 lines are heavily juiced unders).
+        if stat == "hits" and line != 0.5:
+            continue
+
+        # Hitter strikeouts: only 0.5 line (lines < 3.0 are hitter props).
+        # Pitcher strikeout lines (>= 3.0) pass through to the 3.5 minimum
+        # enforced later in _valid_strikeout_line().
+        if stat == "strikeouts" and line < 3.0 and line != 0.5:
+            continue
 
         odd_id = prop.get("odd_id", "")
         if odd_id in seen_odd_ids:
