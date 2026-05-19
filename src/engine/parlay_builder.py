@@ -3,7 +3,7 @@ parlay_builder.py — Single scored-pool parlay builder for MLB.
 
 All eligible legs (composite_score >= 65) are scored once by simple_scorer,
 then the top POOL_SIZE are searched for combinations of exactly 4 legs
-whose combined parlay odds land in +1000 to +1400.
+whose combined parlay odds land in +900 to +1500.
 
 Constraints:
   - Exactly 4 legs per parlay.
@@ -137,7 +137,7 @@ def build_hybrid_parlays(
     Build parlays from a single composite-scored pool.
 
     Selects combinations of MIN_LEGS–MAX_LEGS legs (4–6 on all slates)
-    whose combined American odds land in +1000 to +1500. Legs are ranked
+    whose combined American odds land in +900 to +1500. Legs are ranked
     by composite_score (ML-predicted P(hit) × 100 when USE_ML_SCORING=true).
     Only legs with composite_score >= 65% (ML gatekeeper) enter consideration.
 
@@ -152,8 +152,8 @@ def build_hybrid_parlays(
     MAX_LEGS        = params["max_legs"]
     TIER            = params["tier"]
     MIN_COV         = 65.0
-    MIN_PARLAY_ODDS = 1000
-    MAX_PARLAY_ODDS = 1400
+    MIN_PARLAY_ODDS = 900
+    MAX_PARLAY_ODDS = 1500
     MAX_LEGS_PER_GAME = 2
     POOL_SIZE       = 50
     MAX_CANDIDATES  = 15

@@ -280,12 +280,16 @@ def _find_qualifying_legs(
         line = float(standard_line)
 
         # Only allow the prop types the parlay system targets.
-        ALLOWED_STATS = {"hits", "strikeouts", "walks"}
+        ALLOWED_STATS = {"hits", "strikeouts", "walks", "totalBases"}
         if stat not in ALLOWED_STATS:
             continue
 
         # Hits: only the 0.5 line (1.5/2.5 lines are heavily juiced unders).
         if stat == "hits" and line != 0.5:
+            continue
+
+        # Total Bases: only 1.5 line (over = 2+ TB, under = 0-1 TB).
+        if stat == "totalBases" and line != 1.5:
             continue
 
         # Hitter strikeouts: only 0.5 line (lines < 3.0 are hitter props).
