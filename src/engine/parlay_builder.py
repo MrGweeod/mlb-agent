@@ -226,167 +226,208 @@ def build_hybrid_parlays(
     MIN_DECIMAL = MIN_PARLAY_ODDS / 100 + 1
     MAX_DECIMAL = MAX_PARLAY_ODDS / 100 + 1
 
-    parlays = []
-    _start_time = time.time()
-    _stop = [False]
-    total_iters = [0]
+    # ── Per-parlay generation with player diversity constraint ───────────────
+    # Each parlay is built from its own B&B pass over the pool minus players
+    # already used in earlier parlays. This prevents correlated wipeouts where
+    # one player's loss eliminates all parlays in the batch (e.g. May 18, 2026:
+    # McClanahan appeared in all 25 parlays; one loss wiped the entire day).
+    used_players = set()
+    diverse = []
+    total_iters_all = 0
 
-    def _record(legs_snap, p):
-        odds_val = int((p - 1) * 100)
-        avg_cov  = sum(l["coverage_pct"] for l in legs_snap) / len(legs_snap)
-        avg_comp = sum(l.get("composite_score", 0.0) for l in legs_snap) / len(legs_snap)
-        ev_list  = [l["ev_per_unit"] for l in legs_snap if "ev_per_unit" in l]
-        avg_ev   = round(sum(ev_list) / len(ev_list), 4) if ev_list else None
-        parlays.append({
-            "legs":          legs_snap,
-            "parlay_odds":   f"+{odds_val}",
-            "num_legs":      len(legs_snap),
-            "avg_coverage":  round(avg_cov, 1),
-            "avg_composite": round(avg_comp, 4),
-            "avg_ev":        avg_ev,
-            "parlay_type":   "scored",
-            "tier":          TIER,
-        })
-        if len(parlays) >= MAX_CANDIDATES:
-            _stop[0] = True
+    print(f"  [parlay_builder] Starting generation with {len(pool)} pool legs")
 
-    def _bnb(rem, idx, legs, p, by_pid, by_game, in_parlay):
-        """
-        Branch-and-bound over pool_bnb (sorted by _dec DESC).
+    for rank in range(1, top_n + 1):
+        # Filter pool to exclude players used in previous parlays
+        available_pool = [
+            leg for leg in pool
+            if leg.get("player_name", "") not in used_players
+        ]
 
-        Upper bound: current product × best rem remaining decimals (pool_bnb[idx:idx+rem]).
-        Lower bound: current product × worst rem remaining decimals (pool_bnb[n-rem:n]).
-        Valid because pool_bnb is sorted desc and idx ≤ n-rem is guaranteed.
-        """
-        total_iters[0] += 1
+        print(
+            f"  [parlay_builder] Parlay {rank}: {len(available_pool)} available legs "
+            f"({len(used_players)} players excluded)"
+        )
 
-        # ── Terminal ───────────────────────────────────────────────────────────
-        if rem == 0:
-            odds_val = int((p - 1) * 100)
-            if MIN_PARLAY_ODDS <= odds_val <= MAX_PARLAY_ODDS:
-                _record(list(legs), p)
-            return
-
-        if n - idx < rem:
-            return  # not enough legs left
-
-        # ── Prune: upper bound (best possible completion) ──────────────────────
-        ub = p
-        for j in range(idx, idx + rem):
-            ub *= pool_bnb[j]["_dec"]
-        if ub < MIN_DECIMAL:
-            return
-
-        # ── Prune: lower bound (cheapest possible completion) ──────────────────
-        lb = p
-        for j in range(n - rem, n):
-            lb *= pool_bnb[j]["_dec"]
-        if lb > MAX_DECIMAL:
-            return
-
-        # ── Branch ────────────────────────────────────────────────────────────
-        for i in range(idx, n - rem + 1):
-            if _stop[0]:
-                return
-            if time.time() - _start_time > TIMEOUT_SECS:
-                _stop[0] = True
-                return
-
-            leg    = pool_bnb[i]
-            odd_id = leg.get("odd_id")
-
-            if odd_id in in_parlay:
-                continue
-
-            pid      = leg.get("player_id") or leg.get("player_name", "")
-            position = leg.get("position", "")
-            is_pitcher = position in _PITCHER_POSITIONS
-
-            # Max 1 batter leg per player (pitchers exempt)
-            if not is_pitcher and pid in by_pid:
-                continue
-
-            # Max MAX_LEGS_PER_GAME legs per game
-            gk = leg.get("game_pk") or leg.get("team", "")
-            if by_game.get(gk, 0) >= MAX_LEGS_PER_GAME:
-                continue
-
-            # DraftKings does not allow WALKS + STRIKEOUTS in the same parlay
-            leg_stat = leg.get("stat", "").lower()
-            if leg_stat == "walks" and any(l.get("stat", "").lower() == "strikeouts" for l in legs):
-                continue
-            if leg_stat == "strikeouts" and any(l.get("stat", "").lower() == "walks" for l in legs):
-                continue
-
-            # ── Add leg ────────────────────────────────────────────────────────
-            if not is_pitcher:
-                by_pid[pid] = True
-            by_game[gk] = by_game.get(gk, 0) + 1
-            legs.append(leg)
-            in_parlay.add(odd_id)
-
-            _bnb(rem - 1, i + 1, legs, p * leg["_dec"], by_pid, by_game, in_parlay)
-
-            # ── Remove leg ─────────────────────────────────────────────────────
-            legs.pop()
-            in_parlay.discard(odd_id)
-            by_game[gk] -= 1
-            if by_game[gk] == 0:
-                del by_game[gk]
-            if not is_pitcher:
-                del by_pid[pid]
-
-    for n_legs in range(MIN_LEGS, MAX_LEGS + 1):
-        _bnb(n_legs, 0, [], 1.0, {}, {}, set())
-        if _stop[0]:
-            elapsed = time.time() - _start_time
-            if elapsed > TIMEOUT_SECS:
-                print(
-                    f"  [parlay_builder] ⚠ hard timeout after {elapsed:.1f}s — "
-                    f"{len(parlays)} raw parlays found"
-                )
-            else:
-                print(
-                    f"  [parlay_builder] early exit — {MAX_CANDIDATES} candidates "
-                    f"found in {elapsed:.1f}s"
-                )
+        if len(available_pool) < MIN_LEGS:
+            print(
+                f"  [parlay_builder] Only {len(available_pool)} legs remaining after excluding "
+                f"{len(used_players)} players. Stopping at {len(diverse)} parlays."
+            )
             break
 
-    elapsed = time.time() - _start_time
-    print(f"  [parlay_builder] B&B iters: {total_iters[0]:,} ({elapsed:.1f}s)")
+        # Sort available pool by decimal odds DESC for B&B bounds
+        pool_bnb = sorted(available_pool, key=lambda l: l["_dec"], reverse=True)
+        n = len(pool_bnb)
 
-    # ── Deduplicate and rank by avg_composite DESC ────────────────────────────
-    seen   = set()
-    unique = []
-    for p in sorted(
-        parlays,
-        key=lambda x: (x["avg_composite"], x["avg_coverage"]),
-        reverse=True,
-    ):
-        key = frozenset(l["odd_id"] for l in p["legs"])
-        if key not in seen:
-            seen.add(key)
-            unique.append(p)
+        # Fresh B&B state for this parlay
+        parlays = []
+        _start_time = time.time()
+        _stop = [False]
+        total_iters = [0]
 
-    if not unique:
-        print(
-            f"  [parlay_builder] ⚠  0 parlays built from {len(pool)} pool legs — "
-            f"check odds range (+{MIN_PARLAY_ODDS}–+{MAX_PARLAY_ODDS}) and leg count ({MIN_LEGS}-{MAX_LEGS})"
-        )
-        return []
+        def _record(legs_snap, p, _parlays=parlays, _stop=_stop):
+            odds_val = int((p - 1) * 100)
+            avg_cov  = sum(l["coverage_pct"] for l in legs_snap) / len(legs_snap)
+            avg_comp = sum(l.get("composite_score", 0.0) for l in legs_snap) / len(legs_snap)
+            ev_list  = [l["ev_per_unit"] for l in legs_snap if "ev_per_unit" in l]
+            avg_ev   = round(sum(ev_list) / len(ev_list), 4) if ev_list else None
+            _parlays.append({
+                "legs":          legs_snap,
+                "parlay_odds":   f"+{odds_val}",
+                "num_legs":      len(legs_snap),
+                "avg_coverage":  round(avg_cov, 1),
+                "avg_composite": round(avg_comp, 4),
+                "avg_ev":        avg_ev,
+                "parlay_type":   "scored",
+                "tier":          TIER,
+            })
+            if len(_parlays) >= MAX_CANDIDATES:
+                _stop[0] = True
 
-    # REMOVED: Within-batch player diversity constraint (May 11, 2026).
-    # Diagnostic analysis showed this forces use of worst-performing legs:
-    #   3+ appearances: 48.3% win rate (best)
-    #   2 appearances:  32.8% win rate (worst — what the constraint pushed us into)
-    #   1 appearance:   39.2% win rate
-    # Let ML composite scores determine selection without artificial caps.
-    diverse = unique[:top_n]
+        def _bnb(rem, idx, legs, p, by_pid, by_game, in_parlay,
+                 _pool_bnb=pool_bnb, _n=n, _stop=_stop,
+                 _total_iters=total_iters, _start_time=_start_time):
+            """
+            Branch-and-bound over _pool_bnb (sorted by _dec DESC).
 
-    print(
-        f"  [parlay_builder] Built {len(diverse)} parlays (no within-batch diversity cap — "
-        f"ML scores determine selection)"
-    )
+            Upper bound: current product × best rem remaining decimals (_pool_bnb[idx:idx+rem]).
+            Lower bound: current product × worst rem remaining decimals (_pool_bnb[_n-rem:_n]).
+            Valid because _pool_bnb is sorted desc and idx ≤ _n-rem is guaranteed.
+            """
+            _total_iters[0] += 1
+
+            # ── Terminal ───────────────────────────────────────────────────────
+            if rem == 0:
+                odds_val = int((p - 1) * 100)
+                if MIN_PARLAY_ODDS <= odds_val <= MAX_PARLAY_ODDS:
+                    _record(list(legs), p)
+                return
+
+            if _n - idx < rem:
+                return  # not enough legs left
+
+            # ── Prune: upper bound (best possible completion) ──────────────────
+            ub = p
+            for j in range(idx, idx + rem):
+                ub *= _pool_bnb[j]["_dec"]
+            if ub < MIN_DECIMAL:
+                return
+
+            # ── Prune: lower bound (cheapest possible completion) ──────────────
+            lb = p
+            for j in range(_n - rem, _n):
+                lb *= _pool_bnb[j]["_dec"]
+            if lb > MAX_DECIMAL:
+                return
+
+            # ── Branch ────────────────────────────────────────────────────────
+            for i in range(idx, _n - rem + 1):
+                if _stop[0]:
+                    return
+                if time.time() - _start_time > TIMEOUT_SECS:
+                    _stop[0] = True
+                    return
+
+                leg    = _pool_bnb[i]
+                odd_id = leg.get("odd_id")
+
+                if odd_id in in_parlay:
+                    continue
+
+                pid        = leg.get("player_id") or leg.get("player_name", "")
+                position   = leg.get("position", "")
+                is_pitcher = position in _PITCHER_POSITIONS
+
+                # Max 1 batter leg per player (pitchers exempt)
+                if not is_pitcher and pid in by_pid:
+                    continue
+
+                # Max MAX_LEGS_PER_GAME legs per game
+                gk = leg.get("game_pk") or leg.get("team", "")
+                if by_game.get(gk, 0) >= MAX_LEGS_PER_GAME:
+                    continue
+
+                # DraftKings does not allow WALKS + STRIKEOUTS in the same parlay
+                leg_stat = leg.get("stat", "").lower()
+                if leg_stat == "walks" and any(l.get("stat", "").lower() == "strikeouts" for l in legs):
+                    continue
+                if leg_stat == "strikeouts" and any(l.get("stat", "").lower() == "walks" for l in legs):
+                    continue
+
+                # ── Add leg ────────────────────────────────────────────────────
+                if not is_pitcher:
+                    by_pid[pid] = True
+                by_game[gk] = by_game.get(gk, 0) + 1
+                legs.append(leg)
+                in_parlay.add(odd_id)
+
+                _bnb(rem - 1, i + 1, legs, p * leg["_dec"], by_pid, by_game, in_parlay)
+
+                # ── Remove leg ─────────────────────────────────────────────────
+                legs.pop()
+                in_parlay.discard(odd_id)
+                by_game[gk] -= 1
+                if by_game[gk] == 0:
+                    del by_game[gk]
+                if not is_pitcher:
+                    del by_pid[pid]
+
+        for n_legs in range(MIN_LEGS, MAX_LEGS + 1):
+            _bnb(n_legs, 0, [], 1.0, {}, {}, set())
+            if _stop[0]:
+                elapsed = time.time() - _start_time
+                if elapsed > TIMEOUT_SECS:
+                    print(
+                        f"  [parlay_builder] ⚠ hard timeout after {elapsed:.1f}s — "
+                        f"{len(parlays)} raw parlays found"
+                    )
+                else:
+                    print(
+                        f"  [parlay_builder] early exit — {MAX_CANDIDATES} candidates "
+                        f"found in {elapsed:.1f}s"
+                    )
+                break
+
+        elapsed = time.time() - _start_time
+        total_iters_all += total_iters[0]
+        print(f"  [parlay_builder] Parlay {rank} B&B: {total_iters[0]:,} iters ({elapsed:.1f}s)")
+
+        # ── Deduplicate and pick best candidate for this parlay ───────────────
+        seen_keys = set()
+        unique_candidates = []
+        for p in sorted(
+            parlays,
+            key=lambda x: (x["avg_composite"], x["avg_coverage"]),
+            reverse=True,
+        ):
+            key = frozenset(l["odd_id"] for l in p["legs"])
+            if key not in seen_keys:
+                seen_keys.add(key)
+                unique_candidates.append(p)
+
+        if not unique_candidates:
+            print(
+                f"  [parlay_builder] ⚠  0 parlays built for rank {rank} from "
+                f"{len(available_pool)} available legs — "
+                f"check odds range (+{MIN_PARLAY_ODDS}–+{MAX_PARLAY_ODDS}). "
+                f"Stopping at {len(diverse)} parlays."
+            )
+            break
+
+        best = unique_candidates[0]
+
+        # Add this parlay's players to the exclusion set for subsequent parlays
+        for leg in best["legs"]:
+            used_players.add(leg.get("player_name", ""))
+
+        diverse.append(best)
+
+        player_names = ", ".join(leg.get("player_name", "?") for leg in best["legs"])
+        print(f"  [parlay_builder] Parlay {rank} players: {player_names}")
+
+    print(f"  [parlay_builder] B&B total iters across all parlays: {total_iters_all:,}")
+    print(f"  [parlay_builder] Built {len(diverse)} parlays ({len(used_players)} unique players used)")
 
     # Correlation risk logging — no behavior change, for post-hoc analysis only
     for i, parlay in enumerate(diverse, start=1):
