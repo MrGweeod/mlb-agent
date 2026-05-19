@@ -227,27 +227,56 @@ def resolve_parlay_recommendations_v2(date: str, verbose: bool = True) -> dict:
             gid = leg["game_id"]
             if not gid or gid not in box_scores:
                 leg_outcomes.append("void")
+                conn = get_conn()
+                cur = conn.cursor()
+                cur.execute(
+                    "UPDATE mlb_parlay_legs_v2 SET outcome = 'void' WHERE id = %s",
+                    (leg["id"],),
+                )
+                conn.commit()
+                cur.close()
+                conn.close()
                 continue
 
             bs = box_scores[gid]
             player_id_str = str(leg["player_id"])
             player_stats = None
+            position = ""
 
             for side in ("away", "home"):
                 for pid_key, pdata in bs.get(side, {}).get("players", {}).items():
                     if pid_key == f"ID{player_id_str}" or str(pdata.get("person", {}).get("id")) == player_id_str:
                         player_stats = pdata.get("stats", {})
+                        position = pdata.get("position", {}).get("abbreviation", "")
                         break
                 if player_stats is not None:
                     break
 
             if player_stats is None:
                 leg_outcomes.append("void")
+                conn = get_conn()
+                cur = conn.cursor()
+                cur.execute(
+                    "UPDATE mlb_parlay_legs_v2 SET outcome = 'void' WHERE id = %s",
+                    (leg["id"],),
+                )
+                conn.commit()
+                cur.close()
+                conn.close()
                 continue
 
-            result_value = extract_stat_from_boxscore(player_stats, leg["stat"])
+            result_value = extract_stat_from_boxscore(player_stats, leg["stat"], position)
             if result_value is None:
                 leg_outcomes.append("void")
+                conn = get_conn()
+                cur = conn.cursor()
+                cur.execute(
+                    "UPDATE mlb_parlay_legs_v2 SET outcome = 'void' WHERE id = %s",
+                    (leg["id"],),
+                )
+                conn.commit()
+                cur.close()
+                conn.close()
                 continue
 
             line = leg["line"]
