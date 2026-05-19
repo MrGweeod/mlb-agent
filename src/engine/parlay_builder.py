@@ -2,7 +2,7 @@
 parlay_builder.py — Single scored-pool parlay builder for MLB.
 
 All eligible legs (composite_score >= 65) are scored once by simple_scorer,
-then the top POOL_SIZE are searched for combinations of exactly 4 legs
+then ALL legs are searched for combinations of exactly 4 legs
 whose combined parlay odds land in +900 to +1500.
 
 Constraints:
@@ -155,7 +155,7 @@ def build_hybrid_parlays(
     MIN_PARLAY_ODDS = 900
     MAX_PARLAY_ODDS = 1500
     MAX_LEGS_PER_GAME = 2
-    POOL_SIZE       = 50
+    # POOL_SIZE removed - now dynamic based on eligible leg count
     MAX_CANDIDATES  = 15
     TIMEOUT_SECS    = 90
 
@@ -183,24 +183,24 @@ def build_hybrid_parlays(
 
     eligible_sorted = sorted(eligible, key=lambda l: l.get("composite_score", 0.0), reverse=True)
 
-    # Quality validation: compare top 20 vs top 50 avg ML score
+    # Quality validation: compare top 20 vs all eligible avg ML score
     if len(eligible_sorted) >= 50:
         top_20_avg = sum(l.get("composite_score", 0) for l in eligible_sorted[:20]) / 20
-        top_50_avg = sum(l.get("composite_score", 0) for l in eligible_sorted[:50]) / 50
-        quality_drop = ((top_20_avg - top_50_avg) / top_20_avg) * 100
+        all_avg = sum(l.get("composite_score", 0) for l in eligible_sorted) / len(eligible_sorted)
+        quality_drop = ((top_20_avg - all_avg) / top_20_avg) * 100
         print(f"  [parlay_builder] Quality validation:")
         print(f"    Top 20 avg ML score: {top_20_avg:.1f}%")
-        print(f"    Top 50 avg ML score: {top_50_avg:.1f}%")
+        print(f"    All {len(eligible_sorted)} avg ML score: {all_avg:.1f}%")
         print(f"    Quality drop: {quality_drop:.1f}%")
         if quality_drop > 10:
-            print(f"    WARNING: Quality drop >10% when expanding to top 50")
+            print(f"    WARNING: Quality drop >10% across all eligible legs")
     elif len(eligible_sorted) >= 20:
         top_20_avg = sum(l.get("composite_score", 0) for l in eligible_sorted[:20]) / 20
         print(f"  [parlay_builder] Quality validation:")
         print(f"    Top 20 avg ML score: {top_20_avg:.1f}%")
         print(f"    (Not enough legs for top 50 comparison)")
 
-    pool = eligible_sorted[:POOL_SIZE]
+    pool = eligible_sorted  # Use ALL eligible legs, not just top N
 
     print(
         f"  [parlay_builder] Received {len(all_legs)} scored legs | "
@@ -208,7 +208,7 @@ def build_hybrid_parlays(
     )
     print(
         f"  [parlay_builder] {len(eligible)} eligible legs → "
-        f"top {len(pool)} scored (Tier {TIER})"
+        f"using all {len(pool)} for parlay building (Tier {TIER})"
     )
 
     if len(pool) < MIN_LEGS:
