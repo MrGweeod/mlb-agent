@@ -298,6 +298,15 @@ def _find_qualifying_legs(
         if stat == "strikeouts" and line < 3.0 and line != 0.5:
             continue
 
+        # Block unprofitable direction/stat combos (profit analysis, May 2026):
+        # - Hitter strikeouts under (0.5 line): 36.7% win rate, -$0.32/dollar
+        # - Total bases under (1.5 line): 59.7% win rate, -$0.10/dollar
+        direction = prop.get("direction", "over")
+        if stat == "strikeouts" and line == 0.5 and direction == "under":
+            continue
+        if stat == "totalBases" and line == 1.5 and direction == "under":
+            continue
+
         odd_id = prop.get("odd_id", "")
         if odd_id in seen_odd_ids:
             continue

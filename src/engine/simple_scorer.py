@@ -1,94 +1,133 @@
 """
-Simple, transparent leg scoring based on coverage and pitcher matchup quality.
-No ML model. No adjustments. Just math.
+Simple coverage-based leg scorer using existing database fields.
+No ML model required - uses contextual adjustments on validated coverage data.
+
+Phase 1: Uses only data already in mlb_scored_legs table
+- coverage_vs_hand (handedness-specific coverage)
+- coverage_overall (fallback if no handedness data)
+- coverage_recent_10 (hot/cold streaks)
+- pitcher_era, pitcher_k9 (opponent quality)
+- lineup_consistency (playing time stability, 0-1 scale)
 """
+
+_PITCHER_POSITIONS = frozenset({"P", "SP", "RP", "TWP"})
 
 
 def calculate_composite_score(leg):
     """
-    Score = coverage_overall + pitcher_matchup_adjustment
+    Score = base_coverage + contextual adjustments.
 
     Args:
-        leg (dict): Must contain:
-            - coverage_overall (float): 0-100, % times player goes over/under
-            - direction (str): 'over' or 'under'
-            - pitcher_era (float, optional): Opposing pitcher's ERA
-            - stat (str): 'hits', 'strikeouts', etc.
+        leg (dict): Leg data with coverage and context fields.
 
     Returns:
         float: composite_score (5-95 range)
     """
-    # Base score is just coverage
-    base_score = leg.get("coverage_overall", 0)
 
-    # Pitcher quality adjustment (if available)
-    pitcher_adjustment = 0
-    pitcher_era = leg.get("pitcher_era")
+    # ============================================
+    # 1. PRIMARY SIGNAL: Handedness-Aware Coverage
+    # ============================================
+    if leg.get("coverage_vs_hand") is not None and leg.get("coverage_vs_hand") > 0:
+        base_score = leg["coverage_vs_hand"]
+        has_split = True
+    elif leg.get("coverage_overall") is not None:
+        base_score = leg["coverage_overall"]
+        has_split = False
+    else:
+        base_score = leg.get("coverage_pct", 50)
+        has_split = False
 
-    if pitcher_era is not None and leg.get("stat") in ["hits", "totalBases", "rbi"]:
-        direction = leg.get("direction", "").lower()
+    score = base_score
 
-        if direction == "under":
-            # UNDER props benefit from elite pitchers
-            if pitcher_era < 3.0:
-                pitcher_adjustment = 15
-            elif pitcher_era < 3.5:
-                pitcher_adjustment = 10
-            elif pitcher_era < 4.0:
-                pitcher_adjustment = 5
-            elif pitcher_era > 5.0:
-                pitcher_adjustment = -10  # Weak pitcher = avoid under
+    # Small bonus for having split data (larger sample, more reliable)
+    if has_split:
+        score += 3
 
-        elif direction == "over":
-            # OVER props benefit from weak pitchers
-            if pitcher_era > 5.0:
-                pitcher_adjustment = 10
-            elif pitcher_era > 4.5:
-                pitcher_adjustment = 5
-            elif pitcher_era < 3.0:
-                pitcher_adjustment = -10  # Elite pitcher = avoid over
+    # ============================================
+    # 2. RECENT FORM: Hot/Cold Streaks
+    # ============================================
+    recent_10 = leg.get("coverage_recent_10")
+    if recent_10 is not None:
+        form_delta = recent_10 - base_score
+        if form_delta > 15:      # Player is hot
+            score += 4
+        elif form_delta < -15:   # Player is cold
+            score -= 4
 
-    # Calculate final score
-    composite_score = base_score + pitcher_adjustment
+    # ============================================
+    # 3. PITCHER MATCHUP: Quality & Style
+    # ============================================
+    stat      = leg.get("stat", "")
+    direction = leg.get("direction", "")
+    position  = leg.get("position", "")
 
-    # Keep within bounds (5-95)
-    composite_score = max(5, min(95, composite_score))
+    # For HITTER props: adjust based on opposing pitcher ERA
+    if stat in ("hits", "totalBases", "rbi", "runsScored"):
+        pitcher_era = leg.get("pitcher_era")
+        if pitcher_era is not None:
+            if pitcher_era > 5.0:   # Weak pitcher
+                score += 5 if direction == "over" else -5
+            elif pitcher_era < 3.0: # Ace pitcher
+                score -= 5 if direction == "over" else -5
 
-    return composite_score
+    # For STRIKEOUT props: K-rate matters
+    if stat == "strikeouts":
+        pitcher_k9 = leg.get("pitcher_k9")
+        if pitcher_k9 is not None:
+            if position in _PITCHER_POSITIONS and direction == "over":
+                # Pitcher K over props
+                if pitcher_k9 > 10.0:
+                    score += 5
+                elif pitcher_k9 < 7.0:
+                    score -= 5
+            elif position not in _PITCHER_POSITIONS:
+                # Hitter strikeout props
+                if pitcher_k9 > 10.0 and direction == "over":
+                    score += 5   # High-K pitcher → hitter likely to K
+                elif pitcher_k9 < 7.0 and direction == "over":
+                    score -= 5   # Low-K pitcher → hitter unlikely to K
+
+    # ============================================
+    # 4. LINEUP STABILITY: Playing Time Risk
+    # ============================================
+    # lineup_consistency is on 0-1 scale (fraction of last 10 games with 3+ AB)
+    lineup_consistency = leg.get("lineup_consistency")
+    if lineup_consistency is not None and lineup_consistency < 0.50:
+        score -= 5
+
+    return max(5, min(95, score))
 
 
 def score_legs(legs):
     """
-    Score all legs using simple coverage + pitcher adjustment.
+    Score all legs using simple coverage + contextual adjustments.
 
     Args:
         legs (list): List of leg dictionaries with coverage and pitcher data
 
     Returns:
-        list: Same legs with composite_score added
+        list: Same legs with composite_score added (mutated in-place)
     """
-    scored = []
-
     for leg in legs:
-        # Calculate score
+        base = (
+            leg.get("coverage_vs_hand")
+            or leg.get("coverage_overall")
+            or leg.get("coverage_pct", 50)
+        )
         score = calculate_composite_score(leg)
-
-        # Add to leg
         leg["composite_score"] = score
-
-        # Add scoring breakdown for transparency
         leg["score_breakdown"] = {
-            "base_coverage": leg.get("coverage_overall", 0),
-            "pitcher_adjustment": score - leg.get("coverage_overall", 0),
+            "base_coverage": base,
             "final_score": score,
+            "used_split": leg.get("coverage_vs_hand") is not None and leg.get("coverage_vs_hand") > 0,
         }
 
-        scored.append(leg)
-
-    if scored:
+    if legs:
+        scores = [l["composite_score"] for l in legs]
         print(
-            f"[simple_scorer] Scored {len(scored)} legs | "
-            f"avg score: {sum(l['composite_score'] for l in scored) / len(scored):.1f}"
+            f"[simple_scorer] Scored {len(legs)} legs | "
+            f"avg={sum(scores)/len(scores):.1f} | "
+            f"min={min(scores):.1f} | max={max(scores):.1f}"
         )
 
-    return scored
+    return legs
