@@ -356,7 +356,7 @@ def _pitcher_coverage(
         recent_log = game_log[-5:]
         recent_covered, recent_games = _count_coverage(recent_log, stat_field, line, direction)
 
-    if overall_games < 3:
+    if overall_games < 10:
         return None
 
     return {
