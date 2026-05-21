@@ -76,12 +76,14 @@ def _filter_legs(legs, min_coverage=65.0):
     Simple unified filter:
     1. composite_score >= min_coverage
     2. Extra threshold for high-variance props (homeRuns, stolenBases)
+    3. Juice cap: exclude props with odds worse than -300
 
     No ML model adjustments. No direction bias. Just quality threshold.
     """
     filtered = []
     high_variance_blocked = 0
     low_score_blocked = 0
+    extreme_juice_blocked = 0
 
     for leg in legs:
         score = leg.get("composite_score", 0)
@@ -98,12 +100,22 @@ def _filter_legs(legs, min_coverage=65.0):
                 high_variance_blocked += 1
                 continue
 
+        # Juice cap: block props with odds worse than -300
+        odds = leg.get("best_odds")
+        if odds is not None:
+            try:
+                if float(odds) < -300:
+                    extreme_juice_blocked += 1
+                    continue
+            except (ValueError, TypeError):
+                pass
+
         filtered.append(leg)
 
     over_count = len([x for x in filtered if x.get("direction", "").lower() == "over"])
     under_count = len([x for x in filtered if x.get("direction", "").lower() == "under"])
 
-    print(f"  [filter_legs] Blocked {low_score_blocked} low score + {high_variance_blocked} high variance")
+    print(f"  [filter_legs] Blocked {low_score_blocked} low score + {high_variance_blocked} high variance + {extreme_juice_blocked} extreme juice (odds < -300)")
     print(f"  [filter_legs] Kept {over_count} overs + {under_count} unders = {len(filtered)} total eligible")
 
     return filtered
