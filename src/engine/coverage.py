@@ -91,7 +91,15 @@ def get_season_minimum(games_played: int) -> int:
     return 20
 
 
-# ── helpers ───────────────────────────────────────────────────────────────────
+def get_season_minimum_pitcher(games_played: int) -> int:
+    """Minimum starts threshold for pitchers."""
+    if games_played < 10:
+        return 6
+    if games_played < 15:
+        return 8
+    return 10
+    
+    # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _count_coverage(game_log: list[dict], stat_field: str, line: float, direction: str = "over") -> tuple[int, int]:
     """
@@ -356,7 +364,7 @@ def _pitcher_coverage(
         recent_log = game_log[-5:]
         recent_covered, recent_games = _count_coverage(recent_log, stat_field, line, direction)
 
-    if overall_games < 10:
+    if overall_games < get_season_minimum_pitcher(overall_games):
         return None
 
     return {
