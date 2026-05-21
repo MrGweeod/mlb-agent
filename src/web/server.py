@@ -360,7 +360,7 @@ async def handle_build_parlays(request: web.Request) -> web.Response:
             return web.Response(
                 text=json.dumps({
                     "parlays": [],
-                    "message": "No valid parlay combinations found in +1000 to +1500 range",
+                    "message": "No valid parlay combinations found in +700 to +1000 range",
                 }),
                 content_type="application/json",
             )

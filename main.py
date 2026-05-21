@@ -280,7 +280,7 @@ def _find_qualifying_legs(
         line = float(standard_line)
 
         # Only allow the prop types the parlay system targets.
-        ALLOWED_STATS = {"hits", "strikeouts", "walks", "totalBases"}
+        ALLOWED_STATS = {"hits", "strikeouts", "walks", "totalBases", "rbi"}
         if stat not in ALLOWED_STATS:
             continue
 
@@ -300,11 +300,8 @@ def _find_qualifying_legs(
 
         # Block unprofitable direction/stat combos (profit analysis, May 2026):
         # - Hitter strikeouts under (0.5 line): 36.7% win rate, -$0.32/dollar
-        # - Total bases under (1.5 line): 59.7% win rate, -$0.10/dollar
         direction = prop.get("direction", "over")
         if stat == "strikeouts" and line == 0.5 and direction == "under":
-            continue
-        if stat == "totalBases" and line == 1.5 and direction == "under":
             continue
 
         odd_id = prop.get("odd_id", "")

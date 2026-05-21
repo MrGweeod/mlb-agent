@@ -1373,7 +1373,7 @@ function fmtAmerican(american) {
 function reachesTarget(leg, selectedLegs) {
   if (selectedLegs.length < 1) return false;
   const odds = calcCombinedOdds([...selectedLegs, leg]);
-  return odds !== null && odds >= 1000 && odds <= 1500;
+  return odds !== null && odds >= 700 && odds <= 1000;
 }
 
 // ── Selection ─────────────────────────────────────────────────────────────────
@@ -1461,9 +1461,9 @@ function updatePanel() {
   const combinedOdds = calcCombinedOdds(selected);
   const oddsEl = document.getElementById('combined-odds');
   oddsEl.textContent = fmtAmerican(combinedOdds);
-  if (combinedOdds !== null && combinedOdds >= 1000 && combinedOdds <= 1500) {
+  if (combinedOdds !== null && combinedOdds >= 700 && combinedOdds <= 1000) {
     oddsEl.className = 'odds-value in-target';
-  } else if (combinedOdds !== null && combinedOdds > 1500) {
+  } else if (combinedOdds !== null && combinedOdds > 1000) {
     oddsEl.className = 'odds-value above-target';
   } else {
     oddsEl.className = 'odds-value';
