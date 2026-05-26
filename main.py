@@ -997,6 +997,13 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
     # Persist recommendations for calibration tracking
     log_recommendations(parlays)
 
+    # Shadow enriched pipeline — never blocks production
+    try:
+        from src.pipelines.run_enriched_pipeline import run_enriched_pipeline
+        run_enriched_pipeline(qualifying_legs)
+    except Exception as _enr_err:
+        print(f"[ENRICHED PIPELINE] Failed — production unaffected: {_enr_err}")
+
     return parlays
 
 
