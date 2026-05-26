@@ -1,138 +1,146 @@
 # MLB Parlay Agent 🤖⚾
 
-**Last Updated:** May 21, 2026  
-**Status:** ✅ Operational - Strategy Optimized  
-**Win Rate:** Monitoring (Expected: 18-22% parlay win rate)
+**Last Updated:** May 26, 2026  
+**Status:** ✅ Operational — Shadow Enriched Pipeline Active  
+**Win Rate:** ~11% parlay win rate (target 18–22%, enriched scoring under evaluation)
 
-An intelligent MLB parlay recommendation system that analyzes player performance data, calculates direction-aware coverage percentages, and builds optimized 4-leg parlays with +700 to +1000 combined odds.
+An intelligent MLB parlay recommendation system that analyzes player performance data, calculates direction-aware coverage percentages, and builds optimized 4-leg parlays with +700 to +1000 combined odds. A shadow enriched pipeline runs alongside production to evaluate three new scoring signals before promotion.
 
 ---
 
 ## 🎯 What It Does
 
 1. **Fetches MLB Props** — Pulls 2000+ player props daily from SportsGameOdds API
-2. **Filters Surgically** — Only keeps profitable props validated with 7,895 resolved legs
+2. **Filters Surgically** — Only keeps profitable props validated with 7,895+ resolved legs
 3. **Calculates Coverage** — Direction-aware: "How often does this player go OVER/UNDER this line?"
-4. **Scores Intelligently** — Coverage + 5 contextual adjustments (no ML model)
-5. **Blocks Toxic Props** — Removes categories with <40% win rate
-6. **Caps Extreme Juice** — Blocks props with odds worse than -300 from parlays
-7. **Builds Parlays** — Branch-and-bound search for optimal 4-leg combinations with player diversity
-8. **Logs Everything** — Saves all legs and parlays to Supabase for tracking and analysis
-9. **Resolves Outcomes** — Updates legs and parlays with win/loss results each morning
+4. **Scores Intelligently** — Coverage + 5 contextual adjustments (Phase 1 simple scorer)
+5. **Shadow Scores** — Runs enriched scorer in parallel with 3 additional signals (Phase 2)
+6. **Blocks Toxic Props** — Removes categories with poor win rates
+7. **Caps Extreme Juice** — Blocks props with odds worse than -300 from parlays
+8. **Builds Parlays** — Branch-and-bound search for optimal 4-leg combinations
+9. **Logs Everything** — Production and shadow data to Supabase for tracking and comparison
+10. **Resolves Outcomes** — Updates legs and parlays with win/loss results each morning
 
 ---
 
 ## 🚀 Key Features
 
-### **Strategy Optimization (NEW - May 21)**
-- **Parlay odds lowered to +700-1000** (from +900-1500)
-- **Juice cap active** - Blocks props with odds < -300 from parlays
-- **RBI props unblocked** - 523 props now available (66.5% win rate validated)
-- **Total Bases under unblocked** - 80% win rate post-May-15
-- **Expected impact:** 4-6 parlays per run (from 1), 18-22% win rate
+### **Shadow Enriched Pipeline (NEW — May 26)**
 
-**Why the Change?**
-May 20 analysis revealed selection bias: system was underusing winners (RBI under 66.5% WR, Hits under 71.9% WR) because +900 minimum required plus-money props. Heavy juice = high win rate, so new strategy aligns odds range with best props.
+A parallel scoring pipeline runs after every production run (scheduled + manual) writing to separate shadow tables. Three new signals are being evaluated:
+
+**Signal 1 — Blended ERA Rank:**
+Blends season ERA rank (50%) with pitcher's last 3-start ERA rank (50%). Captures form better than season averages alone.
+
+**Signal 2 — Opponent-Specific Coverage:**
+Calculates batter's hit rate vs tonight's specific opponent. Requires minimum 3 matchups. Applies 25% of the coverage delta as an adjustment (±8 cap).
+
+**Signal 3 — Ballpark Factor:**
+30-row `ballpark_factors` table (Coors 115 → Petco 94). Adjusts hitter props up/down based on run environment.
+
+**Comparison framework:** Every enriched run is linked to its production counterpart via `production_batch_id`, enabling precise side-by-side win rate comparison after 5–7 days of data collection.
+
+---
 
 ### **Phase 1 Simple Scorer (May 20)**
-- **No ML model required** - Uses raw coverage + contextual adjustments
-- **Transparent scoring** - Can see exactly why each leg got its score
-- **Empirically validated** - 69% accuracy on 7,895 resolved legs
-- **5 contextual adjustments:**
-  - Handedness splits (+3 bonus when split data available)
-  - Hot/cold streaks (±4 for 15+ point swings)
-  - Pitcher ERA quality (±5 for weak/ace pitchers)
-  - Pitcher K/9 rate (±5 for strikeout props)
-  - Lineup stability (-5 for platoon risk)
+Coverage-based scoring with 5 contextual adjustments. Replaced inverted ML model (7.6% win rate) with transparent scoring.
+
+```python
+score = base_coverage + adjustments
+# base = coverage_vs_hand (preferred) or coverage_overall
+# adjustments:
+#   +3  handedness split available
+#   ±4  recent form (10-game rolling window)
+#   ±5  opponent pitcher ERA quality
+#   ±5  pitcher K/9 rate (for strikeout props)
+#   -5  lineup stability < 50%
+```
+
+---
 
 ### **Profitable Prop Filtering**
-Based on profit analysis of 7,895 resolved legs:
 
-**✅ ALLOWED (Profitable):**
-- Hits over 0.5 (69.4% win rate, +$0.32 profit per $1)
-- Hits under 0.5 (71.9% win rate post-May-15, +$0.14 profit per $1)
-- Pitcher strikeouts over 3.5+ (69.3% win rate, +$0.54 profit per $1)
-- RBI under 0.5 (66.5% win rate, 100% in parlays post-May-15) ← **NEW**
-- Total bases under 1.5 (80% win rate post-May-15) ← **NEW**
-- Walks 0.5 (marginal, kept for diversity)
+| Prop | Direction | Win Rate | Status |
+|---|---|---|---|
+| Hits | Over | 69.4% | ✅ Allowed |
+| Hits | Under | 71.9% | ✅ Allowed |
+| Total Bases | Under | 75–80% | ✅ Allowed |
+| RBI | Under | 66.5% | ✅ Allowed |
+| Pitcher K | Over | 56.9% | ✅ Allowed |
+| Pitcher K ≥5.5 | Under | ~65%+ | ✅ Allowed |
+| Hitter K | Under 0.5 | 36.7% | ❌ Blocked |
+| Pitcher K <5.5 | Under | ~45% | ⚠️ Pending block |
+| Any prop | Either | — | 🚫 Blocked if odds < -300 in parlays |
 
-**❌ BLOCKED (Unprofitable):**
-- Hitter strikeouts under 0.5 (36.7% win rate, -$0.32 per $1)
-- Walks under (unreliable data)
-- Stolen bases (low volume, noise)
+---
 
-**🚫 BLOCKED FROM PARLAYS (Extreme Juice):**
-- Any prop with odds < -300 (12 RBI props at avg -386)
-- Blocks extreme juice that poisons odds pool
-- Props still scored, just not used in parlays
+### **Direction-Aware Coverage**
+```python
+# OVER props
+coverage_pct = (games_over / total_games) * 100
 
-### **Direction-Aware Coverage (Validated May 21)**
-- Not "how often does player get hits" (ambiguous)
-- But "how often does player get OVER 0.5 hits" (precise)
-- Handedness splits: Batter vs RHP/LHP tracked separately
-- Uses 10-game rolling window, last 50 games of data
-- **Validation:** 100% of props calculate coverage successfully, 80-100% pass ≥65% threshold
+# UNDER props
+coverage_pct = (games_under / total_games) * 100
 
-### **Player Diversity Constraint**
-- **Max 1 leg per player per generation batch**
-- Eliminates catastrophic wipeout risk
-- Forces exploration of deeper leg pool
-- Example: 3 parlays = 12 unique players (no repeats)
+# Handedness split
+coverage_vs_RHP = games_over_vs_RHP / total_games_vs_RHP * 100
+```
+
+Validated May 21: 100% of props calculate successfully, 80–100% pass ≥65% threshold.
+
+---
 
 ### **Intelligent Parlay Construction**
-- 4 legs per parlay (fixed)
-- Combined odds: **+700 to +1000** ← **UPDATED May 21**
-- Juice cap: props with odds < -300 excluded
+- 4 legs per parlay
+- Combined odds: **+700 to +1000**
+- Juice cap: props with odds < -300 excluded from parlay pool
 - Max 2 legs per game (correlation limit)
 - Max 1 leg per player per batch (diversity constraint)
-- Expected: 4-6 parlays per generation run
-- Branch-and-bound search over all eligible legs
+- Branch-and-bound search
+
+---
 
 ### **Daily Pipeline (3x per day)**
-- **9 AM ET:** Resolution + fetch/score/build
-- **12 PM ET:** Fresh props refresh (diversity resets)
-- **5:30 PM ET:** Final refresh before games (diversity resets)
-- **Manual:** Regenerate button in web UI
+- **9 AM ET:** Resolution + fetch/score/build (shadow runs after)
+- **12 PM ET:** Fresh props refresh (shadow runs after)
+- **5:30 PM ET:** Final refresh before games (shadow runs after)
+- **Manual:** Regenerate button in web UI (shadow runs after)
 
 ---
 
 ## 📊 Current Performance
 
-### **Baseline (Pre-Phase 1, May 18)**
-- Parlay win rate: **7.6%**
-- At +1200 odds: **-$0.02 per $1** (breakeven/losing)
-- Problem: ML model inverting predictions, including unprofitable props
+### **May 22–25 (Post-Strategy-Change)**
 
-### **Post-May-15 Performance (Clean Coverage Data)**
+| Metric | Value | Target |
+|---|---|---|
+| Parlay win rate | ~11% | 18–22% |
+| Total Bases under win rate | 75.0% | ✅ |
+| Hits over win rate | 71.4% | ✅ |
+| Hits under win rate | 69.0% | ✅ |
+| Strikeouts over win rate | 56.9% | ⚠️ |
+| Strikeouts under win rate | 53.7% | ❌ |
 
-**Individual Leg Accuracy:**
+**Gap analysis:** Weighted avg leg win rate ~63.6% → expected parlay win rate ~16.3%. Actual ~11% likely explained by same-game correlation on 2-leg-per-game parlays.
 
-| Prop Type | Direction | Win Rate | Sample Size | Status |
-|-----------|-----------|----------|-------------|--------|
-| **Hits** | **Under** | **71.9%** | 27/139 in parlays | ✅ Validated |
-| **Total Bases** | **Under** | **80.0%** | 24/236 in parlays | ✅ Validated |
-| **RBI** | **Under** | **66.5%** | 5/523 in parlays | ✅ Validated |
-| **Hits** | **Over** | **63.2%** | 18/280 in parlays | ✅ Validated |
-| **Strikeouts** | **Over** | **61.4%** | 127/197 in parlays | ✅ Validated |
+### **Expected Performance (Target)**
+- 4-leg at 67%: 0.67^4 = **20.2% win rate**
+- At +800 odds: +$81.60 per $100 → **ROI 81.6%**
 
-**Selection Bias Identified (Pre-May-21):**
-- RBI under: 66.5% training → 100% parlay BUT only 1% selection rate
-- System was underusing winners due to +900 minimum + juice filters
-- Fixed May 21: lowered to +700-1000, unblocked RBI, added juice cap
+---
 
-### **Expected Parlay Performance (Updated May 21)**
+## 🗄️ Database Tables
 
-**With +700-1000 range and juice cap:**
-- 4-leg parlay at 67% per-leg: 0.67^4 = **20.2% win rate**
-- At +800 odds: (20.2% × $800) - (79.8% × $100) = **+$81.60 per $100**
-- **ROI: 81.6%**
-
-**Conservative estimate:**
-- Mixed legs (65-70% range): **18-22% parlay win rate**
-- At +700-900 odds: **+$30-80 profit per $100**
-
-**Previous (before May 21):**
-- +900-1500 range: **7-10% win rate** (struggling to build parlays)
+| Table | Purpose | Status |
+|---|---|---|
+| `mlb_scored_legs` | Daily production legs | ✅ Active |
+| `mlb_parlay_recommendations_v2` | Production parlays | ✅ Active |
+| `mlb_parlay_legs_v2` | Production parlay legs | ✅ Active |
+| `mlb_training_data` | Historical (94K+ rows) | ✅ Active |
+| `mlb_scored_legs_enriched` | Shadow scored legs | ✅ Active |
+| `mlb_parlay_recommendations_enriched` | Shadow parlays | ✅ Active |
+| `mlb_parlay_legs_enriched` | Shadow parlay legs | ✅ Active |
+| `ballpark_factors` | Park run/HR factors (30 rows) | ✅ Static |
 
 ---
 
@@ -142,10 +150,7 @@ Based on profit analysis of 7,895 resolved legs:
 - **Framework:** Flask (Web UI + API)
 - **Database:** Supabase (PostgreSQL)
 - **Hosting:** Railway (auto-deploy from GitHub)
-- **Data Sources:** 
-  - SportsGameOdds API (prop odds)
-  - MLB Stats API (game logs, stats)
-  - MLB Statsapi Library (game logs)
+- **Data Sources:** SportsGameOdds API, MLB Stats API
 - **Scheduler:** APScheduler (3x daily runs)
 
 ---
@@ -156,24 +161,26 @@ Based on profit analysis of 7,895 resolved legs:
 mlb-agent/
 ├── src/
 │   ├── engine/
-│   │   ├── simple_scorer.py         # Phase 1 coverage-based scorer
-│   │   ├── coverage.py              # Direction-aware coverage calculation
-│   │   ├── parlay_builder.py       # Parlay construction logic (juice cap)
-│   │   └── resolver.py              # Outcome resolution
+│   │   ├── simple_scorer.py          # Phase 1 production scorer
+│   │   ├── enriched_scorer.py        # Phase 2 shadow scorer (3 new signals)
+│   │   ├── coverage.py               # Direction-aware coverage calculation
+│   │   ├── parlay_builder.py         # Parlay construction (juice cap)
+│   │   └── resolver.py               # Outcome resolution
+│   ├── pipelines/
+│   │   └── run_enriched_pipeline.py  # Shadow pipeline (writes to enriched tables)
 │   ├── web/
-│   │   ├── server.py                # Flask web server
-│   │   └── static/                  # Web UI (HTML/CSS/JS)
+│   │   ├── server.py                 # Flask web server
+│   │   └── static/                   # Web UI
 │   └── db/
-│       └── db.py                    # Supabase connection
-├── main.py                          # Pipeline orchestrator (prop filtering)
-├── requirements.txt                 # Python dependencies
-├── Dockerfile                       # Railway deployment
-├── docs/
-│   ├── SESSION_HANDOFF.md          # Current state + next steps
-│   ├── BUILD_STATUS.md             # System health dashboard
-│   ├── ARCHITECTURE_DECISIONS.md   # Design decisions + rationale
-│   └── WORKFLOW_RULES.md           # Development guidelines
-└── README.md                        # This file
+│       └── db.py                     # Supabase connection
+├── main.py                           # Pipeline orchestrator + shadow pipeline hook
+├── requirements.txt
+├── Dockerfile
+└── docs/
+    ├── SESSION_HANDOFF.md
+    ├── BUILD_STATUS.md
+    ├── ARCHITECTURE_DECISIONS.md
+    └── README.md
 ```
 
 ---
@@ -182,66 +189,44 @@ mlb-agent/
 
 ### **✅ Working Well**
 - Simple coverage-based scorer (Phase 1)
-- Direction-aware coverage calculation (validated May 21)
+- Direction-aware coverage calculation
+- Shadow enriched pipeline (all 3 signals computing)
+- Data integrity: IDs, timestamps, and production_batch_id all linked correctly
 - Prop filtering (blocking unprofitable categories)
-- Juice cap (blocks odds < -300)
+- Juice cap (no props < -300 in parlays)
 - Player diversity constraint
 - Pipeline scheduler (3x daily)
-- Database logging (all data persisting)
-- Web UI (all features functional)
-- Railway deployment (auto-deploy working)
+- 9AM morning pipeline (confirmed producing parlays since May 22)
 
-### **📊 Monitoring (May 22+)**
-- Parlay count on full slate (target: 4-6)
-- Parlay win rate (target: 18-22%)
-- RBI prop usage (target: 20-30% of parlays)
-- Juice cap effectiveness (0 props < -300 in parlays)
-- Individual leg accuracy by prop type
+### **📊 Under Evaluation (May 27–June 2)**
+- Enriched scoring signals vs production win rate comparison
+- Pitcher K under line threshold impact (pending implementation)
 
-### **⚠️ Known Issues**
-- May 21 evening run: Only 1 parlay built (valid - only 5 of 7 games available)
-- Not a bug - pipeline ran 7:57pm ET after games started
-- Awaiting full slate validation (May 22+ at 9AM)
+### **⚠️ Pending Implementation**
+- Pitcher K under line ≥5.5 minimum (main.py filter)
+- `won_with_void` outcome tracking (parlay_outcome_resolver.py)
 
 ---
 
-## 🎯 Recent Changes
+## 🔄 Recent Changes
+
+### **May 26, 2026: Shadow Enriched Pipeline**
+- Built `enriched_scorer.py` with 3 new signals
+- Built `run_enriched_pipeline.py` (shadow pipeline)
+- Created `ballpark_factors` table (30 rows)
+- Created enriched shadow tables with proper sequences and defaults
+- Added `production_batch_id` for comparison framework
+- Fixed data integrity: IDs, parlay_id links, and created_at all now populating
 
 ### **May 21, 2026: Strategy Optimization**
-1. **Lowered parlay odds to +700-1000** (from +900-1500)
-   - Allows using heavy juice props (best win rates)
-   - Aligns strategy with data
-   
-2. **Added juice cap** - blocks props with odds < -300 from parlays
-   - Removes 12 extreme juice RBI props (avg -386)
-   - Improves average pool odds from -233 → -210
-   
-3. **Unblocked RBI props** - 523 props now available
-   - 66.5% win rate validated
-   - 100% actual performance in limited sample (5/5)
-   
-4. **Unblocked Total Bases under** - 80% win rate post-May-15
-   - Block was based on bad pre-May-15 data (inverted coverage)
+- Lowered odds to +700–+1000, added juice cap, unblocked RBI and TB under
 
 ### **May 20, 2026: Phase 1 Simple Scorer**
-1. Removed ML model (was inverting predictions)
-2. Implemented simple coverage-based scorer
-3. Added contextual adjustments (handedness, form, pitcher, K-rate, stability)
-4. Blocked unprofitable prop types (hitter K under)
-5. Validated with 7,895 resolved legs (69% accuracy)
-
-### **May 13-14, 2026: Coverage Direction Fix**
-1. Fixed coverage calculation (was using wrong direction)
-2. Backfilled all historical data
-3. Validated accuracy manually (Shane McClanahan test case)
+- Replaced ML model, validated 69% accuracy on 7,895 resolved legs
 
 ---
 
-## 📈 Performance Tracking
-
-### **Key Metrics Dashboard**
-
-Run this daily to monitor system health:
+## 📈 Performance Monitoring
 
 ```sql
 -- Parlay win rate (last 7 days)
@@ -250,127 +235,29 @@ SELECT
     (COUNT(*) FILTER (WHERE outcome = 'won') * 100.0 / 
      COUNT(*) FILTER (WHERE outcome IN ('won','lost')))::numeric(5,1) as win_rate
 FROM mlb_parlay_recommendations_v2
-WHERE run_date >= CURRENT_DATE - 7
-  AND outcome IS NOT NULL;
-```
+WHERE run_date >= CURRENT_DATE - 7 AND outcome IS NOT NULL;
 
-**Target:** 18-22% win rate
-
-```sql
--- Individual leg accuracy by prop type (last 7 days)
-SELECT 
-    stat,
-    direction,
-    COUNT(*) as legs,
-    (COUNT(*) FILTER (WHERE outcome = 'won') * 100.0 / 
-     COUNT(*) FILTER (WHERE outcome IN ('won','lost')))::numeric(5,1) as win_rate
-FROM mlb_parlay_legs_v2 l
-JOIN mlb_parlay_recommendations_v2 p ON l.parlay_id = p.id
+-- Production vs enriched comparison (after 5-7 days)
+SELECT 'production' as pipeline, p.rank, p.total_odds, p.outcome,
+       l.player_name, l.stat, l.direction, l.outcome as leg_outcome
+FROM mlb_parlay_recommendations_v2 p
+JOIN mlb_parlay_legs_v2 l ON l.parlay_id = p.id
+WHERE p.batch_id IN (
+    SELECT DISTINCT production_batch_id 
+    FROM mlb_parlay_recommendations_enriched
+    WHERE run_date >= CURRENT_DATE - 7
+)
+UNION ALL
+SELECT 'enriched' as pipeline, p.rank, p.total_odds, p.outcome,
+       l.player_name, l.stat, l.direction, l.outcome as leg_outcome
+FROM mlb_parlay_recommendations_enriched p
+JOIN mlb_parlay_legs_enriched l ON l.parlay_id = p.id
 WHERE p.run_date >= CURRENT_DATE - 7
-  AND l.outcome IS NOT NULL
-GROUP BY stat, direction
-ORDER BY win_rate DESC;
-```
-
-**Target:** 65-75% per leg across all types
-
-```sql
--- Juice cap validation (should be 0)
-SELECT COUNT(*) as extreme_juice_in_parlays
-FROM mlb_parlay_legs_v2 l
-JOIN mlb_parlay_recommendations_v2 p ON l.parlay_id = p.id
-WHERE p.run_date >= CURRENT_DATE
-  AND l.odds::numeric < -300;
-```
-
-**Expected:** 0 rows
-
----
-
-## 🔧 Local Development
-
-### **Setup**
-
-```bash
-# Clone repository
-git clone https://github.com/MrGweeod/mlb-agent.git
-cd mlb-agent
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Set environment variables
-export DATABASE_URL="postgresql://..."
-export SPORTSGAMEODDS_API_KEY="..."
-export BEARER_TOKEN="..."
-
-# Run pipeline once
-python main.py
-
-# Start web server
-python -m src.web.server
-```
-
-### **Run Tests**
-
-```bash
-# Test simple scorer
-python test_simple_scorer.py
-
-# Test coverage calculation
-python -c "from src.engine.coverage import calculate_coverage; print(calculate_coverage(...))"
-
-# Test parlay builder
-python -c "from src.engine.parlay_builder import build_hybrid_parlays; print(build_hybrid_parlays(...))"
+ORDER BY pipeline DESC, rank, player_name;
 ```
 
 ---
 
-## 📚 Documentation
-
-Detailed documentation in `/docs`:
-
-- **[SESSION_HANDOFF.md](docs/SESSION_HANDOFF.md)** - Current state, recent changes, next steps
-- **[BUILD_STATUS.md](docs/BUILD_STATUS.md)** - Component health dashboard
-- **[ARCHITECTURE_DECISIONS.md](docs/ARCHITECTURE_DECISIONS.md)** - Design decisions and rationale
-- **[WORKFLOW_RULES.md](docs/WORKFLOW_RULES.md)** - Development guidelines
-
----
-
-## 🤝 Contributing
-
-This is a personal project, but if you'd like to contribute:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit changes (`git commit -m 'Add amazing feature'`)
-4. Push to branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
----
-
-## 📜 License
-
-This project is private and not currently licensed for public use.
-
----
-
-## 🙏 Acknowledgments
-
-- **SportsGameOdds** - Player prop odds data
-- **MLB Stats API** - Historical game logs and stats
-- **Supabase** - Database hosting
-- **Railway** - Application hosting and deployment
-- **Claude (Anthropic)** - Development assistance and debugging
-
----
-
-## 📞 Contact
-
-For questions or issues, open a GitHub issue or contact the repository owner.
-
----
-
-**Last Updated:** May 21, 2026  
-**System Status:** ✅ Operational - Strategy Optimized  
-**Next Validation:** May 22-25, 2026 (Full Slate Testing)
+**Last Updated:** May 26, 2026  
+**System Status:** ✅ Operational — Shadow Pipeline Active  
+**Next Review:** June 1–2, 2026 (Shadow Comparison Analysis)
