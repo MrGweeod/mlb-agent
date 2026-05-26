@@ -1,7 +1,7 @@
 # MLB Parlay Agent — Architecture Decisions
-**Last Updated:** May 21, 2026 (Parlay Strategy Optimization)
+**Last Updated:** May 26, 2026 (Shadow Enriched Pipeline)
 
-This document captures the key architectural and design decisions made during the development of the MLB Parlay Agent, along with the reasoning behind each choice and lessons learned.
+This document captures key architectural and design decisions made during development, along with reasoning and lessons learned.
 
 ---
 
@@ -10,13 +10,15 @@ This document captures the key architectural and design decisions made during th
 2. [Scoring System Evolution](#scoring-system-evolution)
 3. [Coverage Calculation](#coverage-calculation)
 4. [Prop Type Filtering](#prop-type-filtering)
-5. [Parlay Construction Strategy](#parlay-construction-strategy) ← **UPDATED May 21**
-6. [Juice Cap Decision](#juice-cap-decision) ← **NEW**
+5. [Parlay Construction Strategy](#parlay-construction-strategy)
+6. [Juice Cap Decision](#juice-cap-decision)
 7. [Player Diversity Constraint](#player-diversity-constraint)
-8. [Database Design](#database-design)
-9. [Pipeline Architecture](#pipeline-architecture)
-10. [Lessons Learned](#lessons-learned)
-11. [Future Considerations](#future-considerations)
+8. [Shadow Pipeline Strategy](#shadow-pipeline-strategy) ← **NEW**
+9. [Enriched Scoring Signals](#enriched-scoring-signals) ← **NEW**
+10. [Database Design](#database-design)
+11. [Pipeline Architecture](#pipeline-architecture)
+12. [Lessons Learned](#lessons-learned)
+13. [Future Considerations](#future-considerations)
 
 ---
 
@@ -24,122 +26,39 @@ This document captures the key architectural and design decisions made during th
 
 ### **Decision: Optimize for Hit Probability, Not Expected Value**
 
-**Rationale:**
-- Parlays multiply probabilities, so each leg's hit rate is paramount
-- A 75% coverage leg at -150 is better than a 65% leg at +120 for parlay construction
-- Expected value (EV) matters less when building 4-leg parlays (+700-1000 range)
-- Psychological factor: Users prefer consistent small wins over rare big wins
+Parlays multiply probabilities — each leg's hit rate is paramount. A 75% coverage leg at -150 is better than a 65% leg at +120 for parlay construction.
 
-**Implementation:**
-- Primary scorer: Coverage percentage (0-100%)
-- Secondary signals: Opponent pitcher adjustment, trend consistency
-- EV calculated but not weighted in leg selection
-
-**Trade-offs:**
-- ✅ Higher parlay win rates (target 18-22% for 4-leg)
-- ✅ More predictable outcomes
-- ❌ May pass on high-EV value plays if coverage is low
-- ❌ Negative EV on individual legs acceptable if parlay EV positive
-
-**Validation:** 
-- ✅ **May 20, 2026** - Profit analysis: 69% accuracy on coverage-based leg selection
-- ✅ **May 21, 2026** - Coverage calculation validated: 80-100% pass rate across all stat types
+**Validation:** ✅ May 20, 2026 — 69% accuracy on coverage-based leg selection confirmed.
 
 ---
 
 ## Scoring System Evolution
 
-### **THE JOURNEY: From ML to Simple Coverage-Based Scoring**
+### **Phase 0: ML Model (April–May 2026) — ABANDONED**
+GradientBoostingClassifier with 19 features. Direction feature absorbed 77% of importance. Score-outcome correlation was **inverted** — high scores (70–100) had 43.7% win rate, low scores (<55) had 55.1% win rate. Temporary adjustments (±26/±18) caused floor abuse (all unders → 5.0).
 
-This section documents one of the most important architectural decisions: abandoning a complex ML model in favor of transparent coverage-based scoring.
+**Parlay win rate:** 7.6%
 
----
+### **Phase 1: Simple Coverage-Based Scoring (May 20, 2026) — CURRENT PRODUCTION**
 
-### **Phase 0: Initial ML Model (April-May 2026)**
-
-**Architecture:**
-- GradientBoostingClassifier with 19 features
-- Isotonic calibration (stat-specific)
-- Temporary adjustments for direction bias
-
-**Features:**
-```
-coverage_overall, coverage_vs_hand, coverage_recent_10,
-coverage_recent_5, pitcher_quality, opponent_offense,
-line, direction (77% feature importance!),
-+ 11 stat one-hot features (hits, rbi, strikeouts, etc.)
-```
-
-**What It Produced:**
-```python
-base_prediction = gbm.predict_proba(features)[1]  # 0-1 probability
-calibrated = isotonic_calibrator.transform(base_prediction)
-score = calibrated + direction_adjustment + odds_penalty + same_game_penalty
-score = max(5, min(95, score))  # Floor and ceiling
-```
-
-**The Problem:**
-- Direction feature absorbed **77% of feature importance**
-- Model learned "unders usually cover" from training data
-- But in reality: **overs win 60%, unders win 30%**
-- Result: High scores (70-100) had **43.7% win rate**, low scores (<55) had **55.1% win rate**
-- **Score-outcome correlation was INVERTED**
-
-**Why It Failed:**
-The model was trained on "coverage %" as the target (how often the bet covered), not actual betting outcomes. Low lines (0.5 hits) made unders mathematically cover more often in historical data, so the model learned "under = good." But in actual DraftKings pricing, unders are overbet and lose money.
-
-**Temporary Fixes Tried:**
-- Direction penalty: -26 for unders, +18 for overs
-- Odds penalties: -15 for long-odds unders
-- Same-game penalty: -20
-- **Result:** Scores collapsed to 5.0 (floor) or 47.98 (near-constant). Discrimination lost.
-
-**Parlay Win Rate:** **7.6%** (barely breakeven, losing money)
-
----
-
-### **Phase 1: Simple Coverage-Based Scoring (May 20, 2026)**
-
-**The Turning Point:**
-Profit analysis on 7,895 resolved legs revealed raw coverage already works:
-
-| Prop Type | Direction | Win Rate | Profit per $1 | ML Score Needed? |
-|-----------|-----------|----------|---------------|------------------|
-| Hits over | - | 69.4% | +$0.32 | ❌ NO |
-| Pitcher K over | - | 69.3% | +$0.54 | ❌ NO |
-| Hits under | - | 73.1% | +$0.14 | ❌ NO |
-
-**Key Insight:** Coverage calculation (direction-aware) already achieves 69% accuracy. The ML model was making it WORSE.
-
-**New Architecture:**
 ```python
 score = base_coverage + contextual_adjustments
-
-Where:
-- base_coverage = coverage_vs_hand (preferred) or coverage_overall (fallback)
-- contextual_adjustments = sum of:
-    + handedness_bonus (0-3 points)
-    + recent_form_adjustment (-4 to +4 points)
-    + opponent_pitcher_adjustment (-5 to +5 points)
-    + strikeout_rate_adjustment (-5 to +5 points)
-    - volatility_penalty (0-5 points)
+# base = coverage_vs_hand (preferred) or coverage_overall
+# adjustments = handedness (+3) + form (±4) + pitcher ERA (±5) + K-rate (±5) + stability (-5)
 ```
 
-**Benefits:**
-- ✅ Transparent: each adjustment explainable
-- ✅ No direction bias: coverage calculated per direction
-- ✅ Predictable: scores correlate with win rates
-- ✅ Fast: no ML inference, just math
-- ✅ Maintainable: easy to tune adjustments
+**Parlay win rate:** ~11% (target 18–22%, gap under investigation)
 
-**Trade-offs:**
-- ❌ May miss complex interactions ML would catch
-- ❌ Requires manual tuning of adjustment weights
-- ✅ But ML model was corrupt anyway, so this is better
+### **Phase 2: Enriched Scoring (May 26, 2026) — SHADOW TESTING**
 
-**Validation:** ✅ **Confirmed May 20-21** - System generating consistent scores, coverage validated
+Three additional signals layered on top of Phase 1:
+1. **Blended ERA rank** — season ERA × 0.5 + last-3-start ERA × 0.5
+2. **Opponent coverage split** — batter's hit rate vs tonight's opponent (min 3 games)
+3. **Ballpark factor** — park run/HR factor from `ballpark_factors` table
 
-**Status:** ✅ Phase 1 deployed May 20, stable through May 21
+**Status:** Shadow pipeline collecting data. Production promotion after 5–7 day comparison analysis.
+
+**Key design decision:** Run enriched scoring as a shadow pipeline for 5–7 days before promoting to production. This allows apples-to-apples comparison (same legs, same days, two scoring systems) without risking production stability.
 
 ---
 
@@ -147,42 +66,17 @@ Where:
 
 ### **Decision: Direction-Aware Coverage with Handedness Splits**
 
-**Implementation:**
 ```python
-# For OVER props
+# OVER props
 coverage_pct = (games_over / total_games) * 100
 
-# For UNDER props
+# UNDER props
 coverage_pct = (games_under / total_games) * 100
-
-# Handedness split (when available)
-coverage_vs_RHP = games_over_vs_RHP / total_games_vs_RHP * 100
-coverage_vs_LHP = games_over_vs_LHP / total_games_vs_LHP * 100
 ```
 
-**Rationale:**
-- Hitter performance varies significantly vs LHP vs RHP
-- Direction matters: "hits over 0.5" is fundamentally different from "hits under 0.5"
-- Using wrong direction inflates coverage for props that rarely cover
+**The Bug (May 13–14):** Original code calculated OVER coverage for UNDER props. Fixed and backfilled all historical data.
 
-**The Bug (May 13-14):**
-- Original code calculated OVER coverage for UNDER props (and vice versa)
-- Example: Hits under 0.5 showed 70% coverage, but actually hit 30%
-- Fixed May 13-14, backfilled all historical data
-
-**Validation (May 21):**
-
-| Stat | Total Props | Coverage Calculated | Passed ≥65% | Pass Rate |
-|------|-------------|--------------------|--------------:|-----------|
-| Strikeouts | 9 | 9 | 9 | 100% |
-| RBI | 38 | 38 | 38 | 100% |
-| Hits | 33 | 33 | 27 | 81.8% |
-| Total Bases | 6 | 6 | 5 | 83.3% |
-| Walks | 1 | 1 | 1 | 100% |
-
-**Result:** ✅ **100% of props successfully calculate coverage. 80-100% pass ≥65% threshold.**
-
-**Status:** ✅ Working perfectly - no issues detected
+**Validation (May 21):** 100% of props calculate coverage successfully, 80–100% pass ≥65% threshold.
 
 ---
 
@@ -190,51 +84,23 @@ coverage_vs_LHP = games_over_vs_LHP / total_games_vs_LHP * 100
 
 ### **Decision: Block Unprofitable Prop Types**
 
-**Blocked Props (Post-May-15 Analysis):**
+| Prop | Win Rate | Status |
+|---|---|---|
+| Hits over | 69.4% | ✅ Allowed |
+| Hits under | 71.9% | ✅ Allowed |
+| Pitcher K over | 56.9% | ✅ Allowed |
+| RBI under | 66.5% | ✅ Allowed (unblocked May 21) |
+| Total Bases under | 75–80% | ✅ Allowed (unblocked May 21) |
+| Hitter K under 0.5 | 36.7% | ❌ Blocked |
+| Pitcher K under <5.5 | ~45% | ⚠️ Pending block |
 
-| Prop Type | Win Rate | Profit/$ | Reason | Status |
-|-----------|----------|----------|--------|--------|
-| Hitter K under 0.5 | 36.7% | -$0.32 | Losing money | ✅ Blocked |
-| Total Bases under 1.5 | 59.7% | -$0.10 | Below threshold | ✅ Unblocked May 21* |
-| Walks under | 66.7% | -$0.08 | Unreliable data | ✅ Blocked |
-| Stolen Bases (all) | 91.8% | +$0.01 | Low volume/noise | ✅ Blocked |
+### **Pitcher K Under Line Threshold — Pending Decision (May 26)**
 
-**\*Total Bases Under Unblock Rationale (May 21):**
-- Pre-May-15 data: 59.7% win rate (blocked due to inverted coverage)
-- Post-May-15 data: **80% win rate (24/30 parlays)**
-- Block was based on bad data from coverage bug
-- Now unblocked for selection
+Analysis of May 22–25 data showed pitcher K under losses concentrated at lines 4.5 and below:
+- **Losers:** Ureña 4.5 (0/2), Gallen 4.5 (0/1), Gausman 6.5 (0/1), Taillon 4.5 (0/1), Houser 3.5 (0/1)
+- **Winners:** McClanahan 5.5 (2/2), King 6.5 (2/2), Gray 5.5 (1/1), Sasaki 5.5 (1/1)
 
-**Allowed Props:**
-
-| Prop Type | Win Rate | Profit/$ | Reason | Status |
-|-----------|----------|----------|--------|--------|
-| Hits over | 69.4% | +$0.32 | Strong edge | ✅ Allowed |
-| Hits under | 71.9% | +$0.14 | Strong edge | ✅ Allowed |
-| Pitcher K over | 69.3% | +$0.54 | Strong edge | ✅ Allowed |
-| RBI under | 66.5% | TBD | Edge validated | ✅ Unblocked May 21 |
-
-**Implementation:**
-```python
-# main.py
-ALLOWED_STATS = {"hits", "strikeouts", "walks", "totalBases", "rbi"}
-
-# Block hitter strikeouts under 0.5 (36.7% win rate)
-if stat == "strikeouts" and line == 0.5 and direction == "under":
-    continue
-```
-
-**Rationale:**
-- Focus on profitable prop types only
-- Block toxic categories early (before coverage calculation)
-- Reduces noise, improves signal
-
-**Trade-offs:**
-- ✅ Higher win rates on selected props
-- ✅ Cleaner prop pool
-- ❌ Miss rare positive outliers in blocked categories
-
-**Validation:** ✅ **May 20-21** - Blocked props show consistent losses, allowed props show 65-75% win rates
+**Decision:** Add `line ≥ 5.5` minimum for pitcher K unders. Pending Claude Code implementation.
 
 ---
 
@@ -242,97 +108,21 @@ if stat == "strikeouts" and line == 0.5 and direction == "under":
 
 ### **Decision: +700 to +1000 Odds Range (Updated May 21)**
 
-**Evolution:**
+**Old range (+900–+1500):** Forced selection of plus-money props with lower win rates. Heavy juice props (best win rates) couldn't reach +900.
 
-**Original (April-May 20):** +900 to +1500
-- Reasoning: Higher odds = higher payout, target 15-20% win rate
-- Problem: Heavy juice props (best win rates) couldn't reach +900
-- Result: Forced selection of plus-money props with lower win rates
+**New range (+700–+1000):** Allows using best props regardless of juice. Aligns strategy with data.
 
-**Updated (May 21):** +700 to +1000
-- Reasoning: Heavy juice = high win rate, align strategy with data
-- Evidence: RBI under avg -292 odds, 66.5% win rate, but only 1% selection rate under old system
-- Math: 4 legs at -210 avg = +740 odds (achievable)
-
-**Selection Bias Analysis (Post-May-15):**
-
-| Prop Type | Scored (≥65% cov) | Selected | Selection % | Training WR | Parlay WR |
-|-----------|------------------|----------|-------------|-------------|-----------|
-| RBI UNDER | 523 | 5 | 1% | 66.5% | 100% |
-| Total Bases UNDER | 236 | 30 | 13% | 59.3% | 80.0% |
-| Hits UNDER | 139 | 27 | 19% | 71.9% | 88.9% |
-| Strikeouts OVER | 197 | 127 | 64% | 61.4% | 67.7% |
-
-**Interpretation:**
-- System was **underselecting winners** (RBI, TB, Hits under) due to odds filters
-- System was **overselecting** strikeout overs to hit +900 minimum
-- New +700-1000 range allows using best props regardless of juice
-
-**Implementation:**
-```python
-# parlay_builder.py
-MIN_PARLAY_ODDS = 700
-MAX_PARLAY_ODDS = 1000
-```
-
-**Expected Impact:**
-- 4-leg at 67% per-leg: 20.2% parlay win rate
-- At +800 odds: +$81.60 profit per $100
-- ROI: 81.6%
-
-**Status:** ✅ Deployed May 21, awaiting full slate validation
+**Math:** 4 legs at 67% per-leg = 0.67^4 = **20.2% expected win rate** at +800 avg odds.
 
 ---
 
 ## Juice Cap Decision
 
-### **Decision: Block Props with Odds < -300 from Parlays (Added May 21)**
+### **Decision: Block Props with Odds < -300 from Parlays (May 21)**
 
-**Problem Identified:**
-- 12 RBI under props at -350 to -495 odds (avg -386)
-- Overall pool average: -233 odds
-- 4-leg combination: +317 (way below +700 minimum)
-- After best 4 props used in Parlay 1, no combinations could hit +700
+12 RBI props at avg -386 odds were poisoning the pool — 4-leg combinations after using them couldn't reach +700.
 
-**Evidence:**
-
-| Odds Bucket | Props | Avg Odds |
-|-------------|-------|----------|
-| Plus Money | 3 | +111 |
-| Light Juice (-150 to -1) | 4 | -128 |
-| Medium Juice (-250 to -151) | 58 | -210 |
-| Heavy Juice (-350 to -251) | 17 | -280 |
-| **Extreme Juice (<-350)** | **12** | **-386** |
-
-**Impact of Extreme Juice:**
-- Removes 12 toxic props (all RBI under)
-- Remaining pool: 75 props at avg -210 odds
-- 4-leg at -210 avg: +740 odds ✅ (hits +700-1000 target)
-
-**Implementation:**
-```python
-# parlay_builder.py _filter_legs() function
-if float(odds) < -300:
-    extreme_juice_blocked += 1
-    continue
-```
-
-**Rationale:**
-- Extreme juice = overbet by market (poor value)
-- Even if coverage is high, juice drags down parlay odds
-- -300 is arbitrary but data-driven (separates heavy from extreme)
-
-**Trade-offs:**
-- ✅ Makes +700-1000 range achievable
-- ✅ Removes market-identified overbet props
-- ❌ Blocks some high-coverage props (RBI under 66.5% WR)
-- ✅ But allows MORE total parlays to be built
-
-**Expected Results:**
-- Before: 1 parlay (used only props at -105 to -171)
-- After: 3-5 parlays (uses props at -150 to -300)
-
-**Status:** ✅ Deployed May 21, awaiting validation
+**Impact:** Pool avg odds improved from -233 → -210, making +700–+1000 combinations achievable.
 
 ---
 
@@ -340,237 +130,153 @@ if float(odds) < -300:
 
 ### **Decision: Maximum 1 Prop Per Player Per Parlay Batch**
 
-**Implementation:**
-```python
-# Track used players across all parlays in this batch
-used_players_this_batch = set()
+Eliminates correlated wipeout risk. Resets between scheduled runs (9AM/12PM/5:30PM).
 
-# For each parlay being built:
-if player_name in used_players_this_batch:
-    continue  # Skip this leg
-    
-used_players_this_batch.add(player_name)
-```
+---
+
+## Shadow Pipeline Strategy
+
+### **Decision: Shadow Before Promoting (May 26)**
+
+When introducing significant scoring changes, run as a shadow pipeline writing to separate tables before promoting to production.
 
 **Rationale:**
-- Avoid correlation risk (same player's props correlate)
-- Diversify exposure across multiple players/games
-- Prevent "all eggs in one basket" scenarios
+- Current pipeline is stable and generating clean performance data
+- New signals touch coverage, scorer, and enrichment simultaneously — meaningful surface area
+- Shadow approach allows apples-to-apples comparison: same legs, same days, two scoring systems
+- Production never at risk — try/except wrapper in `main.py` ensures enriched failures never block production
 
-**Edge Cases:**
-- Different runs (9AM vs 12PM): player diversity resets (independent batches)
-- Same player in different stat types: still blocked (e.g., can't use Judge hits AND Judge HRs in same batch)
+**Implementation:**
+```python
+# main.py — after production pipeline completes
+try:
+    from src.pipelines.run_enriched_pipeline import run_enriched_pipeline
+    run_enriched_pipeline(qualifying_legs, production_batch_id=_prod_batch_id)
+except Exception as _enr_err:
+    print(f"[ENRICHED PIPELINE] Failed — production unaffected: {_enr_err}")
+```
 
-**Validation (May 21):**
-- ✅ No duplicate players in parlay batch
-- ✅ Constraint enforced correctly
+**Comparison framework:** `production_batch_id` on enriched tables links every enriched run to the exact production batch it shadowed, enabling precise side-by-side comparison.
 
-**Trade-offs:**
-- ✅ Reduces correlation risk
-- ✅ Better portfolio diversification
-- ❌ May miss optimal combination if one player has multiple strong props
+**Promotion criteria:** After 5–7 days of shadow data, compare:
+1. Leg selection differences (what does enriched pick that production doesn't?)
+2. Win rates by pipeline (do enriched legs win more often?)
+3. Parlay win rates (do enriched parlays win more often?)
 
-**Status:** ✅ Working correctly
+---
+
+## Enriched Scoring Signals
+
+### **Signal 1: Blended ERA Rank**
+
+**Problem with season ERA rank alone:** A pitcher with 3.20 ERA who's given up 14 runs in last 3 starts is completely different from his season line.
+
+**Solution:** Blend season ERA rank (50%) with last-3-start ERA rank (50%).
+
+```python
+blended_era_rank = (era_rank * 0.5) + (recent_era_rank * 0.5)
+```
+
+Edge cases: fewer than 3 starts → use available starts; reliever (0 starts) → use season ERA only; zero IP → treat as ERA 9.0.
+
+### **Signal 2: Opponent-Specific Coverage Split**
+
+**Problem:** Generic coverage ("how often does this batter get a hit") ignores matchup-specific patterns.
+
+**Solution:** Calculate batter's direction-aware hit rate vs tonight's specific opponent.
+
+```python
+coverage_vs_opponent = (games_over_vs_opponent / total_games_vs_opponent) * 100
+delta = coverage_vs_opponent - coverage_overall
+opp_adj = max(-8.0, min(8.0, delta * 0.25))  # 25% of delta, ±8 cap
+```
+
+**Minimum threshold:** 3 games vs that opponent required. Below threshold: NULL, no adjustment.
+
+**Design decision:** 25% weight and ±8 cap prevent small samples from dominating. Signal supplements overall coverage rather than replacing it.
+
+### **Signal 3: Ballpark Factor**
+
+**Problem:** A TB under in Coors Field is a fundamentally different bet than the same prop at Petco Park.
+
+**Solution:** One-time 30-row `ballpark_factors` table (Coors 115 → Petco 94 run factor). Applied per-leg based on home team.
+
+```python
+# Hitter props
+park_adjustment = (run_factor - 100) / 100 * 5   # range: -3 to +7.5
+
+# Pitcher props (inverted)
+park_adjustment = (100 - run_factor) / 100 * 3   # smaller magnitude for K props
+```
+
+**Design decision:** Separate run_factor and hr_factor — home run props use hr_factor which has more variance (Yankee Stadium 112 vs Oracle Park 92).
 
 ---
 
 ## Database Design
 
-### **Decision: Separate Tables for Legs, Parlays, and Training Data**
+### **Decision: Separate Production and Shadow Tables**
 
-**Tables:**
+Production tables (`mlb_scored_legs`, `mlb_parlay_recommendations_v2`, `mlb_parlay_legs_v2`) are never touched by the shadow pipeline.
 
-**1. mlb_scored_legs**
-- Purpose: Daily qualified props (≥65% coverage)
-- Lifespan: Overwritten each run (not historical)
-- Why: Fresh data for each run, no stale props
+Shadow tables mirror production structure with additional enriched columns. Key addition: `production_batch_id` links every enriched run to its production counterpart.
 
-**2. mlb_parlay_recommendations_v2**
-- Purpose: Daily parlay recommendations
-- Lifespan: Historical (never deleted)
-- Why: Track performance over time, outcome resolution
+### **Lesson: CREATE TABLE AS SELECT Doesn't Copy Sequences**
 
-**3. mlb_parlay_legs_v2**
-- Purpose: Individual legs per parlay
-- Lifespan: Historical (never deleted)
-- Why: Reconstruct parlays, analyze leg performance, validate player diversity
-
-**4. mlb_training_data**
-- Purpose: Historical legs for future analysis
-- Lifespan: Permanent (94K+ rows)
-- Why: Preserve data for future ML attempts, profit analysis
-
-**Rationale:**
-- Separation of concerns: daily ops vs historical analysis
-- Performance: smaller tables for daily queries
-- Flexibility: can analyze historical without affecting live system
-
-**Trade-offs:**
-- ✅ Clean data model
-- ✅ Fast queries
-- ❌ More tables to maintain
-- ❌ Duplication (scored_legs → training_data)
-
-**Status:** ✅ All tables working correctly
+Shadow tables created with `CREATE TABLE AS SELECT` don't get auto-increment sequences or column defaults. Requires explicit:
+```sql
+CREATE SEQUENCE table_enriched_id_seq;
+ALTER TABLE table_enriched ALTER COLUMN id SET DEFAULT nextval('table_enriched_id_seq');
+ALTER TABLE table_enriched ALTER COLUMN created_at SET DEFAULT NOW();
+```
 
 ---
 
 ## Pipeline Architecture
 
-### **Decision: 3x Daily Pipeline with Scheduled Resolution**
+### **Decision: 3x Daily + Shadow After Every Run**
 
-**Schedule:**
-- **9:00 AM ET** - Morning pipeline (resolution + fresh parlays)
-- **12:00 PM ET** - Midday refresh (new odds, player diversity resets)
-- **5:30 PM ET** - Evening refresh (final update before games)
+- **9:00 AM ET** — Resolution + fresh parlays (shadow runs after)
+- **12:00 PM ET** — Midday refresh (shadow runs after)
+- **5:30 PM ET** — Evening refresh (shadow runs after)
+- **Manual Regenerate Now** — Also triggers shadow pipeline
 
-**Why 3x Daily?**
-- Odds change throughout the day
-- Injuries/lineup changes announced closer to game time
-- Player diversity resets allow using same players in different runs
-
-**Resolution Logic:**
-- Runs at 9 AM (after all previous day's games complete)
-- Fetches final stats from MLB Stats API
-- Marks legs/parlays as won/lost/pushed
-- Logs to training_data table
-
-**Trade-offs:**
-- ✅ Fresh odds throughout day
-- ✅ Adapts to news/injuries
-- ❌ More Railway compute time
-- ❌ Potential for conflicts if runs overlap
-
-**Status:** ✅ All runs completing successfully
+Shadow pipeline adds ~2–3 seconds per run (negligible).
 
 ---
 
 ## Lessons Learned
 
-### **1. Trust the Data, Not the Model**
-**Lesson:** Raw coverage calculation (69% accuracy) worked better than complex ML model (43.7% on high scores).
-
-**Why:** ML model learned wrong patterns from training data (direction bias). Simple transparent scoring outperformed.
-
-**Takeaway:** Start simple, only add complexity when simple fails.
-
----
-
-### **2. Direction Matters for Coverage**
-**Lesson:** Calculating coverage for "over" props using "under" direction (or vice versa) inflates coverage artificially.
-
-**Why:** Hits over 0.5 (get 1+ hits) is fundamentally different from hits under 0.5 (get 0 hits). Direction must match prop.
-
-**Takeaway:** Always validate coverage calculation matches prop direction.
-
----
-
-### **3. Selection Bias from Odds Filters**
-**Lesson:** +900-1500 odds range forced selection of plus-money props with lower win rates, ignoring heavy juice props with 70%+ win rates.
-
-**Why:** Heavy juice props (RBI under -292, Hits under -211) couldn't reach +900, so system selected strikeout overs (lower WR but better odds).
-
-**Takeaway:** Align odds range with best props, not arbitrary targets.
-
----
-
-### **4. Extreme Juice Poisons the Pool**
-**Lesson:** 12 props at avg -386 odds dragged entire pool to -233 avg, making +700 impossible after best 4 used.
-
-**Why:** Parlay odds multiply, so one extreme juice prop tanks combinations.
-
-**Takeaway:** Cap juice early (< -300) to maintain healthy odds distribution.
-
----
-
-### **5. Validate on Full Slate, Not Partial**
-**Lesson:** May 21 evening run (5 games) only built 1 parlay. Not a bug - just limited games.
-
-**Why:** Pipeline ran 7:57pm ET, 2 games finished, 1 started. Only 4 games' props available.
-
-**Takeaway:** Test strategy changes on full slates (9AM runs) with all games fresh.
-
----
-
-### **6. Coverage Threshold is Appropriate**
-**Lesson:** 65% coverage threshold filters 80-90% of props, but remaining props pass at 80-100% rate.
-
-**Why:** Most props genuinely lack 65%+ coverage. System is working as designed.
-
-**Takeaway:** Don't lower threshold just to increase prop count. Quality > quantity.
+1. **Trust the data, not the model** — Raw coverage (69% accuracy) outperformed complex ML model (43.7% on high scores)
+2. **Direction matters for coverage** — Over and under must be calculated separately
+3. **Selection bias from odds filters** — +900–+1500 forced low-win-rate props; +700–+1000 uses best coverage props
+4. **Shadow before promoting** — Major scoring changes need A/B comparison, not blind promotion
+5. **CREATE TABLE AS SELECT doesn't copy sequences** — Always create explicit sequences for shadow tables
+6. **`production_batch_id` is the comparison key** — Without it, you can't match enriched runs to their production counterpart
+7. **Void wins are not real wins** — 5/24 looked like a 4/9 day but 2 wins required voided legs to survive
+8. **Pitcher K under is line-dependent** — 5.5+ is a different bet than 4.5 and below
 
 ---
 
 ## Future Considerations
 
-### **1. Dynamic Odds Range Based on Prop Pool**
-**Idea:** Adjust MIN_PARLAY_ODDS based on average pool odds.
-- If avg pool odds = -150, target +1000-1200
-- If avg pool odds = -250, target +700-900
+### **1. Promote Enriched to Production (June 2026)**
+After 5–7 days of shadow data confirms enriched scoring improves win rates.
 
-**Pros:** Adapts to juice levels automatically  
-**Cons:** More complex, harder to predict outcomes  
-**Status:** Not needed yet - +700-1000 working well
+### **2. `won_with_void` Outcome Tracking**
+Distinguish clean 4/4 wins from 3/3 wins that needed a void to survive. Prevents inflating win rate metrics.
 
----
+### **3. Pitcher K Under Line Threshold**
+Block pitcher K unders below line 5.5 in `main.py`. Pending next Claude Code session.
 
-### **2. Time-of-Day Adjustments**
-**Idea:** Weight props differently based on game time (day vs night).
-- Day games: hitters see better (favor overs)
-- Night games: pitchers see better (favor unders)
+### **4. Direction-Split Calibrators (Longer Term)**
+If/when ML model is revisited, train 14 calibrators (7 stats × 2 directions) instead of 7.
 
-**Pros:** Captures time-of-day edge  
-**Cons:** Adds complexity, need data validation  
-**Status:** Worth exploring if current strategy plateaus
+### **5. Weather Integration**
+Flag outdoor game total legs when wind > 15 mph out or temp < 45°F. Low priority — weather rarely decisive.
 
 ---
 
-### **3. Weather Integration**
-**Idea:** Adjust scores based on wind, temperature, humidity.
-- Wind blowing out: favor overs
-- Cold weather: favor unders
-
-**Pros:** Captures weather edge  
-**Cons:** Unreliable forecasts, API costs  
-**Status:** Low priority - weather rarely decisive
-
----
-
-### **4. ML Model v2 (Post-Phase 1 Data)**
-**Idea:** Train new ML model on Phase 1 data (simple scorer + outcomes).
-- Use actual outcomes (not coverage %) as target
-- Remove direction feature entirely
-- Focus on contextual adjustments
-
-**Pros:** May capture interactions simple scorer misses  
-**Cons:** Risk repeating Phase 0 mistakes  
-**Status:** Revisit after 2-4 weeks of Phase 1 data
-
----
-
-### **5. Live Odds Tracking**
-**Idea:** Fetch odds every 15 minutes, track movement, detect sharp action.
-- Line moves toward us: favorable
-- Line moves away: reconsider prop
-
-**Pros:** Captures market wisdom  
-**Cons:** API rate limits, complexity  
-**Status:** Nice-to-have, not critical
-
----
-
-### **6. Prop-Specific Coverage Thresholds**
-**Idea:** Different minimum coverage for different prop types.
-- Hits over: 60% (common outcome)
-- RBI under: 70% (need high confidence)
-- Strikeouts: 65% (current baseline)
-
-**Pros:** Optimizes each prop type independently  
-**Cons:** More parameters to tune  
-**Status:** Worth testing after validating current strategy
-
----
-
-**Architecture Status:** ✅ STABLE - Phase 1 Simple Scorer + Strategy Optimization  
-**Last Major Change:** May 21, 2026 (Parlay odds range + juice cap)  
-**Next Architecture Review:** After 2-4 weeks of performance data (June 2026)
+**Architecture Status:** ✅ STABLE — Phase 1 Production + Phase 2 Shadow Testing  
+**Last Major Change:** May 26, 2026 (Shadow enriched pipeline fully operational)  
+**Next Architecture Review:** June 2026 (After shadow comparison analysis)
