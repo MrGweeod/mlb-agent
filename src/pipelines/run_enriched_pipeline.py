@@ -154,6 +154,7 @@ def _save_enriched_parlays(
     recommendations: list[dict],
     run_date: str,
     source: str,
+    production_batch_id: str = "",
 ) -> str:
     """
     Write enriched parlays to mlb_parlay_recommendations_enriched
@@ -180,8 +181,8 @@ def _save_enriched_parlays(
             """
             INSERT INTO mlb_parlay_recommendations_enriched
                 (run_date, rank, total_odds, avg_coverage, avg_ev, num_legs,
-                 outcome, source, batch_id, edge_percent)
-            VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s)
+                 outcome, source, batch_id, edge_percent, production_batch_id)
+            VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s)
             RETURNING id
             """,
             (
@@ -194,6 +195,7 @@ def _save_enriched_parlays(
                 source,
                 batch_id,
                 rec.get("edge_pct"),
+                production_batch_id or None,
             ),
         )
         row = cur.fetchone()
@@ -243,7 +245,7 @@ def _save_enriched_parlays(
     return batch_id
 
 
-def run_enriched_pipeline(scored_legs: list) -> None:
+def run_enriched_pipeline(scored_legs: list, production_batch_id: str = "") -> None:
     """
     Re-score production pipeline legs with enriched signals and write to
     shadow tables for A/B comparison.
@@ -332,7 +334,7 @@ def run_enriched_pipeline(scored_legs: list) -> None:
         })
 
     if recommendations:
-        _save_enriched_parlays(recommendations, today, _source)
+        _save_enriched_parlays(recommendations, today, _source, production_batch_id=production_batch_id)
 
     print(
         f"[ENRICHED PIPELINE] Complete: {n_logged} legs scored, "

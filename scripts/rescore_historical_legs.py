@@ -40,6 +40,7 @@ def rescore_all_legs():
     cur.execute("""
         SELECT id, player_id, stat, line, opposing_pitcher_id,
                run_date, odd_id,
+               COALESCE(position, '') AS position,
                coverage_pct AS old_coverage,
                COALESCE(direction, 'over') AS direction
         FROM mlb_scored_legs
@@ -79,6 +80,7 @@ def rescore_all_legs():
 
         season = int(run_date.split("-")[0])
         direction = leg.get("direction", "over")
+        position = leg.get("position", "")
 
         try:
             result = calculate_coverage(
@@ -87,6 +89,7 @@ def rescore_all_legs():
                 line=line,
                 opposing_pitcher_id=pitcher_id,
                 season=season,
+                position=position,
                 direction=direction,
             )
 

@@ -87,7 +87,8 @@ def _rescore_leg(leg: dict, season: int) -> bool:
         pitcher_id = int(pitcher_id_raw) if pitcher_id_raw else None
 
         direction = leg.get("direction", "over")
-        coverage = calculate_coverage(player_id, stat, float(line), pitcher_id, season, direction=direction)
+        position = leg.get("position", "")
+        coverage = calculate_coverage(player_id, stat, float(line), pitcher_id, season, position=position, direction=direction)
         if coverage is None:
             mark_lineup_confirmed(leg_id)
             return True

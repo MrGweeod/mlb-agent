@@ -953,6 +953,7 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
         print("  No recommendations generated")
 
     # Dual-write to v2 normalized schema
+    _prod_batch_id = ""
     if recommendations:
         print(f"  [debug] About to save {len(recommendations)} recommendation(s) to v2")
         try:
@@ -967,7 +968,7 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
                     _source = "auto_12pm"
                 else:
                     _source = "auto_530pm"
-            save_parlay_recommendations_v2(recommendations, today, source=_source)
+            _prod_batch_id = save_parlay_recommendations_v2(recommendations, today, source=_source)
         except Exception as _v2_err:
             print(f"  [v2] dual-write failed (non-fatal): {_v2_err}")
 
@@ -1000,7 +1001,7 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
     # Shadow enriched pipeline — never blocks production
     try:
         from src.pipelines.run_enriched_pipeline import run_enriched_pipeline
-        run_enriched_pipeline(qualifying_legs)
+        run_enriched_pipeline(qualifying_legs, production_batch_id=_prod_batch_id)
     except Exception as _enr_err:
         print(f"[ENRICHED PIPELINE] Failed — production unaffected: {_enr_err}")
 

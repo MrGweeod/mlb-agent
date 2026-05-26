@@ -349,6 +349,47 @@ def resolve_parlay_recommendations_v2(date: str, verbose: bool = True) -> dict:
     return {**counts, "total": total}
 
 
+def recalculate_parlay_outcome(parlay_id: int) -> str:
+    """
+    Recalculate a parlay's outcome based on its legs' current outcomes.
+
+    DraftKings rules:
+    - If ALL legs are void → parlay is 'void'
+    - If ANY leg is lost → parlay is 'lost' (void legs ignored)
+    - If ALL non-void legs are won → parlay is 'won'
+    - If ANY leg is pending → parlay is 'pending'
+
+    Returns: 'won', 'lost', 'void', or 'pending'
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT outcome FROM mlb_parlay_legs_v2 WHERE parlay_id = %s",
+        (parlay_id,),
+    )
+    leg_outcomes = [row["outcome"] for row in cur.fetchall()]
+    cur.close()
+    conn.close()
+
+    if not leg_outcomes:
+        return "pending"
+
+    if all(o == "void" for o in leg_outcomes):
+        return "void"
+
+    if any(o == "pending" for o in leg_outcomes):
+        return "pending"
+
+    non_void = [o for o in leg_outcomes if o != "void"]
+    if any(o == "lost" for o in non_void):
+        return "lost"
+
+    if all(o == "won" for o in non_void):
+        return "won"
+
+    return "pending"
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         resolve_parlay_recommendations(sys.argv[1])
