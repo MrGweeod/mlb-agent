@@ -359,10 +359,21 @@ def _find_qualifying_legs(
         if coverage is None:
             continue  # below seasonal minimum games threshold
 
-        # Gate on best available coverage signal: vs-hand if available, else overall.
-        coverage_pct = coverage.get("coverage_vs_hand") or coverage.get("coverage_overall") or 0.0
-        if coverage_pct < MIN_COVERAGE_PCT:
+        # Gate 1: coverage_overall must clear the 65% floor before any adjustment is applied.
+        coverage_overall_raw = coverage.get("coverage_overall") or 0.0
+        if coverage_overall_raw < MIN_COVERAGE_PCT:
             continue
+
+        # Gate 2: prop-specific coverage_overall floors.
+        if stat == "totalBases" and direction == "under" and line == 1.5:
+            if coverage_overall_raw < 80.0:
+                continue
+        if stat == "strikeouts" and direction == "over" and line == 5.5:
+            if coverage_overall_raw < 72.0:
+                continue
+
+        # Best available coverage signal: vs-hand if available, else overall.
+        coverage_pct = coverage.get("coverage_vs_hand") or coverage_overall_raw
 
         qualifying.append({
             # Identifiers
