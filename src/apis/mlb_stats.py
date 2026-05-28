@@ -34,6 +34,7 @@ TTL_PITCHER_HAND = 7 * 24 * 60 * 60  # 7 days
 TTL_LINEUP       = 30 * 60       # 30 minutes
 TTL_TRANSACTIONS = 60 * 60       # 1 hour
 TTL_PLAYER_INFO  = 7 * 24 * 60 * 60  # 7 days
+TTL_TEAM_STATS   = 24 * 60 * 60  # 24 hours — refreshed each morning pipeline
 
 
 def _get(key: str, ttl: float) -> object | None:
@@ -468,3 +469,117 @@ def get_player_info(player_id: int) -> dict | None:
     except Exception as e:
         print(f"  [mlb_stats] get_player_info({player_id}) error: {e}")
         return None
+
+
+# ── 10. get_team_strikeout_stats ─────────────────────────────────────────────
+
+def get_team_strikeout_stats(season: int) -> dict:
+    """
+    Return season SO rank and recent-14-day SO rank for all 30 MLB teams.
+
+    Season rank: total team strikeouts ranked 1 (most) to 30 (fewest).
+    Recent rank: avg strikeouts per game over last 14 days, same ranking.
+
+    Used by enriched_scorer to adjust pitcher SO prop scores based on
+    how K-prone the opposing lineup is.
+
+    Returns:
+        {team_id: {"season_rank": int, "recent_rank": int}}
+        Returns {} on error.
+
+    Cache TTL: 24 hours. Keyed by season.
+    """
+    import datetime as _dt
+
+    key = f"team_so_stats:{season}"
+    cached = _get(key, TTL_TEAM_STATS)
+    if cached is not None:
+        return cached
+
+    try:
+        # Step 1: Season total strikeouts for all teams
+        r = requests.get(
+            f"{BASE_URL}/teams/stats",
+            params={
+                "stats": "season",
+                "group": "hitting",
+                "season": str(season),
+                "sportId": 1,
+            },
+            timeout=15,
+        )
+        r.raise_for_status()
+        splits = r.json().get("stats", [{}])[0].get("splits", [])
+
+        if not splits:
+            print(f"  [mlb_stats] get_team_strikeout_stats: no season splits returned")
+            return {}
+
+        # Extract team_id -> season SO total
+        season_so: dict[int, int] = {}
+        for s in splits:
+            team_id = s.get("team", {}).get("id")
+            so = s.get("stat", {}).get("strikeOuts")
+            if team_id and so is not None:
+                season_so[team_id] = int(so)
+
+        if not season_so:
+            return {}
+
+        # Rank by season SO descending (rank 1 = most Ks)
+        sorted_season = sorted(season_so.items(), key=lambda x: x[1], reverse=True)
+        season_rank: dict[int, int] = {team_id: rank + 1 for rank, (team_id, _) in enumerate(sorted_season)}
+
+        # Step 2: Recent-14-day SO rate per team via byDateRange
+        start_date = (_dt.date.today() - _dt.timedelta(days=14)).isoformat()
+        end_date = _dt.date.today().isoformat()
+        r2 = requests.get(
+            f"{BASE_URL}/teams/stats",
+            params={
+                "stats": "byDateRange",
+                "group": "hitting",
+                "season": str(season),
+                "sportId": 1,
+                "startDate": start_date,
+                "endDate": end_date,
+            },
+            timeout=15,
+        )
+        r2.raise_for_status()
+        recent_splits = r2.json().get("stats", [{}])[0].get("splits", [])
+
+        if len(recent_splits) < 20:
+            print(f"  [mlb_stats] get_team_strikeout_stats: recent splits only {len(recent_splits)} teams — falling back to season rank")
+            recent_splits = []
+
+        recent_so_per_game: dict[int, float] = {}
+        for s in recent_splits:
+            team_id = s.get("team", {}).get("id")
+            so = s.get("stat", {}).get("strikeOuts")
+            games = s.get("stat", {}).get("gamesPlayed")
+            if team_id and so is not None and games:
+                recent_so_per_game[team_id] = float(so) / float(games)
+
+        # Rank by recent SO/game descending — fall back to season rank if missing
+        sorted_recent = sorted(
+            [(tid, so) for tid, so in recent_so_per_game.items()],
+            key=lambda x: x[1],
+            reverse=True,
+        )
+        recent_rank: dict[int, int] = {team_id: rank + 1 for rank, (team_id, _) in enumerate(sorted_recent)}
+
+        # Build final result — fall back to season_rank if recent data missing
+        result = {}
+        for team_id in season_rank:
+            result[team_id] = {
+                "season_rank": season_rank[team_id],
+                "recent_rank": recent_rank.get(team_id, season_rank[team_id]),
+            }
+
+        _set(key, result)
+        print(f"  [mlb_stats] get_team_strikeout_stats: loaded {len(result)} teams")
+        return result
+
+    except Exception as e:
+        print(f"  [mlb_stats] get_team_strikeout_stats({season}) error: {e}")
+        return {}

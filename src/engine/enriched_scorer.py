@@ -10,7 +10,7 @@ Additional signals:
   3. Ballpark Factor Adjustment — park run/HR factor applied to composite score
 """
 
-from src.apis.mlb_stats import get_batter_game_log, get_pitcher_game_log
+from src.apis.mlb_stats import get_batter_game_log, get_pitcher_game_log, get_team_strikeout_stats
 from src.apis.pitcher_stats import get_pitcher_ranks
 from src.utils.db import get_conn
 
@@ -250,6 +250,81 @@ def _compute_park_adjustment(
         return None, None
 
 
+# ── Signal 4: Opposing Team Strikeout Rank ────────────────────────────────────
+
+def _compute_team_so_adjustment(
+    leg: dict,
+    opp_team_id: int | None,
+    team_so_stats: dict,
+) -> float | None:
+    """
+    Adjust pitcher SO prop scores based on how K-prone the opposing lineup is.
+
+    Applies ONLY to pitcher strikeout props (position in _PITCHER_POSITIONS,
+    stat == 'strikeouts').
+
+    Season rank is the primary signal (±5 max).
+    Recent rank dampens or amplifies the season signal (±2 modifier).
+    Net adjustment is capped at ±6.
+
+    Rank 1 = most Ks (favorable for SO overs, unfavorable for SO unders).
+    Rank 30 = fewest Ks (unfavorable for SO overs, favorable for SO unders).
+
+    Returns adjustment float, or None if signal is unavailable.
+    """
+    stat = leg.get("stat", "")
+    position = leg.get("position", "")
+    direction = leg.get("direction", "over")
+
+    # Only applies to pitcher SO props
+    if stat != "strikeouts" or position not in _PITCHER_POSITIONS:
+        return None
+
+    if opp_team_id is None or not team_so_stats:
+        return None
+
+    team_data = team_so_stats.get(opp_team_id)
+    if not team_data:
+        return None
+
+    season_rank = team_data.get("season_rank")
+    recent_rank = team_data.get("recent_rank", season_rank)
+
+    if season_rank is None:
+        return None
+
+    # Season rank → primary adjustment
+    # Rank 1–8: strong K lineup, rank 23–30: weak K lineup
+    if season_rank <= 8:
+        season_adj = 5.0    # very K-prone lineup
+    elif season_rank <= 15:
+        season_adj = 2.0    # above-average K lineup
+    elif season_rank <= 22:
+        season_adj = -2.0   # below-average K lineup
+    else:
+        season_adj = -5.0   # rarely strikes out
+
+    # Recent rank → modifier (dampens or amplifies season signal)
+    if recent_rank <= 8:
+        recent_modifier = +2.0
+    elif recent_rank >= 23:
+        recent_modifier = -2.0
+    else:
+        recent_modifier = 0.0
+
+    # Blend: season signal is primary, recent modifier can shift it ±2
+    raw_adj = season_adj + recent_modifier
+
+    # Cap total adjustment at ±6
+    adj = max(-6.0, min(6.0, raw_adj))
+
+    # Flip sign for unders — high-K lineup is BAD for SO unders (Flaherty case)
+    if direction == "under":
+        adj = -adj
+
+    return adj
+
+
 # ── Core scorer ───────────────────────────────────────────────────────────────
 
 def _calculate_enriched_score(
@@ -259,6 +334,7 @@ def _calculate_enriched_score(
     ballpark_factors: dict,
     opp_team_id: int | None,
     home_team_abbr: str | None,
+    team_so_stats: dict | None = None,
 ) -> dict:
     """
     Compute enriched composite score for one leg.
@@ -298,7 +374,7 @@ def _calculate_enriched_score(
         elif gap <= -5:
             score += 1    # warm (+1.4pp)
         else:
-            score += 1    # neutral/consistent — stable coverage is a mild positive
+            score += 0    # neutral/consistent — no adjustment
 
     stat = leg.get("stat", "")
     direction = leg.get("direction", "over")
@@ -370,6 +446,15 @@ def _calculate_enriched_score(
     if park_adjustment is not None:
         score += park_adjustment
 
+    # ── Signal 4: Opposing team SO rank (pitcher SO props only) ──────────────
+    team_so_adj = _compute_team_so_adjustment(
+        leg, opp_team_id, team_so_stats or {}
+    )
+    enriched["team_so_adjustment"] = team_so_adj
+
+    if team_so_adj is not None:
+        score += team_so_adj
+
     enriched["composite_score"] = max(5.0, min(95.0, score))
     return enriched
 
@@ -383,6 +468,7 @@ def score_legs(
     ballpark_factors: dict | None = None,
     abbr_to_team_id: dict | None = None,
     game_pk_to_home_abbr: dict | None = None,
+    team_so_stats: dict | None = None,
 ) -> list[dict]:
     """
     Score all legs using enriched signals. Mutates legs in-place.
@@ -426,6 +512,7 @@ def score_legs(
                 ballpark_factors=ballpark_factors,
                 opp_team_id=opp_team_id,
                 home_team_abbr=home_team_abbr,
+                team_so_stats=team_so_stats,
             )
             leg.update(enriched_fields)
         except Exception as e:
@@ -438,6 +525,7 @@ def score_legs(
             leg.setdefault("park_adjustment", None)
             leg.setdefault("blended_era_rank", None)
             leg.setdefault("recent_form_rank", None)
+            leg.setdefault("team_so_adjustment", None)
 
     if legs:
         scores = [l["composite_score"] for l in legs if l.get("composite_score") is not None]
