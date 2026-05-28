@@ -1044,11 +1044,11 @@ def mark_lineup_confirmed(leg_id: int):
 
 def get_scored_legs(run_date: str) -> list[dict]:
     """
-    Return the best-direction leg per player+stat for a given date.
+    Return the most recently logged leg per player+stat+direction for a given date.
 
-    For each (player_name, stat) pair, keeps only the direction with the
-    higher ev_per_unit (tiebreak: higher coverage_pct). This eliminates
-    both OVER and UNDER showing for the same player prop.
+    For each (player_name, stat, direction) triple, keeps only the most recently
+    logged row (tiebreak: ev_per_unit, then coverage_pct). OVER and UNDER are
+    kept separately since they are distinct props needed for anchor/swing selection.
 
     Used by the web API to serve today's leg table.
     """
@@ -1059,8 +1059,9 @@ def get_scored_legs(run_date: str) -> list[dict]:
         WITH ranked_legs AS (
             SELECT *,
                    ROW_NUMBER() OVER (
-                       PARTITION BY player_name, stat
-                       ORDER BY ev_per_unit DESC NULLS LAST,
+                       PARTITION BY player_name, stat, direction
+                       ORDER BY logged_at DESC NULLS LAST,
+                                ev_per_unit DESC NULLS LAST,
                                 coverage_pct DESC NULLS LAST
                    ) AS rn
             FROM mlb_scored_legs
