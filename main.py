@@ -654,7 +654,7 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
     # Use line value to classify hitter vs pitcher SO props — avoids position
     # ambiguity for two-way players (e.g. Ohtani whose position is "TWP").
     #   Lines < 3.0  → hitter prop: only 0.5 allowed
-    #   Lines >= 3.5 → pitcher prop: allowed here (reliever IP check at Step 7.5)
+    #   Lines >= 4.5 → pitcher prop: allowed here (reliever IP check at Step 7.5)
     _before_so_prefilter = len(all_sgo_props)
     def _valid_so_line_prefilter(prop: dict) -> bool:
         if prop.get("stat") != "strikeouts":
@@ -860,7 +860,7 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
         is_pitcher = position in _PITCHER_POSITIONS
         line = leg.get("best_line")
         if is_pitcher:
-            return line is not None and float(line) >= 3.5
+            return line is not None and float(line) >= 4.5
         else:
             # Hitters: ONLY 0.5 line allowed (>0.5 is too risky)
             return line is not None and float(line) == 0.5
