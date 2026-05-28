@@ -310,6 +310,11 @@ def _find_qualifying_legs(
         if stat == "strikeouts" and line == 0.5 and direction == "under":
             continue
 
+        # Block pitcher strikeout unders below 6.5 line — win rates:
+        # 3.5 under: 44.7%, 4.5 under: 47.2%, 5.5 under: 51.9% — all below threshold
+        if stat == "strikeouts" and direction == "under" and line < 6.5:
+            continue
+
         odd_id = prop.get("odd_id", "")
         if odd_id in seen_odd_ids:
             continue
