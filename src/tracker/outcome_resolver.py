@@ -664,6 +664,136 @@ def resolve_scored_legs(verbose: bool = True) -> None:
         print(f"\n  Resolved {resolved} scored leg(s).")
 
 
+# ── Enriched parlay resolver ─────────────────────────────────────────────────
+
+def resolve_enriched_parlays(run_date: str, verbose: bool = True) -> dict:
+    """
+    Resolve shadow enriched parlays for run_date by syncing from already-resolved
+    mlb_scored_legs. Returns {'won': int, 'lost': int, 'void': int, 'total': int}.
+    """
+    conn = get_conn()
+    cur  = conn.cursor()
+    cur.execute(
+        """
+        SELECT l.id AS leg_id, l.player_name, l.stat, l.parlay_id
+        FROM mlb_parlay_legs_enriched l
+        JOIN mlb_parlay_recommendations_enriched r ON r.id = l.parlay_id
+        WHERE l.outcome = 'pending'
+          AND r.run_date::text = %s
+        ORDER BY l.parlay_id, l.id
+        """,
+        (run_date,),
+    )
+    pending_legs = [dict(row) for row in cur.fetchall()]
+    cur.close()
+    conn.close()
+
+    if not pending_legs:
+        if verbose:
+            print(f"[ENRICHED RESOLVER] No pending legs for {run_date}.")
+        return {"won": 0, "lost": 0, "void": 0, "total": 0}
+
+    if verbose:
+        print(f"[ENRICHED RESOLVER] {len(pending_legs)} pending legs for {run_date}...")
+
+    counts = {"won": 0, "lost": 0, "void": 0}
+
+    for leg in pending_legs:
+        conn = get_conn()
+        cur  = conn.cursor()
+        cur.execute(
+            """
+            SELECT result, actual_value
+            FROM mlb_scored_legs
+            WHERE player_name = %s
+              AND stat = %s
+              AND run_date::date = %s::date
+              AND result IS NOT NULL
+            LIMIT 1
+            """,
+            (leg["player_name"], leg["stat"], run_date),
+        )
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        if row is None:
+            if verbose:
+                print(f"  {leg['player_name']} {leg['stat']}: not found in mlb_scored_legs → skip")
+            continue
+
+        outcome      = row["result"]
+        result_value = row["actual_value"]
+
+        conn = get_conn()
+        cur  = conn.cursor()
+        cur.execute(
+            "UPDATE mlb_parlay_legs_enriched SET outcome = %s, result_value = %s WHERE id = %s",
+            (outcome, result_value, leg["leg_id"]),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        if outcome in counts:
+            counts[outcome] += 1
+
+        if verbose:
+            val_str = f"{result_value:.1f}" if result_value is not None else "N/A"
+            print(f"  {leg['player_name']} {leg['stat']}: {val_str} → {outcome.upper()}")
+
+    # Resolve parlay-level outcomes for affected parlays
+    parlay_ids = list({leg["parlay_id"] for leg in pending_legs})
+    parlay_counts = {"won": 0, "lost": 0, "void": 0}
+
+    for parlay_id in parlay_ids:
+        conn = get_conn()
+        cur  = conn.cursor()
+        cur.execute(
+            "SELECT outcome FROM mlb_parlay_legs_enriched WHERE parlay_id = %s",
+            (parlay_id,),
+        )
+        leg_outcomes = [r["outcome"] for r in cur.fetchall()]
+        cur.close()
+        conn.close()
+
+        if any(o == "pending" for o in leg_outcomes):
+            continue  # not all legs resolved yet
+
+        if any(o == "lost" for o in leg_outcomes):
+            parlay_outcome = "lost"
+        elif all(o == "void" for o in leg_outcomes):
+            parlay_outcome = "void"
+        else:
+            parlay_outcome = "won"
+
+        conn = get_conn()
+        cur  = conn.cursor()
+        cur.execute(
+            "UPDATE mlb_parlay_recommendations_enriched "
+            "SET outcome = %s, resolved_at = NOW() WHERE id = %s",
+            (parlay_outcome, parlay_id),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        parlay_counts[parlay_outcome] += 1
+        if verbose:
+            icon = "✓" if parlay_outcome == "won" else "✗"
+            print(f"  [{icon}] Parlay {parlay_id} → {parlay_outcome.upper()}")
+
+    total = sum(counts.values())
+    if verbose:
+        print(
+            f"\n[ENRICHED RESOLVER] Legs: "
+            f"{counts['won']} won, {counts['lost']} lost, {counts['void']} void ({total} total) | "
+            f"Parlays: {parlay_counts['won']} won, {parlay_counts['lost']} lost, "
+            f"{parlay_counts['void']} void"
+        )
+    return {**counts, "total": total}
+
+
 # ── Training data resolver ────────────────────────────────────────────────────
 
 def resolve_training_data(game_date: str, verbose: bool = True) -> dict:
