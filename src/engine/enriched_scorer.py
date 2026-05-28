@@ -282,14 +282,23 @@ def _calculate_enriched_score(
     if has_split:
         score += 3
 
-    # Recent form
+    # Consistency signal (mirrors simple_scorer)
     recent_10 = leg.get("coverage_recent_10")
-    if recent_10 is not None:
-        form_delta = recent_10 - base_score
-        if form_delta > 15:
-            score += 4
-        elif form_delta < -15:
-            score -= 4
+    coverage_overall = leg.get("coverage_overall")
+    if recent_10 is not None and coverage_overall is not None:
+        gap = coverage_overall - recent_10
+        if gap >= 20:
+            score -= 6    # severe cold streak (-5.7pp actual win rate drop)
+        elif gap >= 12:
+            score -= 4    # moderate cold streak (-4.6pp)
+        elif gap >= 6:
+            score -= 2    # mild cold streak (-2.8pp)
+        elif gap <= -10:
+            score += 2    # meaningfully hot (+1.9pp)
+        elif gap <= -5:
+            score += 1    # warm (+1.4pp)
+        else:
+            score += 1    # neutral/consistent — stable coverage is a mild positive
 
     stat = leg.get("stat", "")
     direction = leg.get("direction", "over")
@@ -391,6 +400,8 @@ def score_legs(
     Returns:
         Same legs list with enriched composite_score and new fields.
     """
+    print("[enriched_scorer] Consistency signal: applied independently ✓")
+
     if pitcher_ranks is None:
         pitcher_ranks = get_pitcher_ranks(season)
     if ballpark_factors is None:

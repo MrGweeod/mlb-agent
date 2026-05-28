@@ -1,30 +1,37 @@
 """
-parlay_builder.py — Single scored-pool parlay builder for MLB.
+parlay_builder.py — Anchor/swing pool parlay builder for MLB.
 
-All eligible legs (composite_score >= 65) are scored once by simple_scorer,
-then ALL legs are searched for combinations of exactly 4 legs
-whose combined parlay odds land in +700 to +1000.
+Parlays are exactly 5 legs: 3 anchors (high-coverage, moderate odds) +
+2 swings (moderate-coverage, higher odds). Combined odds target: +900 to +1100.
 
-Constraints:
-  - Exactly 4 legs per parlay.
-  - Target odds: +700 to +1000 combined American odds.
-  - Score gatekeeper: only legs with composite_score >= 65 enter consideration.
-  - Max 1 batter leg per player (pitchers exempt — multiple pitcher props allowed).
-  - Max 2 legs per game (keyed by game_pk, fallback to team abbreviation).
+Anchor pool  — composite_score >= 75, odds in [-300, -150].
+Swing pool   — composite_score >= 55, odds in (-150, +150].
+
+Constraints (unchanged from prior version):
+  - Max 1 batter leg per player (pitchers exempt).
+  - Max 2 legs per game.
   - No duplicate odd_ids within a parlay.
   - High-variance props (homeRuns, stolenBases) require composite_score >= 70.
-  - No directional bias — score threshold is the only filter.
+  - DraftKings: no walks + strikeouts in same parlay.
+  - Player diversity: each player used in at most one parlay per batch.
 
-Public API unchanged: build_hybrid_parlays(...) and _tier_params(...).
+Public API: build_hybrid_parlays(anchor_legs, swing_legs, ...) and _tier_params(...).
 """
 import time
 from src.utils.odds_math import american_to_decimal
 from src.utils.db import get_players_used_today
 
 _PITCHER_POSITIONS = frozenset({"SP", "RP", "P"})
-
-# High variance props that need extra caution (regardless of direction).
 _HIGH_VARIANCE_PROPS = frozenset({"homeRuns", "stolenBases"})
+
+# Parlay structure constants
+MIN_PARLAY_ODDS = 900
+MAX_PARLAY_ODDS = 1100
+MIN_ANCHOR_LEGS = 3
+MIN_SWING_LEGS  = 2
+TOTAL_LEGS      = 5
+MIN_COV_ANCHOR  = 75.0
+MIN_COV_SWING   = 55.0
 
 
 def filter_already_used_players(legs: list, run_date: str) -> list:
@@ -69,89 +76,95 @@ def filter_already_used_players(legs: list, run_date: str) -> list:
     return filtered
 
 
-def _filter_legs(legs, min_coverage=65.0):
+def _filter_legs(anchor_legs: list, swing_legs: list) -> tuple[list, list]:
     """
-    Filter legs by composite_score threshold.
+    Filter both pools by composite_score threshold and quality gates.
 
-    Simple unified filter:
-    1. composite_score >= min_coverage
-    2. Extra threshold for high-variance props (homeRuns, stolenBases)
-    3. Juice cap: exclude props with odds worse than -300
+    Anchor gates: composite_score >= MIN_COV_ANCHOR (75.0)
+    Swing gates:  composite_score >= MIN_COV_SWING (55.0)
 
-    No ML model adjustments. No direction bias. Just quality threshold.
+    Both pools share:
+      - High-variance props (homeRuns, stolenBases) require composite_score >= 70
+      - Juice cap: exclude any leg with odds worse than -300
     """
-    filtered = []
-    high_variance_blocked = 0
-    low_score_blocked = 0
-    extreme_juice_blocked = 0
+    def _filter_pool(legs: list, min_cov: float, pool_name: str) -> list:
+        filtered = []
+        low_score_blocked = 0
+        high_variance_blocked = 0
+        extreme_juice_blocked = 0
 
-    for leg in legs:
-        score = leg.get("composite_score", 0)
-        stat = leg.get("stat", "").lower()
+        for leg in legs:
+            score = leg.get("composite_score", 0)
+            stat  = leg.get("stat", "")
 
-        # Universal score threshold
-        if score < min_coverage:
-            low_score_blocked += 1
-            continue
+            if score < min_cov:
+                low_score_blocked += 1
+                continue
 
-        # High-variance props need higher score
-        if stat in _HIGH_VARIANCE_PROPS:
-            if score < 70:
+            if stat in _HIGH_VARIANCE_PROPS and score < 70:
                 high_variance_blocked += 1
                 continue
 
-        # Juice cap: block props with odds worse than -300
-        odds = leg.get("best_odds")
-        if odds is not None:
-            try:
-                if float(odds) < -300:
-                    extreme_juice_blocked += 1
-                    continue
-            except (ValueError, TypeError):
-                pass
+            odds = leg.get("best_odds")
+            if odds is not None:
+                try:
+                    if float(odds) < -300:
+                        extreme_juice_blocked += 1
+                        continue
+                except (ValueError, TypeError):
+                    pass
 
-        filtered.append(leg)
+            filtered.append(leg)
 
-    over_count = len([x for x in filtered if x.get("direction", "").lower() == "over"])
-    under_count = len([x for x in filtered if x.get("direction", "").lower() == "under"])
+        print(
+            f"  [filter_legs:{pool_name}] Blocked {low_score_blocked} low score + "
+            f"{high_variance_blocked} high variance + {extreme_juice_blocked} extreme juice"
+        )
+        over_count  = sum(1 for l in filtered if l.get("direction", "").lower() == "over")
+        under_count = sum(1 for l in filtered if l.get("direction", "").lower() == "under")
+        print(
+            f"  [filter_legs:{pool_name}] Kept {over_count} overs + "
+            f"{under_count} unders = {len(filtered)} total eligible"
+        )
+        return filtered
 
-    print(f"  [filter_legs] Blocked {low_score_blocked} low score + {high_variance_blocked} high variance + {extreme_juice_blocked} extreme juice (odds < -300)")
-    print(f"  [filter_legs] Kept {over_count} overs + {under_count} unders = {len(filtered)} total eligible")
-
-    return filtered
+    filtered_anchors = _filter_pool(anchor_legs, MIN_COV_ANCHOR, "anchor")
+    filtered_swings  = _filter_pool(swing_legs,  MIN_COV_SWING,  "swing")
+    return filtered_anchors, filtered_swings
 
 
 def _tier_params(num_games: int) -> dict | None:
     """
     Return constraint params based on today's slate size.
 
-    Returns None for Tier 4 (≤1 game) — not enough to build a parlay.
+    Returns None for Tier 4 (<=1 game) — not enough to build a parlay.
     """
     if num_games >= 10:
-        return dict(min_legs=4, max_legs=4, tier=1)
+        return dict(tier=1)
     elif num_games >= 5:
-        return dict(min_legs=4, max_legs=4, tier=2)
+        return dict(tier=2)
     elif num_games >= 2:
-        return dict(min_legs=4, max_legs=4, tier=3)
+        return dict(tier=3)
     else:
         return None
 
 
 def build_hybrid_parlays(
-    all_legs,
+    anchor_legs: list,
+    swing_legs: list,
     raw_props=None,
-    top_n=5,
-    num_games=15,
+    top_n: int = 5,
+    num_games: int = 15,
     blocked_players=None,
     team_to_blocked=None,
-):
+) -> list:
     """
-    Build parlays from a single composite-scored pool.
+    Build parlays with exactly 3 anchors + 2 swings (5 legs total).
 
-    Selects combinations of MIN_LEGS–MAX_LEGS legs (4–6 on all slates)
-    whose combined American odds land in +700 to +1000. Legs are ranked
-    by composite_score (ML-predicted P(hit) × 100 when USE_ML_SCORING=true).
-    Only legs with composite_score >= 65% (ML gatekeeper) enter consideration.
+    Target combined American odds: +900 to +1100.
+
+    Anchors: composite_score >= 75, odds [-300, -150].
+    Swings:  composite_score >= 55, odds (-150, +150].
 
     raw_props and blocked_players are accepted for backwards-compatibility
     but unused.
@@ -160,117 +173,101 @@ def build_hybrid_parlays(
     if params is None:
         return []
 
-    MIN_LEGS        = params["min_legs"]
-    MAX_LEGS        = params["max_legs"]
-    TIER            = params["tier"]
-    MIN_COV         = 65.0
-    MIN_PARLAY_ODDS = 700
-    MAX_PARLAY_ODDS = 1000
+    TIER = params["tier"]
     MAX_LEGS_PER_GAME = 2
-    # POOL_SIZE removed - now dynamic based on eligible leg count
-    MAX_CANDIDATES  = 15
-    TIMEOUT_SECS    = 90
-
-    # ── Pool construction ──────────────────────────────────────────────────────
-    eligible = [
-        l for l in all_legs
-        if l.get("best_odds") and (l.get("composite_score") or 0) >= MIN_COV
-    ]
-
-    if not eligible:
-        return []
-
-    # Scoring is performed upstream in main.py (simple_scorer, all qualifying legs).
-    # Fallback: if any leg is still missing a score (e.g. regeneration path), score now.
-    unscored = [l for l in eligible if l.get("composite_score") is None]
-    if unscored:
-        from src.engine.simple_scorer import score_legs
-        score_legs(unscored)
-        print(f"  [parlay_builder] Fallback-scored {len(unscored)} unscored legs")
-
-    # Filter by composite_score threshold.
-    eligible = _filter_legs(eligible)
-    if not eligible:
-        return []
-
-    eligible_sorted = sorted(eligible, key=lambda l: l.get("composite_score", 0.0), reverse=True)
-
-    # Quality validation: compare top 20 vs all eligible avg ML score
-    if len(eligible_sorted) >= 50:
-        top_20_avg = sum(l.get("composite_score", 0) for l in eligible_sorted[:20]) / 20
-        all_avg = sum(l.get("composite_score", 0) for l in eligible_sorted) / len(eligible_sorted)
-        quality_drop = ((top_20_avg - all_avg) / top_20_avg) * 100
-        print(f"  [parlay_builder] Quality validation:")
-        print(f"    Top 20 avg ML score: {top_20_avg:.1f}%")
-        print(f"    All {len(eligible_sorted)} avg ML score: {all_avg:.1f}%")
-        print(f"    Quality drop: {quality_drop:.1f}%")
-        if quality_drop > 10:
-            print(f"    WARNING: Quality drop >10% across all eligible legs")
-    elif len(eligible_sorted) >= 20:
-        top_20_avg = sum(l.get("composite_score", 0) for l in eligible_sorted[:20]) / 20
-        print(f"  [parlay_builder] Quality validation:")
-        print(f"    Top 20 avg ML score: {top_20_avg:.1f}%")
-        print(f"    (Not enough legs for top 50 comparison)")
-
-    pool = eligible_sorted  # Use ALL eligible legs, not just top N
-
-    print(
-        f"  [parlay_builder] Received {len(all_legs)} scored legs | "
-        f"target {MIN_LEGS}-{MAX_LEGS} legs, +{MIN_PARLAY_ODDS} to +{MAX_PARLAY_ODDS} odds"
-    )
-    print(
-        f"  [parlay_builder] {len(eligible)} eligible legs → "
-        f"using all {len(pool)} for parlay building (Tier {TIER})"
-    )
-
-    if len(pool) < MIN_LEGS:
-        return []
-
-    # Stamp decimal odds for fast arithmetic
-    for leg in pool:
-        if "_dec" not in leg:
-            leg["_dec"] = american_to_decimal(str(leg["best_odds"]))
-
-    # Sort by decimal odds DESC for B&B bounds
-    pool_bnb = sorted(pool, key=lambda l: l["_dec"], reverse=True)
-    n = len(pool_bnb)
+    MAX_CANDIDATES    = 15
+    TIMEOUT_SECS      = 90
 
     MIN_DECIMAL = MIN_PARLAY_ODDS / 100 + 1
     MAX_DECIMAL = MAX_PARLAY_ODDS / 100 + 1
 
+    # ── Pool construction ──────────────────────────────────────────────────────
+    # Filter each pool by threshold gates
+    filtered_anchors, filtered_swings = _filter_legs(anchor_legs, swing_legs)
+
+    if len(filtered_anchors) < MIN_ANCHOR_LEGS:
+        print(
+            f"  [parlay_builder] Insufficient anchor legs: "
+            f"{len(filtered_anchors)} < {MIN_ANCHOR_LEGS} required. Skipping."
+        )
+        return []
+    if len(filtered_swings) < MIN_SWING_LEGS:
+        print(
+            f"  [parlay_builder] Insufficient swing legs: "
+            f"{len(filtered_swings)} < {MIN_SWING_LEGS} required. Skipping."
+        )
+        return []
+
+    # Stamp decimal odds for fast arithmetic
+    for leg in filtered_anchors + filtered_swings:
+        if "_dec" not in leg:
+            leg["_dec"] = american_to_decimal(str(leg["best_odds"]))
+
+    print(
+        f"  [parlay_builder] Received {len(anchor_legs)} anchor + {len(swing_legs)} swing legs | "
+        f"target {MIN_ANCHOR_LEGS}A+{MIN_SWING_LEGS}S, +{MIN_PARLAY_ODDS} to +{MAX_PARLAY_ODDS} odds"
+    )
+    print(
+        f"  [parlay_builder] Eligible: {len(filtered_anchors)} anchors + "
+        f"{len(filtered_swings)} swings (Tier {TIER})"
+    )
+
     # ── Per-parlay generation with player diversity constraint ───────────────
     # Each parlay is built from its own B&B pass over the pool minus players
     # already used in earlier parlays. This prevents correlated wipeouts where
-    # one player's loss eliminates all parlays in the batch (e.g. May 18, 2026:
-    # McClanahan appeared in all 25 parlays; one loss wiped the entire day).
+    # one player's loss eliminates all parlays in the batch.
     used_players = set()
     diverse = []
     total_iters_all = 0
 
-    print(f"  [parlay_builder] Starting generation with {len(pool)} pool legs")
-
     for rank in range(1, top_n + 1):
-        # Filter pool to exclude players used in previous parlays
-        available_pool = [
-            leg for leg in pool
-            if leg.get("player_name", "") not in used_players
+        # Filter both pools to exclude players used in previous parlays
+        avail_anchors = [
+            l for l in filtered_anchors
+            if l.get("player_name", "") not in used_players
+        ]
+        avail_swings = [
+            l for l in filtered_swings
+            if l.get("player_name", "") not in used_players
         ]
 
         print(
-            f"  [parlay_builder] Parlay {rank}: {len(available_pool)} available legs "
-            f"({len(used_players)} players excluded)"
+            f"  [parlay_builder] Parlay {rank}: {len(avail_anchors)} anchor + "
+            f"{len(avail_swings)} swing available ({len(used_players)} players excluded)"
         )
 
-        if len(available_pool) < MIN_LEGS:
+        if len(avail_anchors) < MIN_ANCHOR_LEGS:
             print(
-                f"  [parlay_builder] Only {len(available_pool)} legs remaining after excluding "
-                f"{len(used_players)} players. Stopping at {len(diverse)} parlays."
+                f"  [parlay_builder] Only {len(avail_anchors)} anchor legs after player exclusion. "
+                f"Stopping at {len(diverse)} parlays."
+            )
+            break
+        if len(avail_swings) < MIN_SWING_LEGS:
+            print(
+                f"  [parlay_builder] Only {len(avail_swings)} swing legs after player exclusion. "
+                f"Stopping at {len(diverse)} parlays."
             )
             break
 
-        # Sort available pool by decimal odds DESC for B&B bounds
-        pool_bnb = sorted(available_pool, key=lambda l: l["_dec"], reverse=True)
+        # Sort by decimal odds DESC for B&B bounds; tag each leg with its type
+        for l in avail_anchors:
+            l["leg_type"] = "anchor"
+        for l in avail_swings:
+            l["leg_type"] = "swing"
+
+        # Combined pool sorted by decimal odds DESC for B&B pruning
+        pool_bnb = sorted(avail_anchors + avail_swings, key=lambda l: l["_dec"], reverse=True)
         n = len(pool_bnb)
+
+        # Pre-compute suffix counts of anchors and swings for O(1) feasibility checks
+        # suffix_anchors[i] = number of anchor legs in pool_bnb[i:]
+        # suffix_swings[i]  = number of swing  legs in pool_bnb[i:]
+        suffix_anchors = [0] * (n + 1)
+        suffix_swings  = [0] * (n + 1)
+        for j in range(n - 1, -1, -1):
+            lt = pool_bnb[j].get("leg_type", "swing")
+            suffix_anchors[j] = suffix_anchors[j + 1] + (1 if lt == "anchor" else 0)
+            suffix_swings[j]  = suffix_swings[j + 1]  + (1 if lt == "swing"  else 0)
 
         # Fresh B&B state for this parlay
         parlays = []
@@ -278,7 +275,7 @@ def build_hybrid_parlays(
         _stop = [False]
         total_iters = [0]
 
-        def _record(legs_snap, p, _parlays=parlays, _stop=_stop):
+        def _record(legs_snap, p, na, ns, _parlays=parlays, _stop=_stop, _tier=TIER):
             odds_val = int((p - 1) * 100)
             avg_cov  = sum(l["coverage_pct"] for l in legs_snap) / len(legs_snap)
             avg_comp = sum(l.get("composite_score", 0.0) for l in legs_snap) / len(legs_snap)
@@ -291,33 +288,53 @@ def build_hybrid_parlays(
                 "avg_coverage":  round(avg_cov, 1),
                 "avg_composite": round(avg_comp, 4),
                 "avg_ev":        avg_ev,
-                "parlay_type":   "scored",
-                "tier":          TIER,
+                "anchor_count":  na,
+                "swing_count":   ns,
+                "parlay_type":   "anchor_swing",
+                "tier":          _tier,
             })
             if len(_parlays) >= MAX_CANDIDATES:
                 _stop[0] = True
 
-        def _bnb(rem, idx, legs, p, by_pid, by_game, in_parlay,
-                 _pool_bnb=pool_bnb, _n=n, _stop=_stop,
-                 _total_iters=total_iters, _start_time=_start_time):
+        def _bnb(
+            rem, idx, legs, p, by_pid, by_game, in_parlay, n_anchors, n_swings,
+            _pool_bnb=pool_bnb, _n=n,
+            _suffix_anchors=suffix_anchors, _suffix_swings=suffix_swings,
+            _stop=_stop, _total_iters=total_iters, _start_time=_start_time,
+        ):
             """
             Branch-and-bound over _pool_bnb (sorted by _dec DESC).
 
-            Upper bound: current product × best rem remaining decimals (_pool_bnb[idx:idx+rem]).
-            Lower bound: current product × worst rem remaining decimals (_pool_bnb[_n-rem:_n]).
-            Valid because _pool_bnb is sorted desc and idx ≤ _n-rem is guaranteed.
+            Tracks n_anchors and n_swings separately. Only records when
+            n_anchors == MIN_ANCHOR_LEGS and n_swings == MIN_SWING_LEGS.
+
+            Feasibility pruning: prune if remaining pool cannot supply
+            the required number of anchor or swing legs to complete the parlay.
             """
             _total_iters[0] += 1
 
+            anchors_needed = MIN_ANCHOR_LEGS - n_anchors
+            swings_needed  = MIN_SWING_LEGS  - n_swings
+
             # ── Terminal ───────────────────────────────────────────────────────
             if rem == 0:
-                odds_val = int((p - 1) * 100)
-                if MIN_PARLAY_ODDS <= odds_val <= MAX_PARLAY_ODDS:
-                    _record(list(legs), p)
+                if n_anchors == MIN_ANCHOR_LEGS and n_swings == MIN_SWING_LEGS:
+                    odds_val = int((p - 1) * 100)
+                    if MIN_PARLAY_ODDS <= odds_val <= MAX_PARLAY_ODDS:
+                        _record(list(legs), p, n_anchors, n_swings)
                 return
 
+            # ── Feasibility: pool type counts ──────────────────────────────────
+            if _suffix_anchors[idx] < anchors_needed:
+                return  # not enough anchors left to satisfy anchor quota
+            if _suffix_swings[idx] < swings_needed:
+                return  # not enough swings left to satisfy swing quota
+            if _suffix_anchors[idx] + _suffix_swings[idx] < rem:
+                return  # not enough legs of any type
+
+            # ── Feasibility: position bound ────────────────────────────────────
             if _n - idx < rem:
-                return  # not enough legs left
+                return
 
             # ── Prune: upper bound (best possible completion) ──────────────────
             ub = p
@@ -341,10 +358,17 @@ def build_hybrid_parlays(
                     _stop[0] = True
                     return
 
-                leg    = _pool_bnb[i]
-                odd_id = leg.get("odd_id")
+                leg     = _pool_bnb[i]
+                odd_id  = leg.get("odd_id")
+                lt      = leg.get("leg_type", "swing")
 
                 if odd_id in in_parlay:
+                    continue
+
+                # Quota enforcement: skip if this type's quota is already full
+                if lt == "anchor" and n_anchors >= MIN_ANCHOR_LEGS:
+                    continue
+                if lt == "swing" and n_swings >= MIN_SWING_LEGS:
                     continue
 
                 pid        = leg.get("player_id") or leg.get("player_name", "")
@@ -360,7 +384,7 @@ def build_hybrid_parlays(
                 if by_game.get(gk, 0) >= MAX_LEGS_PER_GAME:
                     continue
 
-                # DraftKings does not allow WALKS + STRIKEOUTS in the same parlay
+                # DraftKings: no walks + strikeouts in same parlay
                 leg_stat = leg.get("stat", "").lower()
                 if leg_stat == "walks" and any(l.get("stat", "").lower() == "strikeouts" for l in legs):
                     continue
@@ -374,7 +398,11 @@ def build_hybrid_parlays(
                 legs.append(leg)
                 in_parlay.add(odd_id)
 
-                _bnb(rem - 1, i + 1, legs, p * leg["_dec"], by_pid, by_game, in_parlay)
+                new_n_anchors = n_anchors + (1 if lt == "anchor" else 0)
+                new_n_swings  = n_swings  + (1 if lt == "swing"  else 0)
+
+                _bnb(rem - 1, i + 1, legs, p * leg["_dec"],
+                     by_pid, by_game, in_parlay, new_n_anchors, new_n_swings)
 
                 # ── Remove leg ─────────────────────────────────────────────────
                 legs.pop()
@@ -385,43 +413,41 @@ def build_hybrid_parlays(
                 if not is_pitcher:
                     del by_pid[pid]
 
-        for n_legs in range(MIN_LEGS, MAX_LEGS + 1):
-            _bnb(n_legs, 0, [], 1.0, {}, {}, set())
-            if _stop[0]:
-                elapsed = time.time() - _start_time
-                if elapsed > TIMEOUT_SECS:
-                    print(
-                        f"  [parlay_builder] ⚠ hard timeout after {elapsed:.1f}s — "
-                        f"{len(parlays)} raw parlays found"
-                    )
-                else:
-                    print(
-                        f"  [parlay_builder] early exit — {MAX_CANDIDATES} candidates "
-                        f"found in {elapsed:.1f}s"
-                    )
-                break
+        _bnb(TOTAL_LEGS, 0, [], 1.0, {}, {}, set(), 0, 0)
 
         elapsed = time.time() - _start_time
         total_iters_all += total_iters[0]
+
+        if _stop[0]:
+            if elapsed > TIMEOUT_SECS:
+                print(
+                    f"  [parlay_builder] ⚠ hard timeout after {elapsed:.1f}s — "
+                    f"{len(parlays)} raw parlays found"
+                )
+            else:
+                print(
+                    f"  [parlay_builder] early exit — {MAX_CANDIDATES} candidates "
+                    f"found in {elapsed:.1f}s"
+                )
+
         print(f"  [parlay_builder] Parlay {rank} B&B: {total_iters[0]:,} iters ({elapsed:.1f}s)")
 
         # ── Deduplicate and pick best candidate for this parlay ───────────────
         seen_keys = set()
         unique_candidates = []
-        for p in sorted(
+        for pc in sorted(
             parlays,
             key=lambda x: (x["avg_composite"], x["avg_coverage"]),
             reverse=True,
         ):
-            key = frozenset(l["odd_id"] for l in p["legs"])
+            key = frozenset(l["odd_id"] for l in pc["legs"])
             if key not in seen_keys:
                 seen_keys.add(key)
-                unique_candidates.append(p)
+                unique_candidates.append(pc)
 
         if not unique_candidates:
             print(
-                f"  [parlay_builder] ⚠  0 parlays built for rank {rank} from "
-                f"{len(available_pool)} available legs — "
+                f"  [parlay_builder] ⚠  0 parlays built for rank {rank} — "
                 f"check odds range (+{MIN_PARLAY_ODDS}–+{MAX_PARLAY_ODDS}). "
                 f"Stopping at {len(diverse)} parlays."
             )
@@ -443,7 +469,7 @@ def build_hybrid_parlays(
 
     # Correlation risk logging — no behavior change, for post-hoc analysis only
     for i, parlay in enumerate(diverse, start=1):
-        game_ids = [leg.get("game_pk") or leg.get("team", "") for leg in parlay["legs"]]
+        game_ids    = [leg.get("game_pk") or leg.get("team", "") for leg in parlay["legs"]]
         unique_games = len(set(game_ids))
         legs_same_game = len(game_ids) - unique_games
         correlation_risk = legs_same_game / len(parlay["legs"]) if parlay["legs"] else 0
@@ -453,6 +479,8 @@ def build_hybrid_parlays(
             f"correlation_risk={correlation_risk:.3f} "
             f"legs_same_game={legs_same_game} "
             f"num_legs={len(parlay['legs'])} "
+            f"anchor_count={parlay.get('anchor_count',0)} "
+            f"swing_count={parlay.get('swing_count',0)} "
             f"avg_coverage={parlay.get('avg_coverage', 0):.3f} "
             f"total_odds={total_odds}"
         )

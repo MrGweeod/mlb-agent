@@ -41,9 +41,13 @@ from src.utils.db import log_scored_legs, log_training_data_legs, save_parlay_re
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-# Minimum raw coverage rate (%) to enter the candidate pool.
-# Unified with parlay builder threshold to avoid scoring legs that won't be used.
-MIN_COVERAGE_PCT = 65.0
+# Anchor/Swing leg pool thresholds (replaces MIN_COVERAGE_PCT = 65.0)
+ANCHOR_MIN_COVERAGE = 75.0
+ANCHOR_MIN_ODDS     = -300
+ANCHOR_MAX_ODDS     = -150
+SWING_MIN_COVERAGE  = 55.0
+SWING_MIN_ODDS      = -150
+SWING_MAX_ODDS      = 150
 
 # Transaction typeCodes that affect player availability.
 # SC = Status Change (IL placements/reinstatements)
@@ -245,9 +249,9 @@ def _find_qualifying_legs(
     team_abbr_to_game_pk: dict[str, int],
     pitcher_id_map: dict[str, int | None],
     season: int,
-) -> list[dict]:
+) -> tuple[list[dict], list[dict]]:
     """
-    Apply the coverage gate to all SGO props and return qualifying legs.
+    Apply the coverage gate to all SGO props and return (anchor_legs, swing_legs).
 
     For each prop:
       1. Skip unsupported stats (inningsPitched, hitsAllowed, earnedRuns).
@@ -258,14 +262,16 @@ def _find_qualifying_legs(
       4. Confirm the player's team is on today's schedule.
       5. Call calculate_coverage() for batter props or
          calculate_pitcher_k_coverage() for pitcher K props.
-      6. Include the leg if coverage_rate × 100 >= MIN_COVERAGE_PCT.
+      6. Classify into anchor (coverage≥75%, odds -300 to -150) or
+         swing (coverage≥55%, odds -150 to +150) pools.
 
     Only the standard (non-alt) DK line is used. Alt-line coverage is deferred
     to a later phase.
 
-    Returns a list of leg dicts ready for enrichment and trend analysis.
+    Returns (anchor_qualifying, swing_qualifying) ready for enrichment and parlay building.
     """
-    qualifying: list[dict] = []
+    anchor_qualifying: list[dict] = []
+    swing_qualifying: list[dict] = []
     seen_odd_ids: set[str] = set()
 
     for prop in sgo_props:
@@ -359,23 +365,41 @@ def _find_qualifying_legs(
         if coverage is None:
             continue  # below seasonal minimum games threshold
 
-        # Gate 1: coverage_overall must clear the 65% floor before any adjustment is applied.
         coverage_overall_raw = coverage.get("coverage_overall") or 0.0
-        if coverage_overall_raw < MIN_COVERAGE_PCT:
-            continue
-
-        # Gate 2: prop-specific coverage_overall floors.
-        if stat == "totalBases" and direction == "under" and line == 1.5:
-            if coverage_overall_raw < 80.0:
-                continue
-        if stat == "strikeouts" and direction == "over" and line == 5.5:
-            if coverage_overall_raw < 72.0:
-                continue
-
-        # Best available coverage signal: vs-hand if available, else overall.
         coverage_pct = coverage.get("coverage_vs_hand") or coverage_overall_raw
 
-        qualifying.append({
+        # Determine odds value for pool classification
+        try:
+            odds_val = float(standard_odds)
+        except (ValueError, TypeError):
+            continue
+
+        # Classify into anchor or swing pool
+        is_anchor = (
+            coverage_overall_raw >= ANCHOR_MIN_COVERAGE
+            and ANCHOR_MIN_ODDS <= odds_val <= ANCHOR_MAX_ODDS
+        )
+        is_swing = (
+            coverage_overall_raw >= SWING_MIN_COVERAGE
+            and SWING_MIN_ODDS <= odds_val <= SWING_MAX_ODDS
+            and not is_anchor
+        )
+
+        if not is_anchor and not is_swing:
+            continue
+
+        # Prop-specific floors (anchors only)
+        if is_anchor:
+            if stat == "totalBases" and direction == "under" and line == 1.5:
+                if coverage_overall_raw < 80.0:
+                    continue
+            if stat == "strikeouts" and direction == "over" and line == 5.5:
+                if coverage_overall_raw < 72.0:
+                    continue
+
+        leg_type = "anchor" if is_anchor else "swing"
+
+        leg_dict = {
             # Identifiers
             "player_id":           mlb_player_id,
             "player_name":         player_name,
@@ -404,9 +428,16 @@ def _find_qualifying_legs(
             # Game context
             "game_pk":             game_pk,
             "opposing_pitcher_id": opposing_pitcher_id if opposing_pitcher_id else None,
-        })
+            # Pool classification
+            "leg_type":            leg_type,
+        }
 
-    return qualifying
+        if is_anchor:
+            anchor_qualifying.append(leg_dict)
+        else:
+            swing_qualifying.append(leg_dict)
+
+    return anchor_qualifying, swing_qualifying
 
 
 def _attach_pitcher_rank_signals(
@@ -512,7 +543,9 @@ def generate_recommendations(
         ranked by edge_pct descending.
     """
     # Get up to 3× candidates to give the diversity filter room to work
-    candidates = build_hybrid_parlays(qualifying_legs, top_n=50)
+    _anchor_legs = [l for l in qualifying_legs if l.get("leg_type") == "anchor"]
+    _swing_legs  = [l for l in qualifying_legs if l.get("leg_type") == "swing"]
+    candidates = build_hybrid_parlays(_anchor_legs, _swing_legs, top_n=50)
     if not candidates:
         return []
 
@@ -641,15 +674,16 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
         print(f"  {len(all_sgo_props)} props remaining")
 
     # ── Step 4: Coverage Gate ─────────────────────────────────────────────────
-    print(f"\n[4/8] Computing coverage (min {MIN_COVERAGE_PCT}%)...")
-    qualifying_legs = _find_qualifying_legs(
+    print(f"\n[4/8] Computing coverage (anchor≥{ANCHOR_MIN_COVERAGE}% / swing≥{SWING_MIN_COVERAGE}%)...")
+    anchor_legs, swing_legs = _find_qualifying_legs(
         all_sgo_props,
         team_id_to_abbr,
         team_abbr_to_game_pk,
         pitcher_id_map,
         season,
     )
-    print(f"  {len(qualifying_legs)} qualifying leg(s) at ≥{MIN_COVERAGE_PCT}% coverage")
+    qualifying_legs = anchor_legs + swing_legs
+    print(f"  {len(anchor_legs)} anchor + {len(swing_legs)} swing = {len(qualifying_legs)} qualifying leg(s)")
 
     if not qualifying_legs:
         print("  No qualifying legs. Exiting.")
@@ -883,8 +917,11 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
     tier_label = f"Tier {tier_info['tier']}" if tier_info else "Tier 4 (thin slate)"
     print(f"\n[8/8] Building hybrid parlays ({len(schedule)} games → {tier_label})...")
 
+    final_anchor_legs = [l for l in qualifying_legs if l.get("leg_type") == "anchor"]
+    final_swing_legs  = [l for l in qualifying_legs if l.get("leg_type") == "swing"]
     parlays = build_hybrid_parlays(
-        qualifying_legs,
+        final_anchor_legs,
+        final_swing_legs,
         num_games=len(schedule),
         team_to_blocked=team_to_blocked,
     )
@@ -1170,9 +1207,9 @@ def run_targeted_pipeline(buffer_minutes: int = 15, source: str = "auto") -> Non
         f"| pitcher_hand={_with_pitcher_hand} | batter_hand={_with_batter_hand}"
     )
 
-    # ── Step 3: Filter composite_score >= MIN_COVERAGE_PCT (55) ──────────────
-    eligible = [l for l in all_legs if (l.get("composite_score") or 0) >= MIN_COVERAGE_PCT]
-    print(f"  {len(eligible)} legs with composite_score >= {MIN_COVERAGE_PCT}")
+    # ── Step 3: Filter composite_score >= SWING_MIN_COVERAGE (55) ───────────
+    eligible = [l for l in all_legs if (l.get("composite_score") or 0) >= SWING_MIN_COVERAGE]
+    print(f"  {len(eligible)} legs with composite_score >= {SWING_MIN_COVERAGE}")
 
     if not eligible:
         print("  No eligible legs. Exiting targeted pipeline.")

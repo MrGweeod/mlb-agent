@@ -327,40 +327,44 @@ async def handle_build_parlays(request: web.Request) -> web.Response:
                 content_type="application/json",
             )
 
-        qualifying_legs = []
+        anchor_legs = []
+        swing_legs  = []
         for leg in upcoming_legs:
             composite_score = leg.get("composite_score")
-            # Fix: skip legs with None composite_score instead of comparing None >= 65
             if composite_score is None:
                 continue
-            if composite_score >= 65:
-                qualifying_legs.append({
-                    **leg,
-                    "best_odds": leg.get("odds"),
-                    "best_line": leg.get("line"),
-                })
+            leg_type = leg.get("leg_type", "")
+            enriched = {
+                **leg,
+                "best_odds": leg.get("odds"),
+                "best_line": leg.get("line"),
+            }
+            if leg_type == "anchor" and composite_score >= 75:
+                anchor_legs.append(enriched)
+            elif leg_type == "swing" and composite_score >= 55:
+                swing_legs.append(enriched)
 
-        print(f"[build_parlays] {len(qualifying_legs)} legs ≥65% ML score")
+        print(f"[build_parlays] {len(anchor_legs)} anchor + {len(swing_legs)} swing legs")
 
-        if len(qualifying_legs) < 4:
+        if len(anchor_legs) < 3 or len(swing_legs) < 2:
             return web.Response(
                 text=json.dumps({
                     "parlays": [],
                     "message": (
-                        f"Only {len(qualifying_legs)} legs qualify (≥65% ML score), "
-                        "need at least 4"
+                        f"Only {len(anchor_legs)} anchor + {len(swing_legs)} swing legs qualify, "
+                        "need at least 3 anchor + 2 swing"
                     ),
                 }),
                 content_type="application/json",
             )
 
-        parlays = build_hybrid_parlays(qualifying_legs, top_n=10)
+        parlays = build_hybrid_parlays(anchor_legs, swing_legs, top_n=10)
 
         if not parlays:
             return web.Response(
                 text=json.dumps({
                     "parlays": [],
-                    "message": "No valid parlay combinations found in +700 to +1000 range",
+                    "message": "No valid parlay combinations found in +900 to +1100 range",
                 }),
                 content_type="application/json",
             )
@@ -425,7 +429,7 @@ async def handle_build_parlays(request: web.Request) -> web.Response:
             text=json.dumps({
                 "parlays": top_5,
                 "generated_at": generated_at,
-                "legs_analyzed": len(qualifying_legs),
+                "legs_analyzed": len(anchor_legs) + len(swing_legs),
                 "total_combinations": len(parlays),
             }, default=str),
             content_type="application/json",

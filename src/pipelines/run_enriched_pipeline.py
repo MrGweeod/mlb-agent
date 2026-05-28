@@ -295,8 +295,11 @@ def run_enriched_pipeline(scored_legs: list, production_batch_id: str = "") -> N
     )
 
     # Build shadow parlays using the same parlay builder + constraints
+    shadow_anchor_legs = [l for l in enriched_legs if l.get("leg_type") == "anchor"]
+    shadow_swing_legs  = [l for l in enriched_legs if l.get("leg_type") == "swing"]
     shadow_parlays = build_hybrid_parlays(
-        enriched_legs,
+        shadow_anchor_legs,
+        shadow_swing_legs,
         num_games=len(schedule) if schedule else 15,
     )
 
