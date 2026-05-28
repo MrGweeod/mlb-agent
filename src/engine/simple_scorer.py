@@ -39,10 +39,6 @@ def calculate_composite_score(leg):
 
     score = base_score
 
-    # Small bonus for having split data (larger sample, more reliable)
-    if has_split:
-        score += 3
-
     # ============================================
     # 2. CONSISTENCY SIGNAL: Trend vs Overall
     # ============================================
@@ -60,8 +56,7 @@ def calculate_composite_score(leg):
             score += 2    # meaningfully hot (+1.9pp)
         elif gap <= -5:
             score += 1    # warm (+1.4pp)
-        else:
-            score += 1    # neutral/consistent — stable coverage is a mild positive
+        # else: neutral — no adjustment
 
     # ============================================
     # 3. PITCHER MATCHUP: Quality & Style

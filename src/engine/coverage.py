@@ -21,10 +21,10 @@ For HITTERS:
 For PITCHERS (position in SP/RP/P/TWP, or stat in pitcher-only set):
     coverage_overall   — % of ALL starts where stat met the line
     coverage_vs_hand   — None (no handedness split for pitchers)
-    coverage_recent_5  — % of LAST 5 starts where stat met the line
+    coverage_recent_10 — % of LAST 10 starts where stat met the line
     games_total        — total starts in log this season
     games_vs_hand      — None
-    games_recent       — number of recent starts used (≤5)
+    games_recent       — number of recent starts used (≤10)
     pitcher_hand       — None
     batter_hand        — None
 
@@ -347,7 +347,7 @@ def _pitcher_coverage(
     season: int,
     direction: str = "over",
 ) -> dict | None:
-    """Calculate overall and recent-5 coverage for a pitcher prop."""
+    """Calculate overall and recent-10 coverage for a pitcher prop."""
     if prop_type not in PITCHER_PROP_STAT_MAP:
         print(f"  [coverage] Unknown pitcher prop_type '{prop_type}'.")
         return None
@@ -356,12 +356,12 @@ def _pitcher_coverage(
 
     if prop_type == "inningsPitched":
         overall_covered, overall_games = _count_ip_coverage(game_log, line, direction)
-        recent_log = game_log[-5:]
+        recent_log = game_log[-10:]
         recent_covered, recent_games = _count_ip_coverage(recent_log, line, direction)
     else:
         stat_field = PITCHER_PROP_STAT_MAP[prop_type]
         overall_covered, overall_games = _count_coverage(game_log, stat_field, line, direction)
-        recent_log = game_log[-5:]
+        recent_log = game_log[-10:]
         recent_covered, recent_games = _count_coverage(recent_log, stat_field, line, direction)
 
     if overall_games < get_season_minimum_pitcher(overall_games):
@@ -370,7 +370,7 @@ def _pitcher_coverage(
     return {
         "coverage_overall":  round(100.0 * overall_covered / overall_games, 1),
         "coverage_vs_hand":  None,
-        "coverage_recent_5": round(100.0 * recent_covered / recent_games, 1) if recent_games > 0 else None,
+        "coverage_recent_10": round(100.0 * recent_covered / recent_games, 1) if recent_games > 0 else None,
         "games_total":       overall_games,
         "games_vs_hand":     None,
         "games_recent":      recent_games,
