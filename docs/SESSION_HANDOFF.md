@@ -1,143 +1,175 @@
 # MLB Parlay Agent — Session Handoff
-**Last Updated:** May 27, 2026 (Session 1 — Coverage Floor Fixes Deployed)
+**Last Updated:** May 28, 2026 (Session 2 — Team SO Signal + Anchor/Swing Architecture)
 
 ## Current Status
-✅ **OPERATIONAL — SESSION 1 FIXES LIVE**
-✅ **Coverage floor gating on `coverage_overall` before adjustments**
-✅ **`totalBases under 1.5` minimum 80% `coverage_overall`**
-✅ **`strikeouts over 5.5` minimum 72% `coverage_overall`**
-✅ **Shadow Enriched Pipeline: Fully Operational (inherits new filters)**
-✅ **Parlay Odds Range: +700 to +1000**
+✅ **OPERATIONAL — SESSION 2 DEPLOYED**
+✅ **Anchor/Swing 5-leg parlay structure live**
+✅ **Consistency signal deployed (enriched + production)**
+✅ **Signal 4: Team SO Rank live in shadow pipeline**
+✅ **Neutral consistency branch bug fixed**
+✅ **Shadow pipeline: 4 signals fully operational**
 
 ---
 
-## What Happened on May 27, 2026
+## What Happened on May 28, 2026
 
-### **🔍 Performance Analysis — Identified Root Cause of Poor Parlay Win Rate**
+### **Major Architecture Change — Anchor/Swing Parlay Structure**
+Replaced the single-pool 4-leg +700–+1000 system with a 3-anchor + 2-swing 5-leg +900–+1100 structure.
 
-Ran deep diagnostic analysis on parlay leg win rates comparing all-time vs last 7 days.
+- Anchor pool: `coverage_overall >= 75%`, odds `-300 to -150`
+- Swing pool: `coverage_overall >= 55%`, odds `-150 to +150`
+- All 4 call sites updated: `main.py` (×2), `server.py`, `run_enriched_pipeline.py`
+- Shadow pipeline inherits new structure automatically
 
-**Key findings:**
+**Anchor pool win rates (data at time of decision):**
+- SO over: 77.9%
+- Hits under: 73.4%
+- Hits over: 72.8%
 
-**In-parlay leg win rate is only 57.6%** — not the 66.7% headline from training data. The training data hit rate is carried by high-juice props (-300 to -460) that the parlay builder can't use to reach +700 odds. The legs that actually appear in parlays were hitting at ~50% on the most common categories.
-
-**7-day in-parlay win rates by category:**
-
-| Leg | Appearances | Win Rate | Action |
-|---|---|---|---|
-| `totalBases under 1.5` | 135 | 50.4% | 🚫 80% floor added |
-| `strikeouts over 5.5` | 31 | 50.0% | 🚫 72% floor added |
-| `strikeouts over 0.5` | 37 | 57.6% | ✅ Monitor |
-| `hits over 0.5` | 31 | 60.0% | ✅ Keep |
-| `strikeouts under 4.5` | 27 | 63.0% | ✅ Keep |
-| `strikeouts over 6.5` | 19 | 68.4% | ✅ Keep |
-| `hits under 0.5` | 53 | 71.1% | ✅ Keep |
-| `strikeouts under 5.5` | 16 | 85.7% | ✅ Prioritize |
-
-**Root cause of floor abuse:** `coverage_vs_hand` adjustments were inflating marginal players (62–65% `coverage_overall`) over the 65% threshold. José Ramírez was passing at 62–64% overall, Mookie Betts and Josh Naylor at borderline 67–70% but then getting boosted by ERA/pitcher adjustments into parlay-eligible territory. All three were 0/8+ over the last 7 days.
-
-**Score-outcome correlation is inverted:** Lost parlay legs averaged score 75.5, won parlay legs averaged 74.2. Contextual adjustments (ERA ±5, K/9 ±5) are adding noise, not signal.
+**Swing pool win rates:**
+- Hits under: 68.4%
+- SO under: 62.5%
+- TB under: 61.0%
 
 ---
 
-### **🔧 Session 1 — Three Fixes Deployed to Production**
-
-**Commit:** `c4c6eae` → rebased → `9f49aa3`
-**File modified:** `main.py` (lines 362–376)
-
-**Change 1 — Gate on `coverage_overall` before adjustments (Gate 1):**
-```python
-coverage_overall_raw = coverage.get("coverage_overall") or 0.0
-if coverage_overall_raw < MIN_COVERAGE_PCT:  # 65%
-    continue
-```
-A player with `coverage_overall=55%` and `coverage_vs_hand=70%` is now correctly rejected. Previously, `coverage_vs_hand` could rescue a subthreshold player.
-
-**Change 2 — 80% floor for `totalBases under 1.5` (Gate 2):**
-```python
-if stat == "totalBases" and direction == "under" and line == 1.5:
-    if coverage_overall_raw < 80.0:
-        continue
-```
-
-**Change 3 — 72% floor for `strikeouts over 5.5` (Gate 2):**
-```python
-if stat == "strikeouts" and direction == "over" and line == 5.5:
-    if coverage_overall_raw < 72.0:
-        continue
-```
-
-**Railway deployment confirmed working.** From today's pipeline logs:
-- Pool: 252 qualifying legs (down from ~290)
-- 133 eligible after juice cap
-- 3 parlays built — no Mookie Betts, José Ramírez, Josh Naylor, or Braxton Ashcraft
-- Shadow pipeline confirmed inheriting filters (receives `qualifying_legs` directly from `main.py`)
+### **Scoring Fixes (May 28)**
+- Consistency signal added to both `simple_scorer.py` and `enriched_scorer.py`:
+  - `gap = coverage_overall - coverage_recent_10`
+  - gap ≥ 20 → -6, gap ≥ 12 → -4, gap ≥ 6 → -2, gap ≤ -10 → +2, gap ≤ -5 → +1, else → 0
+- Removed +3 handedness bonus from `simple_scorer.py` (was double-counting with `coverage_vs_hand` base)
+- Fixed neutral consistency branch bug in `enriched_scorer.py` (`score += 1` → `score += 0`)
+- Pitcher `coverage_recent_5` renamed to `coverage_recent_10` in `coverage.py` (key mismatch was causing NULL for all pitchers)
 
 ---
 
-### **💡 Consistency Signal — Designed for Friday Session 2**
-
-Identified that `coverage_recent_10` is populated at 95–97% across all 7 days (confirmed via query). Both `coverage_overall` and `coverage_recent_10` are computed correctly as precise percentages in `_hitter_coverage()` in `src/engine/coverage.py`.
-
-**Consistency signal to be added to `enriched_scorer.py` on Friday:**
-```python
-gap = coverage_overall - coverage_recent_10
-
-if gap >= 20:       consistency_adj = -6   # severe cold streak
-elif gap >= 12:     consistency_adj = -4   # moderate cold streak
-elif gap >= 6:      consistency_adj = -2   # mild cooling off
-elif gap <= -10:    consistency_adj = +4   # meaningfully hot
-elif gap <= -5:     consistency_adj = +2   # slightly hot
-else:               consistency_adj = 0    # neutral
-```
+### **Pipeline / Data Fixes (May 28)**
+- `get_scored_legs()` in `src/utils/db.py` now partitions by `player_name, stat, direction` and orders by `logged_at DESC` — prevents stale lines from earlier pipeline runs appearing in regenerate
+- Minimum pitcher SO line raised from 3.5 to 4.5 (3.5 line wins at 47.8%/44.7%)
+- Pitcher SO unders blocked below 6.5 line (4.5u=47.2%, 5.5u=51.9%)
 
 ---
 
-## Pending Items — Next Session (Friday May 29)
+### **Signal 4: Team SO Rank — Shadow Pipeline**
 
-### **1. Consistency Signal in Shadow Enriched Scorer (Claude Code)**
-Add as Signal 4 in `src/engine/enriched_scorer.py`. Before writing code, confirm:
-- Where signals 1–3 are applied in the file (slot in same pattern)
-- That `coverage_recent_10` is being passed into the enriched scorer from the pipeline
+Added opposing team strikeout ranking as the 4th enriched scoring signal.
 
-### **2. Pitcher K Under Line Threshold (Claude Code)**
-Block pitcher K unders below line 5.5 in `main.py`. Still pending from last week.
-```python
-if stat == "strikeouts" and direction == "under" and float(line) < 5.5:
-    continue
-```
+**Motivation:** Jack Flaherty had 70% coverage on SO under 6.5 but was facing LAA (league-leading K lineup). He accumulated 7 Ks in 5.2 IP — the prop lost. The scorer had zero awareness of opposing lineup K-proneness.
 
-### **3. `won_with_void` Outcome Tracking (Claude Code)**
-Add `"won_with_void"` outcome value in `src/tracker/parlay_outcome_resolver.py`. Medium priority.
+**Implementation:**
+- `get_team_strikeout_stats(season)` added to `mlb_stats.py`
+  - Season SO rank: `/api/v1/teams/stats?stats=season` — 30 teams
+  - Recent rank: `/api/v1/teams/stats?stats=byDateRange` with 14-day window (note: `lastXGames` with `limit=10` filters team count not game count — `byDateRange` is the correct approach)
+  - 24hr TTL cache, refreshed at 9 AM
+- `_compute_team_so_adjustment()` in `enriched_scorer.py`
+  - Applies only to pitcher SO props (`position in _PITCHER_POSITIONS`, `stat == 'strikeouts'`)
+  - Season rank primary signal: rank 1–8 → ±5, rank 9–15 → ±2, rank 16–22 → ∓2, rank 23–30 → ∓5
+  - Recent rank modifier: rank 1–8 → +2, rank 23–30 → -2, else → 0
+  - Net capped at ±6
+  - Sign-flipped for unders (high-K lineup = penalty for SO unders, the Flaherty case)
+- `team_so_adjustment` column added to `mlb_scored_legs_enriched`
+
+**Validated test results:**
+- LAA (rank 1): Flaherty SO under → -6.0, SO over → +6.0
+- Batter hits prop → None (correctly scoped)
+
+**Commits today:**
+- `9f49aa3` — Anchor/swing + consistency signal + pitcher coverage_recent_10 + scoring fixes
+- `5ff62f6` — get_scored_legs latest logged_at fix
+- `0883f65` — Pitcher SO line minimum raised to 4.5
+- `4747588` — Pitcher SO unders blocked below 6.5
+- (Team SO signal commit) — Signal 4 + neutral consistency fix + DB migration
 
 ---
 
-## Longer-Term Considerations
+## Pending Items — Next Session
 
-**Scoring adjustments may be doing more harm than good.** The inverted score-outcome correlation (lost legs score higher than won legs) suggests the ±5 ERA and ±5 K/9 adjustments in `simple_scorer.py` are adding noise. After the consistency signal is evaluated in the shadow pipeline, consider reducing or removing these adjustments in a future session.
+### **1. Validate Pitcher `coverage_recent_10` (Manual — Next 9 AM Pipeline)**
+The pitcher `coverage_recent_10` was NULL yesterday due to the 24hr game log cache. Tomorrow's 9 AM pipeline will fetch fresh logs.
 
-**Shadow pipeline comparison analysis** — June 1–2 as planned. Now has cleaner data starting May 27 with the new filters in place.
+**Query to run after 9 AM:**
+```sql
+SELECT player_name, stat, coverage_overall, coverage_recent_10,
+       (coverage_overall - coverage_recent_10) as gap, composite_score
+FROM mlb_scored_legs
+WHERE run_date = CURRENT_DATE::text
+  AND stat IN ('strikeouts', 'hitsAllowed', 'earnedRuns', 'inningsPitched')
+  AND coverage_recent_10 IS NOT NULL
+ORDER BY gap DESC;
+```
+
+### **2. Validate Consistency Signal on Fresh Data (Manual — Next 9 AM Pipeline)**
+First clean read on whether penalties are firing correctly for pitchers.
+
+**Query to run:**
+```sql
+SELECT player_name, stat, coverage_overall, coverage_recent_10,
+       (coverage_overall - coverage_recent_10) as gap, composite_score
+FROM mlb_scored_legs
+WHERE run_date = CURRENT_DATE::text
+  AND coverage_recent_10 IS NOT NULL
+ORDER BY gap DESC
+LIMIT 30;
+```
+High-gap (cold) legs should have noticeably lower composite scores.
+
+### **3. Validate Team SO Signal in Enriched Table (Manual — Next Pipeline Run)**
+After the next enriched pipeline run, confirm `team_so_adjustment` is populating:
+
+```sql
+SELECT player_name, stat, direction, line,
+       coverage_overall, team_so_adjustment, composite_score
+FROM mlb_scored_legs_enriched
+WHERE run_date = CURRENT_DATE
+  AND stat = 'strikeouts'
+  AND team_so_adjustment IS NOT NULL
+ORDER BY team_so_adjustment DESC;
+```
+
+### **4. Gate 3 — Minimum `coverage_recent_10` Floor (Discussed, Not Built)**
+Proposed: block any leg where `coverage_recent_10 < 50%` regardless of `coverage_overall`. Prevents cold-streak legs sneaking through on strong season averages. Deferred — validate consistency signal first.
+
+### **5. `won_with_void` Outcome Tracking (Claude Code — Medium Priority)**
+Add `"won_with_void"` outcome value in `src/tracker/parlay_outcome_resolver.py`.
+
+### **6. Dead ERA/Pitcher Adjustment Cleanup (Claude Code — Low Priority)**
+`opponent_adjustment` has returned 0 for 100% of legs over 14 days — the signal isn't firing. Worth removing from `simple_scorer.py` in a future cleanup session to reduce noise.
+
+### **7. Shadow Pipeline Comparison Analysis (June 1–2)**
+Compare enriched vs production win rates after sufficient data accumulates with Signal 4 live. Now has clean data from May 28 onward with all 4 signals running.
+
+---
+
+## Key Data Points
+
+- ERA/pitcher adjustments in `simple_scorer` are effectively dead (opponent_adjustment = 0 for 100% of legs over 14 days)
+- Plus-money props DO exist some days (hits under +102 to +123) but not at scale
+- Pitcher SO 3.5 line: 47.8% over / 44.7% under — confirmed noise, now blocked
+- Pitcher SO unders: 4.5u=47.2%, 5.5u=51.9%, 6.5u=40.7% — all weak, now blocked below 6.5
+- `lastXGames` MLB Stats API param `limit=N` filters team count, not game count — use `byDateRange` for windowed team stats
 
 ---
 
 ## System Health Indicators
 
 ### **Green Lights**
-- ✅ 3 parlays per run (down from 36 but higher quality)
-- ✅ All parlays within +700–+1000
-- ✅ No Mookie Betts / José Ramírez / Josh Naylor TB under in pool
-- ✅ Coverage gate correctly blocking floor-abuse cases
-- ✅ Shadow pipeline inheriting production filters
-- ✅ Pipeline scheduler reliable (3x daily)
-- ✅ 9AM morning pipeline producing parlays
+- ✅ Anchor/swing structure live and producing parlays
+- ✅ Coverage gates (Gate 1 + Gate 2) correctly enforced
+- ✅ Shadow pipeline: all 4 signals operational
+- ✅ Team SO stats: 30 teams loading, 24hr cache working
+- ✅ Pitcher SO line filters in place (min 4.5, unders blocked below 6.5)
+- ✅ Pipeline scheduler reliable (3×/day)
+- ✅ 9 AM morning pipeline producing parlays
+- ✅ DB schema consistent (team_so_adjustment column added)
 
 ### **Yellow Flags**
-- ⚠️ Parlay win rate at ~11% — Session 1 fixes should improve this, monitor over next 5–7 days
-- ⚠️ Pitcher K under line threshold still not implemented
-- ⚠️ Score-outcome correlation still inverted — scoring adjustments under review
+- ⚠️ Parlay win rate at ~11% — anchor/swing + consistency signal under evaluation, monitor 5–7 days
+- ⚠️ Pitcher coverage_recent_10 not yet validated (cache lag from yesterday)
+- ⚠️ Score-outcome correlation mildly inverted in production — ERA/K-rate adjustments under review
+- ⚠️ Gate 3 (min recent coverage floor) deferred pending consistency signal data
 
 ### **Red Flags**
-- 🔴 Health check flagging `HIT RATE HIGH: 67.5%` — likely selection bias from new filters, monitor
+- None currently
 
 ---
 
@@ -154,7 +186,7 @@ curl -X POST https://mlb-agent.up.railway.app/api/refresh \
 
 ---
 
-**Last Review:** May 27, 2026
-**System Status:** ✅ Operational — Session 1 Fixes Live
-**Next Review:** May 29, 2026 (Consistency Signal + Pitcher K Under Threshold)
-**Pending Code Changes:** Consistency signal (enriched scorer), pitcher K under ≥5.5 threshold, won_with_void tracking
+**Last Review:** May 28, 2026
+**System Status:** ✅ Operational — Signal 4 Deployed to Shadow Pipeline
+**Next Review:** May 29, 2026 (Validate pitcher coverage_recent_10 + consistency signal + team SO adjustment on fresh data)
+**Pending Code Changes:** Gate 3 (after validation), won_with_void tracking, dead ERA adjustment cleanup

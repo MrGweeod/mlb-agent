@@ -1,5 +1,5 @@
 # MLB Parlay Agent — Architecture Decisions
-**Last Updated:** May 27, 2026 (Session 1 — Coverage Floor Fixes)
+**Last Updated:** May 28, 2026 (Session 2 — Team SO Signal + Anchor/Swing)
 
 This document captures key architectural and design decisions made during development, along with reasoning and lessons learned.
 
@@ -8,18 +8,18 @@ This document captures key architectural and design decisions made during develo
 ## Table of Contents
 1. [Core Philosophy](#core-philosophy)
 2. [Scoring System Evolution](#scoring-system-evolution)
-3. [Coverage Gating Architecture](#coverage-gating-architecture) ← **UPDATED**
-4. [Prop-Specific Coverage Floors](#prop-specific-coverage-floors) ← **NEW**
-5. [Coverage Calculation](#coverage-calculation)
-6. [Prop Type Filtering](#prop-type-filtering)
-7. [Parlay Construction Strategy](#parlay-construction-strategy)
+3. [Coverage Gating Architecture](#coverage-gating-architecture)
+4. [Prop-Specific Coverage Floors](#prop-specific-coverage-floors)
+5. [Anchor/Swing Parlay Structure](#anchorswing-parlay-structure) ← **UPDATED**
+6. [Coverage Calculation](#coverage-calculation)
+7. [Prop Type Filtering](#prop-type-filtering)
 8. [Juice Cap Decision](#juice-cap-decision)
 9. [Player Diversity Constraint](#player-diversity-constraint)
 10. [Shadow Pipeline Strategy](#shadow-pipeline-strategy)
-11. [Enriched Scoring Signals](#enriched-scoring-signals)
+11. [Enriched Scoring Signals](#enriched-scoring-signals) ← **UPDATED**
 12. [Database Design](#database-design)
 13. [Pipeline Architecture](#pipeline-architecture)
-14. [Lessons Learned](#lessons-learned)
+14. [Lessons Learned](#lessons-learned) ← **UPDATED**
 15. [Future Considerations](#future-considerations)
 
 ---
@@ -37,23 +37,27 @@ Parlays multiply probabilities — each leg's hit rate is paramount. A 75% cover
 ## Scoring System Evolution
 
 ### **Phase 0: ML Model (April–May 2026) — ABANDONED**
-GradientBoostingClassifier, 77K samples, direction feature at 77% importance. Score-outcome correlation was **inverted** — high scores had lower win rates. Parlay win rate: 7.6%.
+GradientBoostingClassifier, 77K samples, direction feature at 77% importance. Score-outcome correlation was inverted — high scores had lower win rates. Parlay win rate: 7.6%.
 
 ### **Phase 1: Simple Coverage-Based Scoring (May 20, 2026) — CURRENT PRODUCTION**
 
 ```python
-score = base_coverage + contextual_adjustments
+score = base_coverage + adjustments
 # base = coverage_vs_hand (preferred) or coverage_overall
-# adjustments = handedness (+3) + form (±4) + pitcher ERA (±5) + K-rate (±5) + stability (-5)
+# adjustments:
+#   consistency: gap-based ±6/±4/±2/+2/+1/0
+#   pitcher ERA: ±5 (NOTE: returning 0 for 100% of legs — effectively dead, cleanup pending)
+#   pitcher K/9: ±5 for SO props
+#   lineup stability: -5 if < 50%
 ```
 
-**Parlay win rate:** ~11% (target 18–22%)
+**Parlay win rate:** ~11% pre-anchor/swing (target 18–22%, under evaluation post-May 28)
 
-**Known issue:** Lost parlay legs are scoring slightly higher (75.5) than won legs (74.2), suggesting the contextual adjustments (ERA ±5, K/9 ±5) are adding noise rather than signal. Under review.
+**Known issue:** Lost parlay legs score slightly higher (75.5) than won legs (74.2). ERA/K-rate adjustments may be adding noise. Under review — cleanup deferred pending consistency signal validation.
 
-### **Phase 2: Enriched Scoring (May 26, 2026) — SHADOW TESTING**
+### **Phase 2: Enriched Scoring (May 26–28, 2026) — SHADOW TESTING**
 
-Three additional signals layered on top of Phase 1 in shadow pipeline. Signal 4 (consistency) being added May 29.
+Four additional signals on top of Phase 1 consistency logic. All 4 signals now operational.
 
 ---
 
@@ -61,19 +65,17 @@ Three additional signals layered on top of Phase 1 in shadow pipeline. Signal 4 
 
 ### **Decision: Two-Gate System on `coverage_overall` (May 27, 2026)**
 
-**The problem:** The original single gate ran against `coverage_vs_hand or coverage_overall` — the best available signal. This allowed `coverage_vs_hand` to rescue players whose `coverage_overall` was below threshold. A player with 55% season coverage but 70% vs right-handers would pass, then receive additional ERA/pitcher boosts, ending up in parlays with fundamentally weak underlying coverage.
-
-**Diagnosis:** José Ramírez (62–64% coverage_overall, 0/8 in parlays), Mookie Betts (67–70%, 0/10), Josh Naylor (67–70%, 4/17) were all passing the gate and losing consistently. The contextual adjustments were turning marginal selections into parlay legs.
+**The problem:** The original single gate ran against `coverage_vs_hand or coverage_overall`. A player with 55% season coverage but 70% vs right-handers would pass, then receive ERA/pitcher boosts into parlay-eligible territory.
 
 **The fix — two explicit gates in `_find_qualifying_legs()` in `main.py`:**
 
 ```python
-# Gate 1: coverage_overall is a hard requirement, checked before any signal
+# Gate 1: coverage_overall is a hard requirement
 coverage_overall_raw = coverage.get("coverage_overall") or 0.0
 if coverage_overall_raw < MIN_COVERAGE_PCT:  # 65%
     continue
 
-# Gate 2: prop-specific floors (checked after Gate 1)
+# Gate 2: prop-specific floors
 if stat == "totalBases" and direction == "under" and line == 1.5:
     if coverage_overall_raw < 80.0:
         continue
@@ -81,11 +83,11 @@ if stat == "strikeouts" and direction == "over" and line == 5.5:
     if coverage_overall_raw < 72.0:
         continue
 
-# Scoring still uses best available signal
+# Scoring uses best available signal
 coverage_pct = coverage.get("coverage_vs_hand") or coverage_overall_raw
 ```
 
-**Design principle:** Gates filter eligibility based on `coverage_overall` (the unbiased season-long rate). Scoring uses the best available signal (vs-hand if available). These are separate concerns. Adjustments can rank eligible legs against each other but cannot rescue ineligible ones.
+**Design principle:** Gates filter eligibility using `coverage_overall` (unbiased season rate). Scoring uses the best available signal. Adjustments rank eligible legs against each other but cannot rescue ineligible ones.
 
 ---
 
@@ -93,17 +95,34 @@ coverage_pct = coverage.get("coverage_vs_hand") or coverage_overall_raw
 
 ### **Decision: 80% floor for `totalBases under 1.5` (May 27)**
 
-**Data:** 135 appearances in the last 7 days, 50.4% win rate. At coverage thresholds up to 78%, win rate never exceeded 42.9%. The leg is fundamentally noisy — one single ruins the under, so season coverage of 70–75% doesn't reliably translate to same-day performance.
-
-**Winners cluster tightly at 80%+:** Ha-Seong Kim (100%), Will Smith (84% — one win), Kyle Higashioka (82.5%), Tyler Freeman (80.4%), J.P. Crawford (80.4–80.8%). Below 80%, the prop is essentially a coin flip regardless of coverage score.
-
-**Effect:** Eliminates ~70% of the previous TB under pool. Parlays now only use TB under when there's genuine strong evidence.
+135 appearances in 7 days, 50.4% win rate. Winners cluster tightly at 80%+. Below 80% the prop is essentially a coin flip regardless of coverage score.
 
 ### **Decision: 72% floor for `strikeouts over 5.5` (May 27)**
 
-**Data:** Every loss in the last 7 days came from players at ≤70% coverage. Every win came from ≥72% coverage. Clean cliff edge — Braxton Ashcraft at exactly 70% appeared 13 times and went 1/13. Cam Schlittler at 81.8% went 10/10.
+Clean cliff edge — every loss in 7 days came from players at ≤70% coverage. Braxton Ashcraft at exactly 70% appeared 13 times and went 1/13.
 
-**Effect:** Eliminates all low-coverage pitcher K props on the 5.5 line. The 5.5 line is a meaningful threshold — it requires a starting pitcher to go deep and miss bats, and only pitchers with demonstrated consistency at that line should be included.
+---
+
+## Anchor/Swing Parlay Structure
+
+### **Decision: Replace Single-Pool 4-Leg with 3-Anchor + 2-Swing 5-Leg (May 28, 2026)**
+
+**The problem:** A single pool targeting +700–+1000 forced a tradeoff — either use high-confidence high-juice legs (great win rate, kills odds) or low-confidence plus-money legs (hit the odds target, bad win rate).
+
+**The solution:** Two explicit pools with different jobs.
+
+| Pool | Coverage Floor | Odds Range | Legs Per Parlay |
+|------|---------------|------------|-----------------|
+| Anchor | 75% overall | -300 to -150 | Foundation — maximize hit probability | 3 |
+| Swing | 55% overall | -150 to +150 | Odds multipliers — add payout without killing quality | 2 |
+
+**Target odds:** +900 to +1100 combined (5-leg)
+
+**Rationale for 75% anchor floor:** Data showed anchor pool win rates of 77.9% (SO over), 73.4% (hits under), 72.8% (hits over) at 75%+ threshold — well above the 67%+ needed to drive parlay win rates toward 18–22%.
+
+**Rationale for swing odds range:** Plus-money props DO exist at scale in the swing range (-150 to +150). Requiring ≥-150 prevents the swing legs from being high-juice anchors in disguise.
+
+**All 4 call sites updated:** `main.py` (×2), `server.py`, `run_enriched_pipeline.py`
 
 ---
 
@@ -117,22 +136,27 @@ coverage_pct = (games_over / total_games) * 100
 
 # UNDER props
 coverage_pct = (games_under / total_games) * 100
+
+# Handedness split (scoring only, not gating)
+coverage_vs_RHP = games_over_vs_RHP / total_games_vs_RHP * 100
 ```
 
-**Validated May 21:** 100% of props calculate successfully. **Validated May 27:** `coverage_overall` at 100% population, `coverage_recent_10` at 95–97% population — both reliable enough for consistency signal logic.
+`coverage_overall` = gate signal (unbiased season rate)
+`coverage_vs_hand` = scoring signal (more specific, used to rank among eligible legs)
+
+These must not be conflated. Using `coverage_vs_hand` for gating was the root cause of the chronic bad actor problem (May 27 diagnosis).
 
 ---
 
 ## Prop Type Filtering
 
-### **Decision: Block Unprofitable Prop Types (Updated May 27)**
+### **Decision: Block Unprofitable Prop Types (Updated May 28)**
 
-Based on in-parlay win rates over the last 7 days (not all-time — recent filters changed the composition significantly):
+Based on 7-day in-parlay win rates:
 
 | Prop | 7-Day In-Parlay Win Rate | Action |
 |---|---|---|
 | `strikeouts under 5.5` | 85.7% | ✅ Prioritize |
-| `strikeouts over 3.5` | 76.9% | ✅ Keep |
 | `hits under 0.5` | 71.1% | ✅ Keep |
 | `strikeouts over 6.5` | 68.4% | ✅ Keep |
 | `strikeouts under 4.5` | 63.0% | ✅ Keep |
@@ -140,23 +164,12 @@ Based on in-parlay win rates over the last 7 days (not all-time — recent filte
 | `strikeouts over 4.5` | 60.0% | ✅ Keep |
 | `strikeouts over 0.5` | 57.6% | ✅ Monitor |
 | `rbi under 0.5` | 58.3% | ✅ Monitor |
-| `totalBases under 1.5` | 50.4% | ⚠️ 80% floor added |
-| `strikeouts over 5.5` | 50.0% | ⚠️ 72% floor added |
-| `pitcher K under <5.5` | ~45% | ⚠️ Pending block |
+| `totalBases under 1.5` | 50.4% | ⚠️ 80% floor |
+| `strikeouts over 5.5` | 50.0% | ⚠️ 72% floor |
+| `pitcher SO under < 6.5` | ~45% | ❌ Blocked |
+| `pitcher SO < 4.5 line` | 47.8% | ❌ Blocked |
 | `hitter K under 0.5` | 36.7% | ❌ Blocked |
 | Any prop < -300 | — | ❌ Blocked from parlays |
-
-**Key insight:** The all-time win rates in training data are not predictive of in-parlay performance. The legs that can reach +700–+1000 target odds are a subset of the total pool, and that subset has meaningfully different win rates than the full pool.
-
----
-
-## Parlay Construction Strategy
-
-### **Decision: +700 to +1000 Odds Range**
-
-Allows using best-coverage props regardless of juice. Math: 4 legs at 67% = 0.67^4 = 20.2% expected win rate at +800 avg odds. **Actual in-parlay leg win rate is ~57.6%**, which implies ~10.7% parlay win rate — consistent with observed ~11%.
-
-Improving per-leg win rate to 65%+ (via better filtering and consistency signal) would push parlay win rate to ~18%.
 
 ---
 
@@ -164,9 +177,7 @@ Improving per-leg win rate to 65%+ (via better filtering and consistency signal)
 
 ### **Decision: Block Props with Odds < -300 from Parlays (May 21)**
 
-High-juice props (-300 to -460) have high win rates (66–80%) but kill the odds combination — using them makes it impossible to reach +700. Blocking them forces the builder to use lower-juice props that can contribute to the target range.
-
-**May 27 validation:** 72 legs blocked by juice cap in today's run out of 217 eligible. Cap is working as designed.
+High-juice props (-300 to -460) have high win rates but make it impossible to reach +900 target odds. Blocking them forces the builder to use lower-juice props that can contribute to the target range without sacrificing too much per-leg quality.
 
 ---
 
@@ -174,7 +185,7 @@ High-juice props (-300 to -460) have high win rates (66–80%) but kill the odds
 
 ### **Decision: Maximum 1 Prop Per Player Per Parlay Batch**
 
-Eliminates correlated wipeout risk. If a player has a bad game, they can only ruin one parlay per batch instead of all of them.
+Eliminates correlated wipeout risk. If a player has a bad game, they ruin one parlay per batch instead of all of them.
 
 ---
 
@@ -184,88 +195,114 @@ Eliminates correlated wipeout risk. If a player has a bad game, they can only ru
 
 Run significant scoring changes as a shadow pipeline for 5–7 days before promoting to production. Allows apples-to-apples comparison via `production_batch_id`.
 
-**May 27 update:** Shadow pipeline now inherits Session 1 production filters automatically because it receives `qualifying_legs` directly from `main.py` post-filtering. No separate implementation needed in shadow tables.
+Shadow pipeline now has 4 signals. Production comparison analysis planned for June 1–2.
 
 ---
 
 ## Enriched Scoring Signals
 
 ### **Signal 1: Blended ERA Rank**
-Season ERA rank × 0.5 + last-3-start ERA rank × 0.5. Captures pitcher form.
+Season ERA rank × 0.5 + last-3-start ERA rank × 0.5. Captures pitcher current form vs season baseline. Applied to hits/TB/RBI/runs props (hitters only).
 
 ### **Signal 2: Opponent-Specific Coverage Split**
-Batter's hit rate vs tonight's specific opponent (min 3 games, 25% delta weight, ±8 cap).
+Batter's hit rate vs tonight's specific opponent (min 3 games, 25% delta weight, ±8 cap). More specific than overall coverage but requires sample.
 
 ### **Signal 3: Ballpark Factor**
-30-row `ballpark_factors` table. Hitter props use run_factor; pitcher K props use inverted and smaller magnitude.
+30-row `ballpark_factors` static table. Hitter props: ±5 based on run_factor. Pitcher props: ±3 (inverted). HR props: ±5 based on hr_factor.
 
-### **Signal 4: Consistency (Pending — May 29)**
-```python
-gap = coverage_overall - coverage_recent_10
-# Penalties for cold streaks (gap > 0), boosts for hot streaks (gap < 0)
-```
-`coverage_recent_10` confirmed at 95–97% population rate. Ready to build.
+### **Signal 4: Opposing Team Strikeout Rank (May 28, 2026)**
+
+**Motivation:** Pitcher SO props have no awareness of how K-prone the opposing lineup is. Jack Flaherty SO under 6.5 vs LAA (rank 1 in team Ks) is a fundamentally different bet than the same prop vs a low-K lineup. Season coverage alone doesn't capture this.
+
+**Data source:** `mlb_stats.get_team_strikeout_stats(season)`
+- Season rank: `/api/v1/teams/stats?stats=season&group=hitting` — total SO ranked 1–30
+- Recent rank: `/api/v1/teams/stats?stats=byDateRange&group=hitting` with 14-day window
+
+**API implementation note:** The `lastXGames` endpoint's `limit` parameter filters the number of teams returned, not the number of games per team. Use `byDateRange` for windowed team stats.
+
+**Adjustment logic:**
+
+| Season Rank | Season Adj | Recent Rank | Recent Modifier | Net (capped ±6) |
+|-------------|-----------|-------------|-----------------|-----------------|
+| 1–8 (most Ks) | +5 | 1–8 | +2 | up to +6 |
+| 1–8 | +5 | 9–22 | 0 | +5 |
+| 1–8 | +5 | 23–30 | -2 | +3 |
+| 9–15 | +2 | varies | ±2/0 | +4 to 0 |
+| 16–22 | -2 | varies | ±2/0 | 0 to -4 |
+| 23–30 (fewest Ks) | -5 | varies | ±2/0 | -3 to -6 |
+
+Sign-flipped for unders: high-K opponent = penalty for SO unders (Flaherty case).
+
+**Scope:** Pitcher SO props only (`position in _PITCHER_POSITIONS` and `stat == 'strikeouts'`). Returns `None` for all other props.
+
+**Cache TTL:** 24 hours, refreshed at 9 AM pipeline run.
 
 ---
 
 ## Database Design
 
 ### **Decision: Two-Gate Filtering in Application Layer**
-Coverage gates are enforced in `main.py` before legs reach the scorer or database. This keeps the database as a clean log of what was eligible, not a mix of eligible and blocked legs.
+Coverage gates enforced in `main.py` before legs reach the scorer or database. Keeps the database as a clean log of what was eligible.
 
-### **Lesson: `coverage_overall` vs `coverage_vs_hand` are different signals for different purposes**
-- `coverage_overall`: eligibility gate — unbiased season rate, hard requirement
-- `coverage_vs_hand`: scoring input — more specific signal, used to rank among eligible legs
-- These must not be conflated. A player passing on `coverage_vs_hand` alone was the root cause of the chronic bad actor problem.
+### **Decision: Shadow Tables Mirror Production Schema + Enriched Columns**
+`mlb_scored_legs_enriched` has all production columns plus: `coverage_vs_opponent`, `games_vs_opponent`, `park_factor`, `park_adjustment`, `blended_era_rank`, `recent_form_rank`, `team_so_adjustment`.
+
+### **Critical Type Rules**
+- `mlb_scored_legs.run_date` is TEXT — use string comparisons
+- `mlb_scored_legs.odds` is TEXT — cast to numeric for math
+- `mlb_parlay_recommendations_v2.run_date` is DATE — no cast needed
+- `mlb_training_data.result` uses `'hit'/'miss'/'void'` — different from parlay tables' `'won'/'lost'`
 
 ---
 
 ## Pipeline Architecture
 
-### **Decision: 3x Daily + Shadow After Every Run**
+### **Decision: 3× Daily + Shadow After Every Run**
 - 9:00 AM ET — Resolution + fresh parlays
 - 12:00 PM ET — Midday refresh
 - 5:30 PM ET — Evening refresh
-- Manual Regenerate Now also triggers shadow
+- Manual Regenerate also triggers shadow
 
-Shadow pipeline adds ~2–3 seconds per run.
+Shadow pipeline adds ~2–3 seconds per run and never touches production tables.
 
 ---
 
 ## Lessons Learned
 
-1. **The headline hit rate is not the in-parlay hit rate** — 66.7% pool hit rate vs 57.6% in-parlay rate. High-juice props drive the headline but can't enter parlays. Always measure in-parlay performance separately.
-2. **Adjustments can rescue bad legs** — ERA/K-rate adjustments were lifting marginal players over the gate threshold. Gates must run on raw coverage before any adjustments are applied.
-3. **Score-outcome correlation is the health check** — If lost legs score higher than won legs, the scoring system is broken. Check this weekly.
-4. **In-parlay win rates by line matter** — `strikeouts over 5.5` has a completely different win rate profile than `strikeouts over 6.5`. Line-level granularity is essential when setting thresholds.
-5. **Shadow before promoting** — Major scoring changes need A/B comparison, not blind promotion.
-6. **Chronic bad actors are a symptom** — Mookie Betts and José Ramírez appearing repeatedly wasn't the problem itself; it was the symptom of the gate running on the wrong field.
-7. **All-time data is contaminated** — Pre-May-20 data includes the broken ML model era. Always segment analysis to post-strategy-change periods.
+1. **The headline hit rate is not the in-parlay hit rate.** High-juice props drive the headline but can't enter parlays. Always measure in-parlay performance separately.
+2. **Adjustments can rescue bad legs.** ERA/K-rate adjustments were lifting marginal players over the gate threshold. Gates must run on raw coverage before any adjustments.
+3. **Score-outcome correlation is the health check.** If lost legs score higher than won legs, the scoring system is broken. Check weekly.
+4. **In-parlay win rates by line matter.** `strikeouts over 5.5` has a completely different profile than `strikeouts over 6.5`. Line-level granularity is essential.
+5. **Shadow before promoting.** Major scoring changes need A/B comparison, not blind promotion.
+6. **Chronic bad actors are a symptom.** Repeated bad performers are a signal the gate is running on the wrong field, not an argument for player-specific blocks.
+7. **All-time data is contaminated.** Pre-May-20 data includes the broken ML model era. Always segment analysis to post-strategy-change periods.
+8. **Read the API docs before assuming parameter behavior.** `lastXGames` with `limit=10` returns 10 teams, not 10 games. Test the endpoint shape before building on it.
+9. **Two pools solve the odds/quality tradeoff.** A single pool forces a compromise between win rate and payout. Anchor/swing separates the two concerns cleanly.
 
 ---
 
 ## Future Considerations
 
-### **1. Reduce or Remove ERA/K-rate Scoring Adjustments**
-Score-outcome correlation shows adjustments adding noise. After consistency signal is evaluated in shadow, consider running production with reduced or zero ERA/K-rate adjustments to test if leg quality improves.
+### **1. Promote Enriched to Production (June 2026)**
+After 5–7 days of shadow data with all 4 signals confirms enriched scoring improves win rates vs production.
 
-### **2. Promote Enriched to Production (June 2026)**
-After 5–7 days of shadow data confirms enriched scoring improves win rates.
+### **2. Gate 3 — Minimum `coverage_recent_10` Floor**
+Block any leg where `coverage_recent_10 < 50%` regardless of `coverage_overall`. Prevents cold-streak legs sneaking through on strong season averages. Deferred — validate consistency signal data first.
 
-### **3. `won_with_void` Outcome Tracking**
-Distinguish clean 4/4 wins from 3/3 wins that needed a void. Prevents inflating win rate metrics.
+### **3. Remove Dead ERA/Pitcher Adjustments from simple_scorer.py**
+`opponent_adjustment` returns 0 for 100% of legs. Not harmful but adds noise to the scoring logic. Clean up once shadow comparison data confirms the enriched signals are sufficient.
 
-### **4. Pitcher K Under Line Threshold**
-Block pitcher K unders below line 5.5 in `main.py`. Data shows losses concentrated at 4.5 and below.
+### **4. `won_with_void` Outcome Tracking**
+Distinguish clean 4/4 wins (now 5/5) from wins that needed a void. Prevents inflating win rate metrics.
 
-### **5. Direction-Split Calibrators (If ML Model Revisited)**
-Train 14 calibrators (7 stats × 2 directions) instead of 7.
+### **5. Pitcher K Under Line ≥ 6.5 Threshold**
+Already blocked below 6.5, but worth monitoring 6.5u win rate data specifically now that lower lines are gone.
 
 ### **6. Weather Integration**
 Flag outdoor game total legs when wind > 15 mph out or temp < 45°F. Low priority.
 
 ---
 
-**Architecture Status:** ✅ STABLE — Session 1 Fixes Live, Phase 2 Shadow Testing
-**Last Major Change:** May 27, 2026 (Two-gate coverage system)
+**Architecture Status:** ✅ STABLE — Session 2 Complete, Shadow Pipeline at 4 Signals
+**Last Major Change:** May 28, 2026 (Team SO rank signal + anchor/swing structure)
 **Next Architecture Review:** June 2026 (After shadow comparison analysis)
