@@ -159,7 +159,7 @@ def resolve_parlay_recommendations_v2(date: str, verbose: bool = True) -> dict:
         {'won': int, 'lost': int, 'void': int, 'skipped': int, 'total': int}
     """
     import statsapi as _statsapi
-    from src.tracker.outcome_resolver import extract_stat_from_boxscore
+    from src.tracker.outcome_resolver import extract_stat_from_boxscore, _PITCHER_POSITIONS
 
     conn = get_conn()
     cur = conn.cursor()
@@ -226,12 +226,19 @@ def resolve_parlay_recommendations_v2(date: str, verbose: bool = True) -> dict:
         for leg in legs:
             gid = leg["game_id"]
             if not gid or gid not in box_scores:
+                void_reason = "game_not_found"
                 leg_outcomes.append("void")
                 conn = get_conn()
                 cur = conn.cursor()
                 cur.execute(
-                    "UPDATE mlb_parlay_legs_v2 SET outcome = 'void' WHERE id = %s",
-                    (leg["id"],),
+                    "UPDATE mlb_parlay_legs_v2 SET outcome = 'void', void_reason = %s WHERE id = %s",
+                    (void_reason, leg["id"]),
+                )
+                conn.commit()
+                cur.execute(
+                    "UPDATE mlb_scored_legs SET result = 'void', void_reason = %s"
+                    " WHERE player_name = %s AND stat = %s AND run_date = %s",
+                    (void_reason, leg["player_name"], leg["stat"], date),
                 )
                 conn.commit()
                 cur.close()
@@ -253,26 +260,96 @@ def resolve_parlay_recommendations_v2(date: str, verbose: bool = True) -> dict:
                     break
 
             if player_stats is None:
+                void_reason = "player_not_in_lineup"
                 leg_outcomes.append("void")
                 conn = get_conn()
                 cur = conn.cursor()
                 cur.execute(
-                    "UPDATE mlb_parlay_legs_v2 SET outcome = 'void' WHERE id = %s",
-                    (leg["id"],),
+                    "UPDATE mlb_parlay_legs_v2 SET outcome = 'void', void_reason = %s WHERE id = %s",
+                    (void_reason, leg["id"]),
+                )
+                conn.commit()
+                cur.execute(
+                    "UPDATE mlb_scored_legs SET result = 'void', void_reason = %s"
+                    " WHERE player_name = %s AND stat = %s AND run_date = %s",
+                    (void_reason, leg["player_name"], leg["stat"], date),
                 )
                 conn.commit()
                 cur.close()
                 conn.close()
                 continue
 
+            # Early Exit Protection: void legs where the player barely participated
+            batting  = player_stats.get("batting",  {})
+            pitching = player_stats.get("pitching", {})
+            if position in _PITCHER_POSITIONS:
+                batters_faced = pitching.get("battersFaced", 0) or 0
+                if batters_faced < 5:
+                    if verbose:
+                        print(
+                            f"  [RESOLVER] Early Exit Protection: {leg['player_name']}"
+                            f" ({position}) had {batters_faced} batters_faced → void"
+                        )
+                    void_reason = "early_exit_protection"
+                    leg_outcomes.append("void")
+                    conn = get_conn()
+                    cur = conn.cursor()
+                    cur.execute(
+                        "UPDATE mlb_parlay_legs_v2 SET outcome = 'void', void_reason = %s WHERE id = %s",
+                        (void_reason, leg["id"]),
+                    )
+                    conn.commit()
+                    cur.execute(
+                        "UPDATE mlb_scored_legs SET result = 'void', void_reason = %s"
+                        " WHERE player_name = %s AND stat = %s AND run_date = %s",
+                        (void_reason, leg["player_name"], leg["stat"], date),
+                    )
+                    conn.commit()
+                    cur.close()
+                    conn.close()
+                    continue
+            else:
+                plate_appearances = batting.get("plateAppearances", 0) or 0
+                if plate_appearances < 2:
+                    if verbose:
+                        print(
+                            f"  [RESOLVER] Early Exit Protection: {leg['player_name']}"
+                            f" ({position}) had {plate_appearances} PA → void"
+                        )
+                    void_reason = "early_exit_protection"
+                    leg_outcomes.append("void")
+                    conn = get_conn()
+                    cur = conn.cursor()
+                    cur.execute(
+                        "UPDATE mlb_parlay_legs_v2 SET outcome = 'void', void_reason = %s WHERE id = %s",
+                        (void_reason, leg["id"]),
+                    )
+                    conn.commit()
+                    cur.execute(
+                        "UPDATE mlb_scored_legs SET result = 'void', void_reason = %s"
+                        " WHERE player_name = %s AND stat = %s AND run_date = %s",
+                        (void_reason, leg["player_name"], leg["stat"], date),
+                    )
+                    conn.commit()
+                    cur.close()
+                    conn.close()
+                    continue
+
             result_value = extract_stat_from_boxscore(player_stats, leg["stat"], position)
             if result_value is None:
+                void_reason = "stat_extraction_failed"
                 leg_outcomes.append("void")
                 conn = get_conn()
                 cur = conn.cursor()
                 cur.execute(
-                    "UPDATE mlb_parlay_legs_v2 SET outcome = 'void' WHERE id = %s",
-                    (leg["id"],),
+                    "UPDATE mlb_parlay_legs_v2 SET outcome = 'void', void_reason = %s WHERE id = %s",
+                    (void_reason, leg["id"]),
+                )
+                conn.commit()
+                cur.execute(
+                    "UPDATE mlb_scored_legs SET result = 'void', void_reason = %s"
+                    " WHERE player_name = %s AND stat = %s AND run_date = %s",
+                    (void_reason, leg["player_name"], leg["stat"], date),
                 )
                 conn.commit()
                 cur.close()
