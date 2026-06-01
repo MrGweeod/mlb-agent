@@ -2,15 +2,15 @@
 Simple coverage-based leg scorer using existing database fields.
 No ML model required - uses contextual adjustments on validated coverage data.
 
-Phase 1: Uses only data already in mlb_scored_legs table
+Validated prop scope: hits o/u 0.5, strikeouts o 0.5 (hitter only).
+
+Signals:
 - coverage_vs_hand (handedness-specific coverage)
 - coverage_overall (fallback if no handedness data)
 - coverage_recent_10 (hot/cold streaks)
-- pitcher_era, pitcher_k9 (opponent quality)
+- pitcher_era (for hits props), pitcher_k9 (for hitter SO props)
 - lineup_consistency (playing time stability, 0-1 scale)
 """
-
-_PITCHER_POSITIONS = frozenset({"P", "SP", "RP", "TWP"})
 
 
 def calculate_composite_score(leg):
@@ -63,10 +63,9 @@ def calculate_composite_score(leg):
     # ============================================
     stat      = leg.get("stat", "")
     direction = leg.get("direction", "")
-    position  = leg.get("position", "")
 
-    # For HITTER props: adjust based on opposing pitcher ERA
-    if stat in ("hits", "totalBases", "rbi", "runsScored"):
+    # For hits props: adjust based on opposing pitcher ERA
+    if stat == "hits":
         pitcher_era = leg.get("pitcher_era")
         if pitcher_era is not None:
             if pitcher_era > 5.0:   # Weak pitcher
@@ -74,22 +73,14 @@ def calculate_composite_score(leg):
             elif pitcher_era < 3.0: # Ace pitcher
                 score -= 5 if direction == "over" else -5
 
-    # For STRIKEOUT props: K-rate matters
+    # For hitter strikeout props: K-rate matters
     if stat == "strikeouts":
         pitcher_k9 = leg.get("pitcher_k9")
         if pitcher_k9 is not None:
-            if position in _PITCHER_POSITIONS and direction == "over":
-                # Pitcher K over props
-                if pitcher_k9 > 10.0:
-                    score += 5
-                elif pitcher_k9 < 7.0:
-                    score -= 5
-            elif position not in _PITCHER_POSITIONS:
-                # Hitter strikeout props
-                if pitcher_k9 > 10.0 and direction == "over":
-                    score += 5   # High-K pitcher → hitter likely to K
-                elif pitcher_k9 < 7.0 and direction == "over":
-                    score -= 5   # Low-K pitcher → hitter unlikely to K
+            if pitcher_k9 > 10.0 and direction == "over":
+                score += 5   # High-K pitcher → hitter likely to K
+            elif pitcher_k9 < 7.0 and direction == "over":
+                score -= 5   # Low-K pitcher → hitter unlikely to K
 
     # ============================================
     # 4. LINEUP STABILITY: Playing Time Risk

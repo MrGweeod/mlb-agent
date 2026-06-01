@@ -378,25 +378,3 @@ def _pitcher_coverage(
         "batter_hand":       None,
     }
 
-
-def calculate_pitcher_k_coverage(
-    pitcher_id: int,
-    line: float,
-    season: int = None,
-) -> dict | None:
-    """
-    Backward-compatible wrapper — delegates to calculate_coverage() with
-    position='SP' so pitcher strikeout props use game-log coverage.
-
-    Retained so existing callers don't break during the Phase 1 migration.
-    """
-    if season is None:
-        season = datetime.datetime.now().year
-    return calculate_coverage(
-        player_id=pitcher_id,
-        prop_type="strikeouts",
-        line=line,
-        opposing_pitcher_id=None,
-        season=season,
-        position="SP",
-    )

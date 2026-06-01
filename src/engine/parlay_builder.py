@@ -1,18 +1,16 @@
 """
 parlay_builder.py — Anchor/swing pool parlay builder for MLB.
 
-Parlays are exactly 5 legs: 3 anchors (high-coverage, moderate odds) +
-2 swings (moderate-coverage, higher odds). Combined odds target: +900 to +1100.
+Parlays are exactly 3 legs: 2 anchors (high-coverage, moderate odds) +
+1 swing (moderate-coverage, higher odds). Combined odds target: +300 to +550.
 
-Anchor pool  — composite_score >= 75, odds in [-300, -150].
-Swing pool   — composite_score >= 55, odds in (-150, +150].
+Anchor pool  — composite_score >= 75, odds in [-200, -150].
+Swing pool   — composite_score >= 65, odds in (-150, +150].
 
-Constraints (unchanged from prior version):
+Constraints:
   - Max 1 batter leg per player (pitchers exempt).
   - Max 2 legs per game.
   - No duplicate odd_ids within a parlay.
-  - High-variance props (homeRuns, stolenBases) require composite_score >= 70.
-  - DraftKings: no walks + strikeouts in same parlay.
   - Player diversity: each player used in at most one parlay per batch.
 
 Public API: build_hybrid_parlays(anchor_legs, swing_legs, ...) and _tier_params(...).
@@ -22,16 +20,15 @@ from src.utils.odds_math import american_to_decimal
 from src.utils.db import get_players_used_today
 
 _PITCHER_POSITIONS = frozenset({"SP", "RP", "P"})
-_HIGH_VARIANCE_PROPS = frozenset({"homeRuns", "stolenBases"})
 
 # Parlay structure constants
-MIN_PARLAY_ODDS = 900
-MAX_PARLAY_ODDS = 1100
-MIN_ANCHOR_LEGS = 3
-MIN_SWING_LEGS  = 2
-TOTAL_LEGS      = 5
+MIN_PARLAY_ODDS = 300
+MAX_PARLAY_ODDS = 550
+MIN_ANCHOR_LEGS = 2
+MIN_SWING_LEGS  = 1
+TOTAL_LEGS      = 3
 MIN_COV_ANCHOR  = 75.0
-MIN_COV_SWING   = 55.0
+MIN_COV_SWING   = 65.0
 
 
 def filter_already_used_players(legs: list, run_date: str) -> list:
@@ -81,34 +78,27 @@ def _filter_legs(anchor_legs: list, swing_legs: list) -> tuple[list, list]:
     Filter both pools by composite_score threshold and quality gates.
 
     Anchor gates: composite_score >= MIN_COV_ANCHOR (75.0)
-    Swing gates:  composite_score >= MIN_COV_SWING (55.0)
+    Swing gates:  composite_score >= MIN_COV_SWING (65.0)
 
     Both pools share:
-      - High-variance props (homeRuns, stolenBases) require composite_score >= 70
-      - Juice cap: exclude any leg with odds worse than -300
+      - Juice cap: exclude any leg with odds worse than -200
     """
     def _filter_pool(legs: list, min_cov: float, pool_name: str) -> list:
         filtered = []
         low_score_blocked = 0
-        high_variance_blocked = 0
         extreme_juice_blocked = 0
 
         for leg in legs:
             score = leg.get("composite_score", 0)
-            stat  = leg.get("stat", "")
 
             if score < min_cov:
                 low_score_blocked += 1
                 continue
 
-            if stat in _HIGH_VARIANCE_PROPS and score < 70:
-                high_variance_blocked += 1
-                continue
-
             odds = leg.get("best_odds")
             if odds is not None:
                 try:
-                    if float(odds) < -300:
+                    if float(odds) < -200:
                         extreme_juice_blocked += 1
                         continue
                 except (ValueError, TypeError):
@@ -118,7 +108,7 @@ def _filter_legs(anchor_legs: list, swing_legs: list) -> tuple[list, list]:
 
         print(
             f"  [filter_legs:{pool_name}] Blocked {low_score_blocked} low score + "
-            f"{high_variance_blocked} high variance + {extreme_juice_blocked} extreme juice"
+            f"{extreme_juice_blocked} extreme juice"
         )
         over_count  = sum(1 for l in filtered if l.get("direction", "").lower() == "over")
         under_count = sum(1 for l in filtered if l.get("direction", "").lower() == "under")
@@ -159,12 +149,12 @@ def build_hybrid_parlays(
     team_to_blocked=None,
 ) -> list:
     """
-    Build parlays with exactly 3 anchors + 2 swings (5 legs total).
+    Build parlays with exactly 2 anchors + 1 swing (3 legs total).
 
-    Target combined American odds: +900 to +1100.
+    Target combined American odds: +300 to +550.
 
-    Anchors: composite_score >= 75, odds [-300, -150].
-    Swings:  composite_score >= 55, odds (-150, +150].
+    Anchors: composite_score >= 75, odds [-200, -150].
+    Swings:  composite_score >= 65, odds (-150, +150].
 
     raw_props and blocked_players are accepted for backwards-compatibility
     but unused.
@@ -382,13 +372,6 @@ def build_hybrid_parlays(
                 # Max MAX_LEGS_PER_GAME legs per game
                 gk = leg.get("game_pk") or leg.get("team", "")
                 if by_game.get(gk, 0) >= MAX_LEGS_PER_GAME:
-                    continue
-
-                # DraftKings: no walks + strikeouts in same parlay
-                leg_stat = leg.get("stat", "").lower()
-                if leg_stat == "walks" and any(l.get("stat", "").lower() == "strikeouts" for l in legs):
-                    continue
-                if leg_stat == "strikeouts" and any(l.get("stat", "").lower() == "walks" for l in legs):
                     continue
 
                 # ── Add leg ────────────────────────────────────────────────────

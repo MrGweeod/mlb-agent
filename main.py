@@ -41,11 +41,11 @@ from src.utils.db import log_scored_legs, log_training_data_legs, save_parlay_re
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-# Anchor/Swing leg pool thresholds (replaces MIN_COVERAGE_PCT = 65.0)
+# Anchor/Swing leg pool thresholds
 ANCHOR_MIN_COVERAGE = 75.0
-ANCHOR_MIN_ODDS     = -300
+ANCHOR_MIN_ODDS     = -200
 ANCHOR_MAX_ODDS     = -150
-SWING_MIN_COVERAGE  = 55.0
+SWING_MIN_COVERAGE  = 65.0
 SWING_MIN_ODDS      = -150
 SWING_MAX_ODDS      = 150
 
@@ -59,12 +59,6 @@ _RELEVANT_TXNS = frozenset({"SC", "DES", "OU", "CU"})
 # Position codes that identify a pitcher; these players' props are skipped
 # because pitcher prop coverage is not yet implemented.
 _PITCHER_POSITIONS = frozenset({"P", "SP", "RP", "TWP"})
-
-# Prop types that are almost always heavily juiced and unusable in parlays.
-_EXCLUDED_PROP_TYPES = frozenset([
-    ("stolenBases", "under"),  # avg odds -1023
-    ("walks", "under"),         # avg odds -370
-])
 
 # Hard odds boundaries — nothing outside this range is useful in parlays.
 _FILTER_MIN_ODDS = -500
@@ -81,22 +75,14 @@ def _filter_useless_props(raw_props: list[dict]) -> list[dict]:
     """
     Remove props before coverage calculation that will never be useful in parlays.
 
-    Filters out:
-    1. Specific prop types always heavily juiced (stolenBases_under, walks_under).
-    2. Props with standard_odds outside [-500, +500].
+    Filters out props with standard_odds outside [-500, +500].
+    Prop-type filtering is handled by the ALLOWED_PROPS whitelist in _find_qualifying_legs().
     """
     filtered = []
-    excluded_by_type = 0
     excluded_by_odds = 0
 
     for prop in raw_props:
-        stat      = prop.get("stat", "")
-        direction = prop.get("direction", "over")
-        odds      = prop.get("standard_odds")
-
-        if (stat, direction) in _EXCLUDED_PROP_TYPES:
-            excluded_by_type += 1
-            continue
+        odds = prop.get("standard_odds")
 
         if odds is not None:
             try:
@@ -111,8 +97,6 @@ def _filter_useless_props(raw_props: list[dict]) -> list[dict]:
         filtered.append(prop)
 
     print(f"[filter_props] {len(raw_props)} raw → {len(filtered)} usable")
-    if excluded_by_type:
-        print(f"  Excluded {excluded_by_type} by prop type (stolenBases_under, walks_under)")
     if excluded_by_odds:
         print(f"  Excluded {excluded_by_odds} by odds range (< {_FILTER_MIN_ODDS} or > +{_FILTER_MAX_ODDS})")
 
@@ -253,26 +237,30 @@ def _find_qualifying_legs(
     """
     Apply the coverage gate to all SGO props and return (anchor_legs, swing_legs).
 
-    For each prop:
-      1. Skip unsupported stats (inningsPitched, hitsAllowed, earnedRuns).
-      2. Resolve player name → MLB person ID via statsapi.lookup_player().
-      3. Get player's current team from get_player_info().
-         - Skip pitchers unless stat == 'strikeouts' (pitcher K props enabled
-           via Poisson coverage model — calculate_pitcher_k_coverage()).
-      4. Confirm the player's team is on today's schedule.
-      5. Call calculate_coverage() for batter props or
-         calculate_pitcher_k_coverage() for pitcher K props.
-      6. Classify into anchor (coverage≥75%, odds -300 to -150) or
-         swing (coverage≥55%, odds -150 to +150) pools.
+    Allowed props: hits o/u 0.5, strikeouts o 0.5 (hitter only).
 
-    Only the standard (non-alt) DK line is used. Alt-line coverage is deferred
-    to a later phase.
+    For each prop:
+      1. Reject if not in ALLOWED_PROPS whitelist.
+      2. Resolve player name → MLB person ID via statsapi.lookup_player().
+      3. Get player's current team from get_player_info(). Skip all pitchers.
+      4. Confirm the player's team is on today's schedule.
+      5. Call calculate_coverage().
+      6. Gate 1: coverage_overall >= 65%. Gate 2: hits under >= 70%.
+         Gate 3: odds >= -200.
+      7. Classify into anchor (coverage≥75%, odds -200 to -150) or
+         swing (coverage≥65%, odds -150 to +150) pools.
 
     Returns (anchor_qualifying, swing_qualifying) ready for enrichment and parlay building.
     """
     anchor_qualifying: list[dict] = []
     swing_qualifying: list[dict] = []
     seen_odd_ids: set[str] = set()
+
+    ALLOWED_PROPS = {
+        ("hits",       "over",  0.5),
+        ("hits",       "under", 0.5),
+        ("strikeouts", "over",  0.5),  # hitter K only — pitcher SO removed
+    }
 
     for prop in sgo_props:
         stat = prop.get("stat", "")
@@ -284,35 +272,9 @@ def _find_qualifying_legs(
         if standard_line is None or not standard_odds:
             continue
         line = float(standard_line)
-
-        # Only allow the prop types the parlay system targets.
-        ALLOWED_STATS = {"hits", "strikeouts", "walks", "totalBases", "rbi"}
-        if stat not in ALLOWED_STATS:
-            continue
-
-        # Hits: only the 0.5 line (1.5/2.5 lines are heavily juiced unders).
-        if stat == "hits" and line != 0.5:
-            continue
-
-        # Total Bases: only 1.5 line (over = 2+ TB, under = 0-1 TB).
-        if stat == "totalBases" and line != 1.5:
-            continue
-
-        # Hitter strikeouts: only 0.5 line (lines < 3.0 are hitter props).
-        # Pitcher strikeout lines (>= 3.0) pass through to the 3.5 minimum
-        # enforced later in _valid_strikeout_line().
-        if stat == "strikeouts" and line < 3.0 and line != 0.5:
-            continue
-
-        # Block unprofitable direction/stat combos (profit analysis, May 2026):
-        # - Hitter strikeouts under (0.5 line): 36.7% win rate, -$0.32/dollar
         direction = prop.get("direction", "over")
-        if stat == "strikeouts" and line == 0.5 and direction == "under":
-            continue
 
-        # Block pitcher strikeout unders below 6.5 line — win rates:
-        # 3.5 under: 44.7%, 4.5 under: 47.2%, 5.5 under: 51.9% — all below threshold
-        if stat == "strikeouts" and direction == "under" and line < 6.5:
+        if (stat, direction, line) not in ALLOWED_PROPS:
             continue
 
         odd_id = prop.get("odd_id", "")
@@ -335,10 +297,7 @@ def _find_qualifying_legs(
             continue
 
         position = info.get("position", "")
-        # Pitcher K props enabled via Poisson coverage model; all other pitcher
-        # prop types (IP, HA, ER) are still unsupported and skipped.
-        is_pitcher_k = stat == "strikeouts" and position in _PITCHER_POSITIONS
-        if position in _PITCHER_POSITIONS and not is_pitcher_k:
+        if position in _PITCHER_POSITIONS:
             continue
 
         # Confirm player's team plays today
@@ -373,6 +332,22 @@ def _find_qualifying_legs(
         coverage_overall_raw = coverage.get("coverage_overall") or 0.0
         coverage_pct = coverage.get("coverage_vs_hand") or coverage_overall_raw
 
+        # Gate 1: hard minimum coverage for all props
+        if coverage_overall_raw < 65.0:
+            continue
+
+        # Gate 2: hits under requires stricter floor — thin high-coverage sample
+        if stat == "hits" and direction == "under":
+            if coverage_overall_raw < 70.0:
+                continue
+
+        # Gate 3: hard odds cap — nothing worse than -200 in any leg
+        try:
+            if float(standard_odds) < -200:
+                continue
+        except (ValueError, TypeError):
+            continue
+
         # Determine odds value for pool classification
         try:
             odds_val = float(standard_odds)
@@ -392,15 +367,6 @@ def _find_qualifying_legs(
 
         if not is_anchor and not is_swing:
             continue
-
-        # Prop-specific floors (anchors only)
-        if is_anchor:
-            if stat == "totalBases" and direction == "under" and line == 1.5:
-                if coverage_overall_raw < 80.0:
-                    continue
-            if stat == "strikeouts" and direction == "over" and line == 5.5:
-                if coverage_overall_raw < 72.0:
-                    continue
 
         leg_type = "anchor" if is_anchor else "swing"
 
@@ -655,29 +621,6 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
 
     all_sgo_props = _filter_useless_props(all_sgo_props)
 
-    # ── Step 3.5: Pre-filter invalid strikeout lines (before coverage) ────────
-    # Use line value to classify hitter vs pitcher SO props — avoids position
-    # ambiguity for two-way players (e.g. Ohtani whose position is "TWP").
-    #   Lines < 3.0  → hitter prop: only 0.5 allowed
-    #   Lines >= 4.5 → pitcher prop: allowed here (reliever IP check at Step 7.5)
-    _before_so_prefilter = len(all_sgo_props)
-    def _valid_so_line_prefilter(prop: dict) -> bool:
-        if prop.get("stat") != "strikeouts":
-            return True
-        line = prop.get("standard_line")
-        if line is None:
-            return False
-        line_f = float(line)
-        if line_f < 3.0:
-            return line_f == 0.5
-        return line_f >= 3.5
-
-    all_sgo_props = [p for p in all_sgo_props if _valid_so_line_prefilter(p)]
-    _so_prefilter_removed = _before_so_prefilter - len(all_sgo_props)
-    if _so_prefilter_removed:
-        print(f"\n[3.5/8] Pre-filtered {_so_prefilter_removed} invalid strikeout line(s) before coverage")
-        print(f"  {len(all_sgo_props)} props remaining")
-
     # ── Step 4: Coverage Gate ─────────────────────────────────────────────────
     print(f"\n[4/8] Computing coverage (anchor≥{ANCHOR_MIN_COVERAGE}% / swing≥{SWING_MIN_COVERAGE}%)...")
     anchor_legs, swing_legs = _find_qualifying_legs(
@@ -854,68 +797,6 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
         for stat, stat_scores in by_stat.items():
             avg = sum(stat_scores) / len(stat_scores)
             print(f"[main]   {stat}: {len(stat_scores)} legs, avg score {avg:.1f}")
-
-    # ── Step 7.5: Filter invalid strikeout lines + reliever patterns ─────────
-    print("\n[7.5/8] Filtering strikeouts: invalid lines + reliever patterns...")
-
-    def _valid_strikeout_line(leg: dict) -> bool:
-        if leg.get("stat") != "strikeouts":
-            return True
-        position = leg.get("position", "")
-        is_pitcher = position in _PITCHER_POSITIONS
-        line = leg.get("best_line")
-        if is_pitcher:
-            return line is not None and float(line) >= 4.5
-        else:
-            # Hitters: ONLY 0.5 line allowed (>0.5 is too risky)
-            return line is not None and float(line) == 0.5
-
-    def _has_starter_consistency(leg: dict) -> bool:
-        """Block pitchers with reliever-level IP history (<4 IP in 7+ of last 10 games)."""
-        if leg.get("stat") != "strikeouts":
-            return True
-        position = leg.get("position", "")
-        if position not in _PITCHER_POSITIONS:
-            return True
-        player_id = leg.get("player_id")
-        if not player_id:
-            return False
-        try:
-            game_logs = get_pitcher_game_log(int(player_id), season)
-            if not game_logs or len(game_logs) < 5:
-                return False  # Not enough data — be conservative and block
-            recent = game_logs[-10:]
-            short_outings = sum(
-                1 for g in recent
-                if float(g.get("stat", {}).get("inningsPitched", "0") or "0") < 4.0
-            )
-            return short_outings < 7  # Block if 7+ of last 10 were <4 IP
-        except Exception as e:
-            print(f"  [ip_check] Failed for {leg.get('player_name')}: {e}")
-            return True  # Allow on data error
-
-    def _valid_strikeout_leg(leg: dict) -> bool:
-        return _valid_strikeout_line(leg) and _has_starter_consistency(leg)
-
-    all_so_legs = [l for l in qualifying_legs if l.get("stat") == "strikeouts"]
-    before_so_filter = len(qualifying_legs)
-    qualifying_legs = [l for l in qualifying_legs if _valid_strikeout_leg(l)]
-    so_removed = before_so_filter - len(qualifying_legs)
-    if so_removed > 0:
-        invalid_lines = [l for l in all_so_legs if not _valid_strikeout_line(l)]
-        relievers = [l for l in all_so_legs if _valid_strikeout_line(l) and not _has_starter_consistency(l)]
-        print(f"  Removed {so_removed} strikeout prop(s)")
-        if invalid_lines:
-            print(f"    {len(invalid_lines)} invalid lines (hitters >0.5 or pitchers <3.5):")
-            for leg in invalid_lines[:3]:
-                print(f"      {leg['player_name']} ({leg.get('position', 'UNK')}) SO {leg.get('direction')} {leg.get('best_line')}")
-        if relievers:
-            print(f"    {len(relievers)} reliever patterns detected (<4 IP in 7+ of last 10):")
-            for leg in relievers[:3]:
-                print(f"      {leg['player_name']} ({leg.get('position', 'UNK')}) SO {leg.get('direction')} {leg.get('best_line')}")
-    else:
-        print(f"  No invalid strikeout props found")
-    print(f"  {len(qualifying_legs)} qualifying leg(s) remaining")
 
     # ── Step 8: Build Hybrid Parlays ──────────────────────────────────────────
     tier_info  = _tier_params(len(schedule))

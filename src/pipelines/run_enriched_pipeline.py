@@ -110,7 +110,6 @@ def _log_enriched_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> 
             leg.get("park_adjustment"),
             leg.get("blended_era_rank"),
             leg.get("recent_form_rank"),
-            leg.get("team_so_adjustment"),
         ))
 
     if not rows:
@@ -130,7 +129,7 @@ def _log_enriched_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> 
              pitcher_id, pitcher_name, pitcher_era, pitcher_k9, pitcher_whip,
              batter_hand, game_pk, player_id, opposing_pitcher_id, odd_id, in_parlay,
              coverage_vs_opponent, games_vs_opponent, park_factor, park_adjustment,
-             blended_era_rank, recent_form_rank, team_so_adjustment)
+             blended_era_rank, recent_form_rank)
         VALUES %s
         ON CONFLICT (run_date, odd_id) DO UPDATE
             SET composite_score        = EXCLUDED.composite_score,
@@ -140,7 +139,6 @@ def _log_enriched_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> 
                 park_adjustment        = EXCLUDED.park_adjustment,
                 blended_era_rank       = EXCLUDED.blended_era_rank,
                 recent_form_rank       = EXCLUDED.recent_form_rank,
-                team_so_adjustment     = EXCLUDED.team_so_adjustment,
                 in_parlay              = EXCLUDED.in_parlay
         """,
         rows,
@@ -216,9 +214,9 @@ def _save_enriched_parlays(
                      direction, odds, composite_score, coverage, ev,
                      game_id, opposing_pitcher_id, opposing_pitcher_name,
                      blended_era_rank, park_adjustment, coverage_vs_opponent,
-                     team_so_adjustment, outcome)
+                     outcome)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s, 'pending')
+                        %s, %s, %s, %s, %s, %s, 'pending')
                 """,
                 (
                     parlay_id,
@@ -238,7 +236,6 @@ def _save_enriched_parlays(
                     leg.get("blended_era_rank"),
                     leg.get("park_adjustment"),
                     leg.get("coverage_vs_opponent"),
-                    leg.get("team_so_adjustment"),
                 ),
             )
 
@@ -287,11 +284,6 @@ def run_enriched_pipeline(scored_legs: list, production_batch_id: str = "") -> N
     # Load ballpark factors (hits module-level cache if already loaded)
     ballpark_factors = enriched_scorer._load_ballpark_factors()
 
-    # Fetch team SO stats (24h cache — refreshed by 9 AM pipeline)
-    from src.apis.mlb_stats import get_team_strikeout_stats
-    team_so_stats = get_team_strikeout_stats(season)
-    print(f"[ENRICHED PIPELINE] Team SO stats loaded: {len(team_so_stats)} teams")
-
     # Re-score with enriched signals
     enriched_scorer.score_legs(
         enriched_legs,
@@ -300,7 +292,6 @@ def run_enriched_pipeline(scored_legs: list, production_batch_id: str = "") -> N
         ballpark_factors=ballpark_factors,
         abbr_to_team_id=abbr_to_team_id,
         game_pk_to_home_abbr=game_pk_to_home_abbr,
-        team_so_stats=team_so_stats,
     )
 
     # Build shadow parlays using the same parlay builder + constraints
