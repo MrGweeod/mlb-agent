@@ -226,23 +226,15 @@ def resolve_parlay_recommendations_v2(date: str, verbose: bool = True) -> dict:
         for leg in legs:
             gid = leg["game_id"]
             if not gid or gid not in box_scores:
-                void_reason = "game_not_found"
-                leg_outcomes.append("void")
-                conn = get_conn()
-                cur = conn.cursor()
-                cur.execute(
-                    "UPDATE mlb_parlay_legs_v2 SET outcome = 'void', void_reason = %s WHERE id = %s",
-                    (void_reason, leg["id"]),
-                )
-                conn.commit()
-                cur.execute(
-                    "UPDATE mlb_scored_legs SET result = 'void', void_reason = %s"
-                    " WHERE player_name = %s AND stat = %s AND run_date = %s",
-                    (void_reason, leg["player_name"], leg["stat"], date),
-                )
-                conn.commit()
-                cur.close()
-                conn.close()
+                # Box score unavailable — leave leg pending and skip parlay resolution
+                # until the game data arrives. Do NOT void: we can't distinguish
+                # "game postponed" from "API not yet populated".
+                if verbose:
+                    print(
+                        f"  [RESOLVER] game_id={gid} not in box_scores for"
+                        f" {leg['player_name']} — deferring parlay {parlay_id} (leg pending)"
+                    )
+                all_resolved = False
                 continue
 
             bs = box_scores[gid]
@@ -259,7 +251,7 @@ def resolve_parlay_recommendations_v2(date: str, verbose: bool = True) -> dict:
                 if player_stats is not None:
                     break
 
-            if player_stats is None:
+            if not player_stats:  # catches both None (not found) and {} (found but empty stats)
                 void_reason = "player_not_in_lineup"
                 leg_outcomes.append("void")
                 conn = get_conn()
@@ -283,8 +275,8 @@ def resolve_parlay_recommendations_v2(date: str, verbose: bool = True) -> dict:
             batting  = player_stats.get("batting",  {})
             pitching = player_stats.get("pitching", {})
             if position in _PITCHER_POSITIONS:
-                batters_faced = pitching.get("battersFaced", 0) or 0
-                if batters_faced < 5:
+                batters_faced = pitching.get("battersFaced")
+                if batters_faced is not None and batters_faced < 5:
                     if verbose:
                         print(
                             f"  [RESOLVER] Early Exit Protection: {leg['player_name']}"
@@ -309,8 +301,8 @@ def resolve_parlay_recommendations_v2(date: str, verbose: bool = True) -> dict:
                     conn.close()
                     continue
             else:
-                plate_appearances = batting.get("plateAppearances", 0) or 0
-                if plate_appearances < 2:
+                plate_appearances = batting.get("plateAppearances")
+                if plate_appearances is not None and plate_appearances < 2:
                     if verbose:
                         print(
                             f"  [RESOLVER] Early Exit Protection: {leg['player_name']}"
