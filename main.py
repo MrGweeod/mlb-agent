@@ -42,11 +42,11 @@ from src.utils.db import log_scored_legs, log_training_data_legs, save_parlay_re
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 # Anchor/Swing leg pool thresholds
-ANCHOR_MIN_COVERAGE = 75.0
+ANCHOR_MIN_COVERAGE = 65.0
 ANCHOR_MIN_ODDS     = -200
-ANCHOR_MAX_ODDS     = -150
+ANCHOR_MAX_ODDS     = -130
 SWING_MIN_COVERAGE  = 65.0
-SWING_MIN_ODDS      = -150
+SWING_MIN_ODDS      = -129
 SWING_MAX_ODDS      = 150
 
 # Transaction typeCodes that affect player availability.

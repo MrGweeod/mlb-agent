@@ -27,7 +27,7 @@ MAX_PARLAY_ODDS = 550
 MIN_ANCHOR_LEGS = 2
 MIN_SWING_LEGS  = 1
 TOTAL_LEGS      = 3
-MIN_COV_ANCHOR  = 75.0
+MIN_COV_ANCHOR  = 65.0   # upstream gate already enforces this — both pools same floor
 MIN_COV_SWING   = 65.0
 
 
