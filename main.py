@@ -33,7 +33,7 @@ from src.apis.pitcher_stats import get_pitcher_ranks
 from src.apis.sportsgameodds import get_todays_games, get_player_props
 from src.apis.team_stats import get_team_offensive_ranks
 from src.engine.coverage import calculate_coverage, PROP_STAT_MAP
-from src.engine.parlay_builder import build_hybrid_parlays, _tier_params
+from src.engine.parlay_builder import build_parlays, _tier_params
 from src.pipelines.enrich_legs import enrich_legs
 from src.pipelines.trend_analysis import get_trend_signal
 from src.tracker.recommendation_logger import log_recommendations
@@ -41,13 +41,10 @@ from src.utils.db import log_scored_legs, log_training_data_legs, save_parlay_re
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-# Anchor/Swing leg pool thresholds
-ANCHOR_MIN_COVERAGE = 65.0
-ANCHOR_MIN_ODDS     = -200
-ANCHOR_MAX_ODDS     = -130
-SWING_MIN_COVERAGE  = 65.0
-SWING_MIN_ODDS      = -129
-SWING_MAX_ODDS      = 150
+# Single flat pool thresholds
+POOL_MIN_COVERAGE = 65.0
+POOL_MIN_ODDS     = -250
+POOL_MAX_ODDS     = 150
 
 # Transaction typeCodes that affect player availability.
 # SC = Status Change (IL placements/reinstatements)
@@ -233,9 +230,9 @@ def _find_qualifying_legs(
     team_abbr_to_game_pk: dict[str, int],
     pitcher_id_map: dict[str, int | None],
     season: int,
-) -> tuple[list[dict], list[dict]]:
+) -> list[dict]:
     """
-    Apply the coverage gate to all SGO props and return (anchor_legs, swing_legs).
+    Apply the coverage gate to all SGO props and return pool_legs.
 
     Allowed props: hits o/u 0.5, strikeouts o 0.5 (hitter only).
 
@@ -246,14 +243,12 @@ def _find_qualifying_legs(
       4. Confirm the player's team is on today's schedule.
       5. Call calculate_coverage().
       6. Gate 1: coverage_overall >= 65%. Gate 2: hits under >= 70%.
-         Gate 3: odds >= -200.
-      7. Classify into anchor (coverage≥75%, odds -200 to -150) or
-         swing (coverage≥65%, odds -150 to +150) pools.
+         Gate 3: odds in [-250, +150].
+      7. All qualifying legs go into a single flat pool.
 
-    Returns (anchor_qualifying, swing_qualifying) ready for enrichment and parlay building.
+    Returns pool_qualifying ready for enrichment and parlay building.
     """
-    anchor_qualifying: list[dict] = []
-    swing_qualifying: list[dict] = []
+    pool_qualifying: list[dict] = []
     seen_odd_ids: set[str] = set()
 
     ALLOWED_PROPS = {
@@ -341,34 +336,13 @@ def _find_qualifying_legs(
             if coverage_overall_raw < 70.0:
                 continue
 
-        # Gate 3: hard odds cap — nothing worse than -200 in any leg
-        try:
-            if float(standard_odds) < -200:
-                continue
-        except (ValueError, TypeError):
-            continue
-
-        # Determine odds value for pool classification
+        # Single pool check: odds in [-250, +150]
         try:
             odds_val = float(standard_odds)
         except (ValueError, TypeError):
             continue
-
-        # Classify into anchor or swing pool
-        is_anchor = (
-            coverage_overall_raw >= ANCHOR_MIN_COVERAGE
-            and ANCHOR_MIN_ODDS <= odds_val <= ANCHOR_MAX_ODDS
-        )
-        is_swing = (
-            coverage_overall_raw >= SWING_MIN_COVERAGE
-            and SWING_MIN_ODDS <= odds_val <= SWING_MAX_ODDS
-            and not is_anchor
-        )
-
-        if not is_anchor and not is_swing:
+        if not (POOL_MIN_ODDS <= odds_val <= POOL_MAX_ODDS):
             continue
-
-        leg_type = "anchor" if is_anchor else "swing"
 
         leg_dict = {
             # Identifiers
@@ -400,15 +374,12 @@ def _find_qualifying_legs(
             "game_pk":             game_pk,
             "opposing_pitcher_id": opposing_pitcher_id if opposing_pitcher_id else None,
             # Pool classification
-            "leg_type":            leg_type,
+            "leg_type":            "pool",
         }
 
-        if is_anchor:
-            anchor_qualifying.append(leg_dict)
-        else:
-            swing_qualifying.append(leg_dict)
+        pool_qualifying.append(leg_dict)
 
-    return anchor_qualifying, swing_qualifying
+    return pool_qualifying
 
 
 def _attach_pitcher_rank_signals(
@@ -514,9 +485,7 @@ def generate_recommendations(
         ranked by edge_pct descending.
     """
     # Get up to 3× candidates to give the diversity filter room to work
-    _anchor_legs = [l for l in qualifying_legs if l.get("leg_type") == "anchor"]
-    _swing_legs  = [l for l in qualifying_legs if l.get("leg_type") == "swing"]
-    candidates = build_hybrid_parlays(_anchor_legs, _swing_legs, top_n=50)
+    candidates = build_parlays(qualifying_legs, top_n=50)
     if not candidates:
         return []
 
@@ -622,16 +591,15 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
     all_sgo_props = _filter_useless_props(all_sgo_props)
 
     # ── Step 4: Coverage Gate ─────────────────────────────────────────────────
-    print(f"\n[4/8] Computing coverage (anchor≥{ANCHOR_MIN_COVERAGE}% / swing≥{SWING_MIN_COVERAGE}%)...")
-    anchor_legs, swing_legs = _find_qualifying_legs(
+    print(f"\n[4/8] Computing coverage (pool≥{POOL_MIN_COVERAGE}%, odds {POOL_MIN_ODDS} to +{POOL_MAX_ODDS})...")
+    qualifying_legs = _find_qualifying_legs(
         all_sgo_props,
         team_id_to_abbr,
         team_abbr_to_game_pk,
         pitcher_id_map,
         season,
     )
-    qualifying_legs = anchor_legs + swing_legs
-    print(f"  {len(anchor_legs)} anchor + {len(swing_legs)} swing = {len(qualifying_legs)} qualifying leg(s)")
+    print(f"  {len(qualifying_legs)} qualifying leg(s) in pool")
 
     if not qualifying_legs:
         print("  No qualifying legs. Exiting.")
@@ -803,13 +771,10 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
     tier_label = f"Tier {tier_info['tier']}" if tier_info else "Tier 4 (thin slate)"
     print(f"\n[8/8] Building hybrid parlays ({len(schedule)} games → {tier_label})...")
 
-    final_anchor_legs = [l for l in qualifying_legs if l.get("leg_type") == "anchor"]
-    final_swing_legs  = [l for l in qualifying_legs if l.get("leg_type") == "swing"]
-    parlays = build_hybrid_parlays(
-        final_anchor_legs,
-        final_swing_legs,
+    parlays = build_parlays(
+        qualifying_legs,
+        top_n=5,
         num_games=len(schedule),
-        team_to_blocked=team_to_blocked,
     )
     print(f"  Built {len(parlays)} parlay(s)")
 
@@ -1094,8 +1059,8 @@ def run_targeted_pipeline(buffer_minutes: int = 15, source: str = "auto") -> Non
     )
 
     # ── Step 3: Filter composite_score >= SWING_MIN_COVERAGE (55) ───────────
-    eligible = [l for l in all_legs if (l.get("composite_score") or 0) >= SWING_MIN_COVERAGE]
-    print(f"  {len(eligible)} legs with composite_score >= {SWING_MIN_COVERAGE}")
+    eligible = [l for l in all_legs if (l.get("composite_score") or 0) >= POOL_MIN_COVERAGE]
+    print(f"  {len(eligible)} legs with composite_score >= {POOL_MIN_COVERAGE}")
 
     if not eligible:
         print("  No eligible legs. Exiting targeted pipeline.")
