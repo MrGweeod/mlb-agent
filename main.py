@@ -407,6 +407,16 @@ def _attach_pitcher_rank_signals(
             or stat in {"inningsPitched", "hitsAllowed", "earnedRuns"}
         )
         if not is_pitcher:
+            # Hitter leg — attach OPPOSING pitcher's rank signals
+            opp_pitcher_id = leg.get("opposing_pitcher_id") or leg.get("pitcher_id")
+            if opp_pitcher_id:
+                try:
+                    opp_ranks = pitcher_ranks.get(int(opp_pitcher_id), {})
+                    leg["opp_pitcher_era_rank"]  = opp_ranks.get("era_rank")
+                    leg["opp_pitcher_k9_rank"]   = opp_ranks.get("k9_rank")
+                    leg["opp_pitcher_whip_rank"] = opp_ranks.get("whip_rank")
+                except (ValueError, TypeError):
+                    pass
             continue
 
         # Pitcher quality ranks

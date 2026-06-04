@@ -74,13 +74,21 @@ def calculate_composite_score(leg):
                 score -= 5 if direction == "over" else -5
 
     # For hitter strikeout props: K-rate matters
-    if stat == "strikeouts":
-        pitcher_k9 = leg.get("pitcher_k9")
-        if pitcher_k9 is not None:
-            if pitcher_k9 > 10.0 and direction == "over":
-                score += 5   # High-K pitcher → hitter likely to K
-            elif pitcher_k9 < 7.0 and direction == "over":
-                score -= 5   # Low-K pitcher → hitter unlikely to K
+    if stat == "strikeouts" and direction == "over":
+        k9_rank = leg.get("opp_pitcher_k9_rank")
+        if k9_rank is not None:
+            if k9_rank <= 8:    # elite K pitcher — batter more likely to K
+                score += 5
+            elif k9_rank >= 23: # weak K pitcher — batter less likely to K
+                score -= 5
+        else:
+            # fallback to raw k9 if rank not available
+            pitcher_k9 = leg.get("pitcher_k9")
+            if pitcher_k9 is not None:
+                if pitcher_k9 > 10.0:
+                    score += 5
+                elif pitcher_k9 < 7.0:
+                    score -= 5
 
     # ============================================
     # 4. LINEUP STABILITY: Playing Time Risk
