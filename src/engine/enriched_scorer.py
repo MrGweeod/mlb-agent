@@ -254,19 +254,14 @@ def _calculate_enriched_score(
     enriched = {}
 
     # ── Base score (mirrors simple_scorer.calculate_composite_score) ──────────
-    if leg.get("coverage_vs_hand") is not None and leg.get("coverage_vs_hand") > 0:
-        base_score = leg["coverage_vs_hand"]
-        has_split = True
-    elif leg.get("coverage_overall") is not None:
-        base_score = leg["coverage_overall"]
-        has_split = False
-    else:
-        base_score = leg.get("coverage_pct", 50)
-        has_split = False
-
+    base_score = leg.get("coverage_overall") or leg.get("coverage_pct", 50)
     score = base_score
-    if has_split:
-        score += 3
+
+    # coverage_vs_hand as delta adjustment — not a base replacement
+    coverage_vs_hand = leg.get("coverage_vs_hand")
+    if coverage_vs_hand is not None:
+        delta = (coverage_vs_hand - base_score) * 0.3
+        score += max(-3.0, min(3.0, delta))
 
     # Consistency signal (mirrors simple_scorer)
     recent_10 = leg.get("coverage_recent_10")
@@ -296,22 +291,20 @@ def _calculate_enriched_score(
     enriched["blended_era_rank"] = blended_era_rank
     enriched["recent_form_rank"] = recent_form_rank
 
-    if stat == "hits":
-        if blended_era_rank is not None:
-            # Rank 1–8 = ace tier (ERA < ~3.0 equivalent), 23–30 = weak tier
-            if blended_era_rank >= 23:
-                score += 5 if direction == "over" else -5
-            elif blended_era_rank <= 8:
-                score -= 5 if direction == "over" else 5
-
     # K-rate adjustment (hitter SO props only)
-    if stat == "strikeouts":
-        pitcher_k9 = leg.get("pitcher_k9")
-        if pitcher_k9 is not None:
-            if pitcher_k9 > 10.0 and direction == "over":
-                score += 5
-            elif pitcher_k9 < 7.0 and direction == "over":
-                score -= 5
+    if stat == "strikeouts" and direction == "over":
+        pitcher_id = leg.get("pitcher_id") or leg.get("opposing_pitcher_id")
+        if pitcher_id:
+            try:
+                pid_int = int(pitcher_id)
+                k9_rank = pitcher_ranks.get(pid_int, {}).get("k9_rank")
+                if k9_rank is not None:
+                    if k9_rank <= 8:    # elite K pitcher — batter more likely to K
+                        score += 5
+                    elif k9_rank >= 23: # weak K pitcher — batter less likely to K
+                        score -= 5
+            except (ValueError, TypeError):
+                pass
 
     # Lineup stability (unchanged from simple_scorer)
     lineup_consistency = leg.get("lineup_consistency")

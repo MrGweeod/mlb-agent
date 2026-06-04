@@ -140,7 +140,7 @@ def build_parlays(
         return []
 
     TIER = params["tier"]
-    MAX_CANDIDATES = 15
+    MAX_CANDIDATES = 50
     TIMEOUT_SECS   = 90
 
     MIN_DECIMAL = MIN_PARLAY_ODDS / 100 + 1
@@ -195,9 +195,18 @@ def build_parlays(
             )
             break
 
-        # Sort by decimal odds DESC for B&B pruning
-        pool_bnb = sorted(avail_pool, key=lambda l: l["_dec"], reverse=True)
+        # Sort by composite_score DESC so B&B explores highest-quality legs first
+        pool_bnb = sorted(avail_pool, key=lambda l: l.get("composite_score", 0), reverse=True)
         n = len(pool_bnb)
+
+        # Precompute suffix-sorted dec values so UB/LB bounds remain valid under
+        # any pool sort order. suffix_dec_sorted[i] = list of _dec values from
+        # pool_bnb[i:] sorted descending (highest odds first).
+        suffix_dec_sorted = []
+        for _i in range(n + 1):
+            suffix_dec_sorted.append(
+                sorted([l["_dec"] for l in pool_bnb[_i:]], reverse=True)
+            )
 
         # Fresh B&B state for this parlay
         parlays = []
@@ -227,12 +236,14 @@ def build_parlays(
         def _bnb(
             rem, idx, legs, p, by_pid, by_game, in_parlay,
             _pool_bnb=pool_bnb, _n=n,
+            _suffix_dec=suffix_dec_sorted,
             _stop=_stop, _total_iters=total_iters, _start_time=_start_time,
         ):
             """
-            Branch-and-bound over _pool_bnb (sorted by _dec DESC).
+            Branch-and-bound over _pool_bnb (sorted by composite_score DESC).
 
             Records when rem == 0 and combined odds are in target range.
+            Bounds use suffix_dec_sorted for correctness under any pool sort order.
             """
             _total_iters[0] += 1
 
@@ -247,17 +258,17 @@ def build_parlays(
             if _n - idx < rem:
                 return
 
-            # ── Prune: upper bound (best possible completion) ──────────────────
+            # ── Prune: upper bound (top rem odds from pool[idx:]) ──────────────
             ub = p
-            for j in range(idx, idx + rem):
-                ub *= _pool_bnb[j]["_dec"]
+            for d in _suffix_dec[idx][:rem]:
+                ub *= d
             if ub < MIN_DECIMAL:
                 return
 
-            # ── Prune: lower bound (cheapest possible completion) ──────────────
+            # ── Prune: lower bound (bottom rem odds from pool[idx:]) ───────────
             lb = p
-            for j in range(_n - rem, _n):
-                lb *= _pool_bnb[j]["_dec"]
+            for d in _suffix_dec[idx][-rem:]:
+                lb *= d
             if lb > MAX_DECIMAL:
                 return
 

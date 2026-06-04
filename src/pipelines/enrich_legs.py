@@ -208,7 +208,7 @@ def enrich_legs(
         # For pitcher props, set pitcher_hand to the pitcher's OWN throwing hand.
         # For hitter legs, pitcher_hand was already set by coverage.py (opposing
         # pitcher's hand) — don't overwrite it with None.
-        is_pitcher_prop_leg = position in ("SP", "RP", "P") or stat in _PITCHER_STATS
+        is_pitcher_prop_leg = position in ("SP", "RP", "P")
         if is_pitcher_prop_leg:
             leg["pitcher_hand"] = get_pitcher_handedness(player_id, position) if player_id else None
             leg["opponent_adjustment"] = 0.0

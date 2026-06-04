@@ -115,7 +115,11 @@ def get_pitcher_ranks(season: int) -> dict:
             ip = _parse_ip(raw_s.get("inningsPitched", "0"))
         except Exception:
             continue
-        if ip < 50:
+        starts = int(raw_s.get("gamesStarted") or 0)
+        if starts < 3:
+            continue
+        ip_per_start = ip / starts if starts > 0 else 0
+        if ip_per_start < 3.0:
             continue
         pitcher_data.append({"id": pid, **stats})
 
