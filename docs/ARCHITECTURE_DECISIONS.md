@@ -1,5 +1,5 @@
 # MLB Parlay Agent — Architecture Decisions
-**Last Updated:** June 1, 2026 (Session 4 — Performance Diagnosis + Full System Refactor)
+**Last Updated:** June 5, 2026 (Session 5 — Full System Diagnostic + Signal Pipeline Fixes)
 
 ---
 
@@ -10,14 +10,15 @@
 4. [Coverage Gating Architecture](#coverage-gating-architecture)
 5. [Parlay Construction Evolution](#parlay-construction-evolution)
 6. [Odds Cap Decision](#odds-cap-decision)
-7. [Coverage Calculation](#coverage-calculation)
-8. [Shadow Pipeline Strategy](#shadow-pipeline-strategy)
-9. [Enriched Scoring Signals](#enriched-scoring-signals)
-10. [Outcome Resolution](#outcome-resolution)
-11. [Database Design](#database-design)
-12. [Pipeline Architecture](#pipeline-architecture)
-13. [Lessons Learned](#lessons-learned)
-14. [Future Considerations](#future-considerations)
+7. [Coverage Signal Architecture](#coverage-signal-architecture)
+8. [Pitcher Signal Pipeline](#pitcher-signal-pipeline)
+9. [Shadow Pipeline Strategy](#shadow-pipeline-strategy)
+10. [Enriched Scoring Signals](#enriched-scoring-signals)
+11. [Outcome Resolution](#outcome-resolution)
+12. [Database Design](#database-design)
+13. [Pipeline Architecture](#pipeline-architecture)
+14. [Lessons Learned](#lessons-learned)
+15. [Future Considerations](#future-considerations)
 
 ---
 
@@ -27,35 +28,35 @@
 
 The system exists to find props where historical coverage rate predicts actual outcomes, and combine them into parlays with positive expected value. Every design decision should be evaluated against this goal.
 
-**Key insight from 60-day analysis (June 2026):** Coverage is a necessary but not sufficient condition for parlay selection. The book prices high-coverage props expensively (e.g. RBI under at -348 for 85%+ coverage), eliminating the edge. True edge exists only where coverage predicts outcomes AND the book underprices that prediction.
-
 **Validated as of June 2026:**
 - `hits over 0.5` at 65%+ coverage: genuine +6pp edge above breakeven
 - `SO over 0.5` (hitter) at 65%+ coverage: genuine +7pp edge above breakeven
 - `hits under 0.5` at 70%+ coverage: +11pp edge (thin sample — 24 appearances)
+- Park factor: 30-point win rate spread between pitcher parks (40%) and hitter parks (70%)
 
 ---
 
 ## Scoring System Evolution
 
 ### **Phase 0: ML Model (April–May 2026) — ABANDONED**
-GradientBoostingClassifier, 77K samples, direction feature at 77% importance. Score-outcome correlation was inverted — high scores had lower win rates. Parlay win rate: 7.6%.
-
-**Why it failed:** Model learned that unders historically "covered" due to low prop lines, not because they were good bets. Direction feature dominated everything else.
+GradientBoostingClassifier, 77K samples, direction feature at 77% importance. Score-outcome correlation was inverted. Parlay win rate: 7.6%.
 
 ### **Phase 1: Simple Coverage-Based Scoring (May 20, 2026) — CURRENT PRODUCTION**
 
 ```python
-score = base_coverage + adjustments
-# base = coverage_vs_hand (preferred) or coverage_overall
-# adjustments:
-#   consistency: gap-based ±6/±4/±2/+2/+1 (coverage_overall vs coverage_recent_10)
-#   pitcher K9: ±5 for SO over props (hitter only)
-#   lineup stability: -5 if lineup_consistency < 0.50
+score = coverage_overall  # always the base
+     + coverage_vs_hand_delta  # ±3 max (30% weight of delta from overall)
+     + consistency_adjustment  # gap-based ±6/±4/±2/+2/+1
+     + era_adjustment          # ±5 for hits props (raw pitcher_era — pending revalidation)
+     + k9_rank_adjustment      # ±5 for SO props (opp_pitcher_k9_rank, with raw fallback)
+     + lineup_stability        # -5 if lineup_consistency < 0.50
 ```
 
-**Parlay win rate (old prop set):** ~7.9%
-**Expected parlay win rate (new prop set):** ~20-25% (per data-driven 4-leg math)
+### **Key Scoring Decision: `coverage_overall` Always Base (June 5, 2026)**
+
+`coverage_vs_hand` was previously used as the base signal replacement when available (54% of hits legs). Validated on 30 days / 1,831 appearances: win rates are identical with vs without `coverage_vs_hand` (62.0% vs 62.3%), and the log-odds adjustment produces values within 0.5 points of `coverage_overall` on average.
+
+**Decision:** `coverage_overall` is always the base. `coverage_vs_hand` is a delta adjustment at 30% weight capped ±3 points. This keeps all legs on a comparable scale regardless of data availability.
 
 ---
 
@@ -63,79 +64,57 @@ score = base_coverage + adjustments
 
 ### **Decision: Strict Whitelist Based on 60-Day Outcome Analysis (June 1, 2026)**
 
-**The analysis:** Queried `mlb_scored_legs` across 60 days and 90K+ resolved legs, bucketing by coverage rate and measuring actual win rates per bucket. Only props showing a monotonically increasing coverage-to-win-rate relationship were kept.
-
-**Results:**
-
-| Prop | Coverage Predictive? | Finding |
-|---|---|---|
-| `hits over 0.5` | ✅ Yes | 50% → 75% win rate as coverage rises from <60% to 75-79% |
-| `SO over 0.5` (hitter) | ✅ Yes | 41% → 91% win rate across buckets |
-| `hits under 0.5` | ⚠️ Limited | 67% at 65%+ but only 24 appearances — included with stricter gate |
-| `totalBases under 1.5` | ❌ No | Flat 57-63% across ALL coverage buckets (1,000+ appearances) |
-| `rbi under 0.5` | ❌ No | Flat 67-77% — book prices edge away (avg -280 to -348) |
-| Pitcher SO (all) | ❌ No | Coverage missing 55%+ of legs; win rates 30-52% |
-| `walks over 0.5` | ❌ Insufficient | 63% at 60-64% but only 66 total appearances |
+Only props showing monotonically increasing coverage-to-win-rate relationship are included.
 
 **Current whitelist:**
 ```python
 ALLOWED_PROPS = {
     ("hits",       "over",  0.5),
     ("hits",       "under", 0.5),   # 70% gate
-    ("strikeouts", "over",  0.5),   # hitter only
+    ("strikeouts", "over",  0.5),   # hitter only — pitchers skipped by position check
 }
 ```
 
-**Design principle:** Never add a prop type to the whitelist without 200+ resolved appearances showing monotonically increasing coverage-to-win-rate. Sample size is the primary constraint — not intuition.
+**Removed props:**
+| Prop | Reason |
+|---|---|
+| `totalBases under 1.5` | Flat 57-63% win rate at ALL coverage levels (1,000+ appearances) |
+| `rbi under 0.5` | Flat signal — book prices edge away (avg -280 to -348) |
+| Pitcher SO (all) | Coverage missing for most legs; win rates 30-52% |
+| `walks`, `homeRuns`, `stolenBases` | Insufficient sample / negative edge |
+
+**Design principle:** Never add a prop type without 200+ resolved appearances showing monotonically increasing coverage-to-win-rate.
 
 ---
 
 ## Coverage Gating Architecture
 
-### **Decision: Two-Gate System on `coverage_overall` (May 27, 2026)**
+### **Decision: Two-Gate System on `coverage_overall`**
 
-Gate 1 (`coverage_overall >= 65%`) runs before any scoring adjustments, ensuring adjustments rank eligible legs against each other but cannot rescue ineligible ones.
-
-Gate 2 applies prop-specific floors where the data demands it:
+Gate 1 (`coverage_overall >= 65%`) runs before scoring. Gate 2 applies prop-specific floors:
 - `hits under 0.5`: 70% minimum (thin sample, require higher confidence)
 
-**Design principle:** Gates use `coverage_overall` (unbiased season rate). Scoring uses `coverage_vs_hand` (more specific). These must not be conflated — using `coverage_vs_hand` for gating was the root cause of the "chronic bad actor" problem diagnosed in May.
+**Critical distinction:** Gates use `coverage_overall` (unbiased season rate). Scoring uses `coverage_vs_hand` as a delta adjustment. These are different roles for different signals.
 
 ---
 
 ## Parlay Construction Evolution
 
-### **Phase 1: Single Pool +700–+1000 (Pre-May 28)**
-- 4-6 legs, single pool
-- Problem: pool flooded with RBI unders at -280 to -300, killing parlay quality
+### **Phase 3: Single Flat Pool 4-Leg +400–+700 (June 1, 2026)**
+Eliminated anchor/swing two-pool system. With only 3 validated prop types all priced -250 to +150, two-pool distinction added no value.
 
-### **Phase 2: Anchor/Swing 3-Leg +900–+1100 (May 28)**
-- 3 anchors (75%+ coverage, -300 to -150) + 2 swings (55%+ coverage, -150 to +150)
-- Problem: swing pool starvation on thin slates (only 1 swing leg available); anchor floor 75% excluded most legs
+### **Phase 3.1: Score-Sort + MAX_CANDIDATES 50 (June 5, 2026) — CURRENT**
 
-### **Phase 3: Single Flat Pool 4-Leg +400–+700 (June 1, 2026) — CURRENT**
+**Problem identified:** B&B was sorted by decimal odds descending for pruning efficiency. With today's pool, Oneil Cruz (score 59, odds -148) was explored before Ryan Waldschmidt (score 78, odds -176) purely because cheaper odds appear higher in the sort order. The first 15 combinations found all featured the same cheap-odds, low-quality legs. `avg_composite` tiebreaker between 15 near-identical combinations was effectively random.
 
-**Why anchor/swing was eliminated:**
-- With only 3 validated prop types all priced -250 to +150, the two-pool distinction added no value
-- Swing pool starvation halted parlay generation entirely on June 1 (1 swing leg → 1 parlay maximum)
-- Analysis showed the odds/coverage distinction was artificial given the narrow prop set
+**Fix:**
+1. Sort pool by `composite_score` DESC — highest quality legs explored first
+2. Raise `MAX_CANDIDATES` 15→50 — find 50 combinations before stopping
+3. Fix B&B pruning bounds — original UB/LB relied on odds-sorted order. Fixed via `suffix_dec_sorted[i]` precomputing the sorted `_dec` values from `pool[i:]` so bounds remain valid under any sort order
 
-**Current structure:**
-```
-Single pool: coverage_overall >= 65%, odds -250 to +150
-4 legs per parlay
-Target: +400 to +700 combined
-Constraints: max 2 legs/game, max 1 leg/player/parlay, max 1 player/batch
-```
+**Result:** Waldschmidt (78), Rice (76.8), Turner (76.6) now lead parlay 1. Cruz (59), Andujar (59) only appear when no better combination exists.
 
-**Why +400 to +700:**
-- 4-leg math at 70% per leg: 0.70^4 = 24% win probability
-- Profitable above ~17% win rate at +500 average
-- Previous +900–+1100 target required 5+ legs → 14% win probability → near-breakeven ROI
-- Lower odds, more wins, better ROI
-
-### **Decision: `build_hybrid_parlays()` retained as backward-compat wrapper**
-The enriched pipeline and any external callers still use `build_hybrid_parlays(anchor_legs, swing_legs)`. The wrapper merges pools and calls `build_parlays()`, requiring no changes to callers.
+**Why `build_hybrid_parlays()` retained:** Backward-compat wrapper for enriched pipeline and external callers. Merges pools and delegates to `build_parlays()`.
 
 ---
 
@@ -143,34 +122,59 @@ The enriched pipeline and any external callers still use `build_hybrid_parlays(a
 
 ### **Decision: -250 Hard Cap Per Leg (June 1, 2026)**
 
-**Analysis:** The -200 cap introduced in the refactor was cutting ~50% of eligible legs daily:
-- Typical day: 22 legs at 65%+ coverage, but only 10-12 in the -200 range
-- May 31 example: 28 legs above 65% coverage, only 10 within -200 range (18 blocked)
-
-**Why -250 specifically:**
-- Hits over 0.5 at 75-79% coverage wins 75.4%; avg odds in that bucket is -225
-- At -250, breakeven is 71.4%. We're hitting 75%. Edge exists.
-- At -300, breakeven is 75.0%. Edge disappears for most legs.
-- -250 recovers most blocked legs while maintaining positive expected value
-
-**Pool size impact at -250 cap:** ~18-22 eligible legs on typical weekday, 30-45 on full weekend slates.
+At -250, breakeven is 71.4%. Validated hits over win rate at 75-79% coverage is 75.4%. Edge exists. At -300, breakeven is 75.0% — edge disappears for most legs. Pool size at -250: ~18-22 legs on typical weekday, 30-45 on full weekend slates.
 
 ---
 
-## Coverage Calculation
+## Coverage Signal Architecture
 
-### **Decision: Direction-Aware Coverage with Handedness Splits**
+### **Decision: `coverage_vs_hand` as Delta, Not Base (June 5, 2026)**
 
-```python
-# OVER props: % of games where stat >= line
-# UNDER props: % of games where stat < line
-# coverage_vs_hand: log-odds adjusted for pitcher handedness (scoring only)
-```
+**Validation data (30 days, 1,831 hits over appearances):**
+- Has vs_hand: 62.0% win rate, avg coverage_vs_hand = 66.4, avg coverage_overall = 66.0
+- No vs_hand: 62.3% win rate, avg coverage_overall = 67.7
 
-`coverage_overall` = gate signal (unbiased season rate, uses full game log)
-`coverage_vs_hand` = scoring signal (more specific, used to rank among eligible legs)
+The log-odds adjustment via batting rate stats (avg/slg/obp vs pitcher handedness) is technically correct and varies meaningfully by pitcher hand per player. However it produces values within 0.5 points of overall on average and doesn't improve win rates.
 
-These serve different purposes and must not be conflated.
+**Architecture:** `coverage_overall` = gate and base signal. `coverage_vs_hand` = delta adjustment at 30% weight, capped ±3. Preserves the signal without allowing a single split to swing a score by 7 points.
+
+**Note:** `coverage_vs_hand` is correctly NULL for strikeout props — `SPLIT_RATIO_STAT` only maps `hits`, `totalBases`, `walks` to rate stats. There is no equivalent rate stat for batter strikeout rate vs handedness in the statSplits API endpoint.
+
+---
+
+## Pitcher Signal Pipeline
+
+### **Decision: Per-Start IP Filter (June 5, 2026)**
+
+**Problem:** `pitcher_stats.py` was filtering `if ip < 50` (season total IP). At this point in the season, pitchers with 5-8 starts had ERAs of 0.73-1.77 (Ohtani, Arrighetti, Harrison) but were classified as `no_era_data` alongside true relievers. The 50 IP filter was systematically excluding the best pitchers.
+
+**Fix:** `if starts < 3 or ip_per_start < 3.0` — requires 3+ starts averaging 3.0+ IP/start. This captures any legitimate starter regardless of total IP, while filtering true relievers (1-2 IP/appearance).
+
+**Result:** 192 qualified starters (was ~20-25). ERA/K9/WHIP ranks now meaningful.
+
+### **Decision: Bug 1 Fix — Position-First Pitcher Prop Detection (June 5, 2026)**
+
+**Problem:** `enrich_legs.py` used `is_pitcher_prop_leg = position in ("SP", "RP", "P") or stat in _PITCHER_STATS`. Since `_PITCHER_STATS` included `"strikeouts"`, every batter strikeout leg was routed to the pitcher prop branch, receiving `pitcher_era=None`, `pitcher_k9=None`, and being skipped.
+
+**Fix:** `is_pitcher_prop_leg = position in ("SP", "RP", "P")` — position is the authoritative discriminator.
+
+### **Decision: Opposing Pitcher Ranks on Hitter Legs (June 5, 2026)**
+
+**Problem:** `_attach_pitcher_rank_signals()` in `main.py` only attached `era_rank`, `k9_rank`, `whip_rank` to pitcher prop legs (SP/RP/P positions). All hitter legs were skipped with `continue`. The ranked signals computed from 192 qualified starters were never available to the scorer for any hitter leg.
+
+**Fix:** Added hitter leg branch that attaches `opp_pitcher_era_rank`, `opp_pitcher_k9_rank`, `opp_pitcher_whip_rank` via `opposing_pitcher_id` (falls back to `pitcher_id`).
+
+### **Decision: K9 Rank Signal for Batter Strikeout Props**
+
+Use `opp_pitcher_k9_rank` (normalized rank 1-30) rather than raw `pitcher_k9` float with hardcoded thresholds. Rank signal is normalized across all 192 qualified starters; raw float thresholds (10.0/7.0) were not. Fallback to raw `pitcher_k9` when rank unavailable.
+
+Unit test: elite K pitcher (rank ≤8) → +5, weak K pitcher (rank ≥23) → -5, no rank → 0. 10-point spread.
+
+### **Decision: ERA Rank Removed from Enriched Scorer Scoring (Pending Revalidation)**
+
+ERA rank signal for hits props was validated as directionally unreliable in shadow data. However the analysis was confounded by the 50 IP threshold contaminating the ranking pool. With IP threshold fixed, ERA rank needs re-evaluation after 7+ days of clean data before being re-added to scoring.
+
+ERA rank is still computed and stored on every leg for analysis purposes.
 
 ---
 
@@ -178,54 +182,37 @@ These serve different purposes and must not be conflated.
 
 ### **Decision: Shadow Before Promoting**
 
-Significant scoring changes run as a shadow pipeline for 5-7 days before production promotion. Shadow tables mirror production schema plus enriched signal columns. `production_batch_id` links shadow parlays to production parlays for direct A/B comparison.
+Significant scoring changes run as shadow pipeline for 5-7 days before production promotion. Shadow tables mirror production schema plus enriched signal columns. `production_batch_id` links shadow parlays to production parlays for direct A/B comparison.
 
-**Current shadow signals (3 active, 1 removed):**
-1. Blended ERA Rank — season ERA × 0.5 + last-3-start ERA × 0.5. Applies to `hits` props.
-2. Opponent-specific Coverage Split — batter hit rate vs tonight's specific opponent (min 3 games).
-3. Ballpark Factor — 30-row static table, Coors 115 → Petco 94.
-4. ~~Team SO Rank~~ — **REMOVED June 1** (pitcher SO props cut from whitelist).
+### **Decision: Resolution Must Be Wired to Shadow Table**
+
+`mlb_scored_legs_enriched.result` was NULL for all rows since pipeline inception — the morning resolver was only updating `mlb_scored_legs`. Fixed June 5: `parlay_outcome_resolver.py` now writes outcomes to `mlb_scored_legs_enriched` at all 5 resolution paths (4 void branches + won/lost). Without resolution, shadow signal validation is impossible.
 
 ---
 
 ## Enriched Scoring Signals
 
-### **Signal 1: Blended ERA Rank (Active — hits props only)**
-Season ERA rank blended with pitcher's last-3-start ERA rank. Captures pitcher current form vs season baseline. Applies only to `hits` props (the only hitter prop where ERA is relevant after whitelist narrowing).
+### **Signal 1: Blended ERA Rank (Active — computed, NOT applied to score)**
+Season ERA rank blended with pitcher's last-3-start ERA rank. Computed and stored on every enriched leg. Not applied to score pending revalidation with clean data post IP-fix.
 
-### **Signal 2: Opponent-Specific Coverage Split (Active — all hitter props)**
-Batter's hit rate vs tonight's specific opponent (min 3 games, 25% delta weight, ±8 cap). More specific than overall coverage but requires sample.
+### **Signal 2: Opponent-Specific Coverage Split (Active — thin data)**
+Batter's hit rate vs tonight's specific opponent (min 3 games, 25% delta weight, ±8 cap). Only 20-35% population rate — most batters haven't faced the same team 3 times yet. Will grow through the season.
 
-### **Signal 3: Ballpark Factor (Active — all hitter props)**
-30-row `ballpark_factors` static table. Hitter props: ±5 based on run_factor.
+### **Signal 3: Ballpark Factor (Active — validated)**
+30-row `ballpark_factors` static table. Hitter props ±5. Validated: 30-point win rate spread between pitcher parks (40%) and hitter parks (70%). Strongest validated enriched signal.
 
 ### **Signal 4: Team SO Rank (REMOVED June 1)**
-Pitcher SO props cut from whitelist made this signal irrelevant. Removed from `enriched_scorer.py`, `run_enriched_pipeline.py`, and related DB writes.
+Pitcher SO props cut from whitelist made this signal irrelevant.
 
 ---
 
 ## Outcome Resolution
 
 ### **Decision: Fail-Safe EEP with Explicit Presence Check (June 1, 2026)**
+EEP only fires when `plateAppearances` / `battersFaced` explicitly present in API response. `game_not_found` defers parlay rather than voiding leg.
 
-Early Exit Protection was voiding every batter leg due to `plateAppearances` defaulting to 0 when `boxscore_data()` returned empty stats dict.
-
-**Rule:** EEP only fires when the API explicitly returns a value for `plateAppearances` (batters) or `battersFaced` (pitchers). If the key is absent, assume the player played normally.
-
-```python
-# Batter EEP
-plate_appearances = batting.get("plateAppearances")  # None if absent
-if plate_appearances is not None and plate_appearances < 2:
-    # genuine early exit
-
-# Pitcher EEP
-batters_faced = pitching.get("battersFaced")  # None if absent
-if batters_faced is not None and batters_faced < 5:
-    # genuine early exit
-```
-
-### **Decision: game_not_found defers parlay, not void**
-When a game's box score is unavailable, the parlay is deferred (kept pending) rather than the leg being voided. We can't distinguish "game postponed" from "API not yet populated" — voiding was incorrect.
+### **Decision: Shadow Table Resolution Parity (June 5, 2026)**
+All 5 void/won/lost paths in `parlay_outcome_resolver.py` now write to both `mlb_scored_legs` (production) and `mlb_scored_legs_enriched` (shadow). Join key: `(player_name, stat, direction, run_date, line)`. Note: `id` column is NULL in enriched table — all writes use natural key, not `id`.
 
 ---
 
@@ -236,64 +223,78 @@ When a game's box score is unavailable, the parlay is deferred (kept pending) ra
 - `mlb_scored_legs.odds`: TEXT — cast to numeric for math: `odds::numeric`
 - `mlb_parlay_recommendations_v2.run_date`: DATE — no cast needed
 - `mlb_training_data.result`: `'hit'/'miss'/'void'` — different from parlay tables' `'won'/'lost'`
+- `mlb_scored_legs_enriched.id`: NULL for all rows — use natural key for all writes
 
-### **Shadow Tables Mirror Production + Enriched Columns**
-`mlb_scored_legs_enriched` has all production columns plus: `coverage_vs_opponent`, `games_vs_opponent`, `park_factor`, `park_adjustment`, `blended_era_rank`, `recent_form_rank`.
-`team_so_adjustment` column exists in DB but no longer populated (signal removed).
+### **Anti-Pattern: ORDER BY before UNION ALL**
+```sql
+-- WRONG — causes syntax error
+SELECT ... FROM table_a GROUP BY x ORDER BY x
+UNION ALL
+SELECT ... FROM table_b GROUP BY x ORDER BY x;
+
+-- CORRECT — single ORDER BY at the very end
+SELECT ... FROM table_a GROUP BY x
+UNION ALL
+SELECT ... FROM table_b GROUP BY x
+ORDER BY x;
+
+-- ALSO CORRECT — combine date ranges on same table with WHERE/OR
+SELECT ... FROM mlb_scored_legs
+WHERE (run_date >= '2026-05-26' AND run_date < '2026-05-29')
+   OR run_date >= '2026-06-01'
+GROUP BY ... ORDER BY ...;
+```
 
 ---
 
 ## Pipeline Architecture
 
 ### **3× Daily + Shadow After Every Run**
-- 9:00 AM ET — Resolution + fresh parlays
-- 12:00 PM ET — Midday refresh
-- 5:30 PM ET — Evening refresh
+- 9:00 AM ET — Resolution + fresh parlays (shadow runs after)
+- 12:00 PM ET — Midday refresh (shadow runs after)
+- 5:30 PM ET — Evening refresh (shadow runs after)
 - Manual Regenerate also triggers shadow
-
-Shadow pipeline adds ~2-3 seconds per run and never touches production tables.
 
 ---
 
 ## Lessons Learned
 
-1. **Coverage alone is not edge.** The book also knows historical coverage rates. Edge exists only where your predicted win probability exceeds the book's implied probability. Always check avg_odds alongside win_rate.
-2. **Flat coverage signals mean cut, not raise the floor.** If win rate is flat across all coverage buckets with 500+ appearances, the signal doesn't exist. Raising the threshold doesn't help.
-3. **Pool size determines parlay structure.** Design around what the data actually provides daily, not what would be theoretically ideal. 4-leg +400-+700 is achievable with 15+ eligible legs. 5-leg +900-+1100 requires 25+ and fails on thin slates.
-4. **Two-pool systems require genuinely different leg types.** Anchor/swing only makes sense when anchors and swings have meaningfully different odds profiles. When all props price similarly, a single pool is simpler and more robust.
-5. **Sample size before tuning.** Every threshold change in June was made on 90K+ resolved legs. Changes before that were made on 200 parlays. The lesson: don't tune until you can measure.
-6. **API defaults can silently corrupt logic.** `batting.get("plateAppearances", 0)` looks safe but causes catastrophic false-voids when the API returns an empty dict. Always use `is not None` guards for boolean conditions on API data.
-7. **Data-driven prop selection beats intuition.** Total Bases and RBI unders seemed like solid props — lots of batters don't get TB or RBIs. But 1,000+ appearances proved the coverage signal was flat. The data was right, the intuition was wrong.
-8. **Test the unhappy paths in resolution.** The EEP bug existed for days before discovery because void cases are rare in normal operation. Explicitly test: all legs void, some legs void, game not found.
-9. **Backward-compat wrappers enable safe refactors.** Keeping `build_hybrid_parlays()` as a wrapper meant the enriched pipeline needed zero changes despite a complete rewrite of the underlying builder.
+1. **Coverage alone is not edge.** The book also knows historical coverage rates. Edge exists only where predicted win probability exceeds the book's implied probability.
+2. **Flat coverage signals mean cut, not raise the floor.** If win rate is flat across all coverage buckets with 500+ appearances, the signal doesn't exist.
+3. **Pool size determines parlay structure.** Design around what the data actually provides daily.
+4. **Sort order determines parlay quality, not just efficiency.** Sorting by odds for B&B pruning efficiency caused systematic selection of low-quality cheap-odds legs over high-quality expensive-odds legs.
+5. **Candidate limit determines search depth.** MAX_CANDIDATES=15 caused the B&B to stop exploring after finding 15 combinations built from the same top-of-sorted-list legs. 50 candidates forces genuine pool exploration.
+6. **IP thresholds can silently exclude the best data.** A 50-inning season minimum excluded Ohtani, Cole, Harrison from the pitcher ranking pool. Always validate that filtering logic isn't systematically biasing against edge cases.
+7. **Function names can mislead.** `_attach_pitcher_rank_signals()` sounds like it attaches pitcher signals — but it was only attaching signals to pitcher prop legs, not to hitter legs facing pitchers. Always verify which legs a function actually processes.
+8. **Shadow pipeline must have outcome resolution.** Shadow scoring data without resolved outcomes is completely unvalidatable. Resolution must be wired to shadow tables from day one.
+9. **Resolution bugs compound quickly.** The `id=NULL` issue in the enriched table caused 1,240 rows to silently not update despite reporting success. Always verify rowcount after bulk updates.
+10. **stat-name-based routing is fragile.** Using `stat in _PITCHER_STATS` to detect pitcher props caused all batter strikeout legs to be misrouted. Position is the authoritative discriminator for prop type.
+11. **API defaults can silently corrupt logic.** `batting.get("plateAppearances", 0)` looks safe but causes false-voids when API returns empty dict. Use `is not None` guards for boolean conditions.
 
 ---
 
 ## Future Considerations
 
-### **1. EV Gate for Parlay Selection**
-Several legs in June 1 parlays show negative EV (`ev_per_unit < 0`). The composite score selects by coverage/consistency, not EV. After 30+ days of data on the new system, evaluate whether adding a minimum EV threshold (-5% or better) improves parlay quality without over-restricting the pool.
+### **1. ERA Rank Re-Evaluation (June 12+)**
+With 192 qualified starters now ranked, re-run ERA tier win rate analysis on shadow data. If ace ERA (rank ≤8) correlates with lower hit over win rates (as theoretically expected), add ERA rank back to enriched scorer for hits props.
 
-### **2. Promote Enriched to Production**
-After 5-7 days of shadow data with all 3 remaining signals confirms enriched scoring improves win rates vs production. Target: June 8-10 comparison analysis.
+### **2. K9 Rank Validation for Strikeout Props**
+First clean measurement of K9 rank signal effectiveness. Before Session 5, Bug 1 meant `pitcher_k9` was NULL for all strikeout legs — K9 signal never fired. After June 5, collect 2+ weeks of outcome data and run K9 tier win rate analysis.
 
-### **3. `hits under 0.5` Validation**
-Only 24 appearances above 65% coverage in 60-day dataset. Included with 70% gate but not trusted. Re-evaluate after 100+ appearances in the new system.
+### **3. Hits Under Investigation**
+0 hits under legs in today's pool. Either the 70% coverage gate is too strict for this prop or there simply aren't enough qualifying legs on typical slates. Re-evaluate after 2 weeks.
 
-### **4. `walks over 0.5` Monitoring**
-63% win rate at 60-64% coverage (66 appearances). Promising but insufficient sample. Monitor passively — if it reaches 200+ appearances with sustained win rate, add to whitelist.
+### **4. Promote Enriched to Production**
+After 7-day shadow comparison confirms enriched scoring improves win rates vs production. Target: June 12-15 comparison analysis.
 
-### **5. Health Check Threshold Update**
-Current health check flags `hit rate > 58%` as anomalous. With the new prop set (65%+ coverage gate, validated 67-75% win rates), the expected range should be updated to 63-75%. Low priority but causes misleading log warnings.
+### **5. Learning Loop**
+Once 500+ resolved legs exist under the new prop set and scoring system, run regression on coverage signals vs outcomes. Recalibrate signal weights from data rather than principled priors.
 
 ### **6. Gate 3 — Minimum `coverage_recent_10` Floor**
-Block legs where `coverage_recent_10 < 50%` regardless of `coverage_overall`. Prevents cold-streak legs sneaking through on strong season averages. Deferred — accumulate data on consistency signal effectiveness first.
-
-### **7. Learning Loop**
-Once 500+ resolved legs exist under the new prop set and scoring system, run regression on `coverage_overall`, `coverage_vs_hand`, `coverage_recent_10`, `pitcher_k9`, `lineup_consistency` vs actual outcomes. Recalibrate signal weights from data rather than principled priors.
+Block legs where `coverage_recent_10 < 50%` regardless of `coverage_overall`. Prevents cold-streak legs from sneaking through on strong season averages. Deferred — validate consistency signal effectiveness first.
 
 ---
 
-**Architecture Status:** ✅ STABLE — Single Pool + Validated Prop Whitelist
-**Last Major Change:** June 1, 2026 (Single flat pool, prop whitelist, EEP fix)
-**Next Architecture Review:** June 2026 (After shadow comparison analysis + 30 days of outcome data)
+**Architecture Status:** ✅ STABLE — Full Signal Pipeline Operational
+**Last Major Change:** June 5, 2026 (Pitcher signal pipeline fixes, parlay builder sort order)
+**Next Architecture Review:** June 2026 (After ERA rank revalidation + shadow comparison)
