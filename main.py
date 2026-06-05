@@ -776,6 +776,48 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
             avg = sum(stat_scores) / len(stat_scores)
             print(f"[main]   {stat}: {len(stat_scores)} legs, avg score {avg:.1f}")
 
+    # ── Manual regen: exclude players from most recent prior run today ────────────
+    excluded_players: set[str] = set()
+    if source == "manual":
+        try:
+            from src.utils.db import get_conn
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT DISTINCT l.player_name
+                FROM mlb_parlay_legs_v2 l
+                JOIN mlb_parlay_recommendations_v2 p ON p.id = l.parlay_id
+                WHERE p.run_date = CURRENT_DATE
+                  AND p.batch_id = (
+                      SELECT batch_id
+                      FROM mlb_parlay_recommendations_v2
+                      WHERE run_date = CURRENT_DATE
+                      ORDER BY created_at DESC
+                      LIMIT 1
+                  )
+            """)
+            excluded_players = {row[0] for row in cur.fetchall()}
+            cur.close()
+            conn.close()
+            if excluded_players:
+                print(f"[manual_regen] Excluding {len(excluded_players)} players from last run: {sorted(excluded_players)}")
+        except Exception as _excl_err:
+            print(f"[manual_regen] Could not fetch exclusion list (non-fatal): {_excl_err}")
+            excluded_players = set()
+
+    # Apply exclusion to qualifying_legs, with fallback if pool goes too thin
+    if excluded_players:
+        preferred_legs = [l for l in qualifying_legs if l.get("player_name") not in excluded_players]
+        # Need at least 4 legs to build any parlay
+        if len(preferred_legs) >= 4:
+            print(f"[manual_regen] Pool after exclusion: {len(preferred_legs)} legs (was {len(qualifying_legs)})")
+            qualifying_legs = preferred_legs
+        else:
+            print(
+                f"[manual_regen] Pool too thin after exclusion "
+                f"({len(preferred_legs)} legs) — falling back to full pool of {len(qualifying_legs)}"
+            )
+
     # ── Step 8: Build Hybrid Parlays ──────────────────────────────────────────
     tier_info  = _tier_params(len(schedule))
     tier_label = f"Tier {tier_info['tier']}" if tier_info else "Tier 4 (thin slate)"
