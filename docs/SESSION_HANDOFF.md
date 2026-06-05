@@ -1,97 +1,88 @@
 # MLB Parlay Agent — Session Handoff
-**Last Updated:** June 1, 2026 (Session 4 — Performance Diagnosis + Full System Refactor)
+**Last Updated:** June 5, 2026 (Session 5 — Full System Diagnostic + Signal Pipeline Fixes)
 
 ## Current Status
-✅ **OPERATIONAL — SESSION 4 DEPLOYED**
-✅ **EEP false-void bug fixed and backfilled (May 29–June 1)**
-✅ **Prop whitelist narrowed to hits o/u 0.5 + SO over 0.5 (hitter only)**
-✅ **Anchor/swing system eliminated — single flat pool**
-✅ **4-leg parlays, +400 to +700 target**
-✅ **-250 odds cap**
-✅ **3 production parlays built on June 1 (+613, +447, +419)**
-✅ **Shadow pipeline producing 4 parlays independently**
-✅ **Training data preserved and logging**
+✅ **OPERATIONAL — SESSION 5 DEPLOYED**
+✅ **Bug 1 fixed: batter strikeout legs now fully enriched (pitcher_era, pitcher_k9, pitcher_hand)**
+✅ **Pitcher IP threshold fixed: 192 qualified starters ranked (was ~20-25)**
+✅ **Opposing pitcher rank signals now attached to ALL hitter legs (era_rank, k9_rank, whip_rank)**
+✅ **simple_scorer K9 rank signal now firing for batter strikeout props**
+✅ **Enriched scorer signal corrections deployed (base signal, ERA removal, K9 rank)**
+✅ **Parlay builder: score-sort + MAX_CANDIDATES 50 deployed**
+✅ **Shadow pipeline resolution backfilled (1,240 rows) and wired up ongoing**
+✅ **All changes committed and pushed**
 
 ---
 
-## What Happened on June 1, 2026
+## What Happened on June 5, 2026
 
-### EEP Bug Fix (Morning)
-- Diagnosed Early Exit Protection false-void bug: `plateAppearances` and `battersFaced` defaulting to `0` when `boxscore_data()` returned empty stats dict, voiding every batter leg
-- Fixed in `src/tracker/parlay_outcome_resolver.py`: both EEP checks now use `is not None` guard
-- Also fixed `all_resolved` dead code: `game_not_found` path now defers parlay instead of voiding leg
-- Backfilled May 29–June 1: 43 void parlays re-resolved → 3 won (May 30: 2, May 31: 1), rest correctly marked lost
-- Commit: `928b6c6`
+### Full System Diagnostic
+Conducted a complete end-to-end audit of the pipeline, scoring system, and parlay builder. Key findings:
 
-### Performance Diagnosis
-Ran full 60-day data analysis across all prop types. Key findings:
-- **Coverage IS predictive** for `hits over 0.5` (50% → 75% win rate across coverage buckets) and `SO over 0.5` (41% → 91%)
-- **Coverage is NOT predictive** for `totalBases under 1.5` (flat 57-63% at all coverage levels) and `rbi under 0.5` (flat 67-77% — book prices away the edge, avg odds -280 to -348)
-- **Pitcher SO** — coverage_overall missing for 55%+ of legs, win rates 30-52% across all lines. Cut entirely.
-- **Parlay-level finding:** Higher coverage parlays NOT winning more (75-79% coverage bucket wins 5.0% vs 65-69% at 8.1%). Coverage alone is insufficient for parlay selection.
-- **Hits under 0.5:** Only 24 appearances above 65% coverage — too thin to rely on
-- **RBI under:** Flat signal, book prices it at -270 to -348. No edge at any coverage level.
+**Whitelist:** Confirmed working correctly in `main.py`. Historical pre-June-1 data (rbi under, totalBases) was causing confusion in performance queries — those props are correctly blocked in the current system.
 
-### Full System Refactor (Afternoon)
-Three commits deployed:
+**Shadow pipeline resolution:** `mlb_scored_legs_enriched.result` was NULL for all 1,240 rows across 10 days. Backfilled via bulk SQL UPDATE joining on `(player_name, stat, direction, run_date, line)`. Morning resolver now writes outcomes to shadow table after every production resolution.
 
-**Commit `885a4a7` — Prop whitelist + 3-leg parlays:**
-- `ALLOWED_PROPS` whitelist: only `hits over 0.5`, `hits under 0.5`, `strikeouts over 0.5` (hitter)
-- 3-leg parlays, +300 to +550 target
-- Hard -200 odds cap
-- Removed: totalBases, rbi, walks, pitcher SO, homeRuns, stolenBases
-- Removed dead signals: pitcher ERA block, pitcher K9 branch, `calculate_pitcher_k_coverage()`, team SO signal (Signal 4)
-- Shadow pipeline aligned: Signal 4 removed, Signals 1-3 retained
+**Bug 1 — `strikeouts` in `_PITCHER_STATS` in `enrich_legs.py`:** Every batter strikeout leg was hitting the pitcher prop branch due to `stat in _PITCHER_STATS`. Fixed to `is_pitcher_prop_leg = position in ("SP", "RP", "P")`. Now `pitcher_era`, `pitcher_k9`, `pitcher_hand` populate correctly for batter SO legs.
 
-**Commit `351ec61` — Anchor floor fix:**
-- Lowered anchor floor from 75% to 65% — upstream gate already enforces 65%
-- ANCHOR_MAX_ODDS: -150 → -130
-- SWING_MIN_ODDS: -150 → -129 (closed dead zone between pools)
+**Pitcher IP threshold:** `pitcher_stats.py` was using `ip < 50` season total filter, excluding Ohtani, Cole, Harrison, Arrighetti and other elite starters with <50 IP. Fixed to per-start filter: 3+ starts, 3.0+ IP/start. Ranked pool went from ~20-25 to 192 qualified starters.
 
-**Commit `1ebbb24` — Single flat pool + 4-leg parlays:**
-- Eliminated anchor/swing two-pool system entirely
-- Single pool: 65% coverage, odds -250 to +150
-- 4-leg parlays, +400 to +700 target
-- `build_parlays()` replaces `build_hybrid_parlays()` (kept as backward-compat wrapper)
-- `_find_qualifying_legs()` returns single `list[dict]` instead of tuple
-- 238 lines removed from parlay_builder.py
-- Shadow pipeline updated: `build_hybrid_parlays(enriched_legs, [], ...)`
+**`_attach_pitcher_rank_signals()` skipping hitter legs:** `main.py` was only attaching `era_rank`, `k9_rank`, `whip_rank` to pitcher prop legs. All hitter legs were skipped entirely. Fixed to attach `opp_pitcher_era_rank`, `opp_pitcher_k9_rank`, `opp_pitcher_whip_rank` to hitter legs via `opposing_pitcher_id`.
+
+**`simple_scorer.py` K9 signal:** Was reading raw `pitcher_k9` float with hardcoded thresholds (10.0/7.0). Updated to use `opp_pitcher_k9_rank` (ranked signal) with raw `pitcher_k9` as fallback. Unit test confirmed: elite K pitcher (rank 5) = 75, weak K pitcher (rank 25) = 65, no rank = 70.
+
+**Parlay builder sort order:** Was sorting pool by decimal odds descending for B&B pruning. This caused low-quality, cheap-odds legs (Oneil Cruz score 59) to be explored before high-quality expensive legs (Waldschmidt score 78). Fixed to sort by `composite_score` descending. B&B pruning bounds fixed via `suffix_dec_sorted` precomputation to remain valid under any sort order.
+
+**MAX_CANDIDATES:** Raised from 15 to 50. Builder now finds 50 valid combinations before stopping, giving `avg_composite` selector meaningful differentiation instead of 15 near-identical combinations.
+
+**`coverage_vs_hand` validation:** Confirmed calculating correctly (values vary by pitcher hand per player). However produces values within 0.5 points of `coverage_overall` on average, with identical win rates (62.0% with vs 62.3% without). Retained as delta adjustment (30% weight, ±3 cap) in enriched scorer rather than base replacement.
+
+**ERA rank signal:** Validated on shadow data. ERA rank was directionally unreliable for hits props due to 50 IP threshold contaminating the ranking pool. With IP threshold fixed, ERA signal needs re-evaluation after 1-2 weeks of clean data. Removed from enriched scorer scoring (still computed and stored for analysis).
+
+**Park factor signal:** Validated as strongest enriched signal — 30-point win rate spread between pitcher parks (40%) and hitter parks (70%) for hits over. Retained as-is.
+
+### Commits This Session
+- `1ab63c2` — pitcher IP threshold, enrich_legs Bug1, enriched scorer signal corrections, parlay builder score-sort + MAX_CANDIDATES 50
+- `e67896e` — attach opp pitcher rank signals to hitter legs, use k9_rank for SO scoring in simple_scorer
 
 ---
 
 ## Pending Items — Next Session
 
-### 1. Monitor June 2 Morning Resolution (Manual — 9 AM)
-First morning resolution after EEP fix goes live on a full day's worth of new parlays. Verify:
-```sql
-SELECT void_reason, COUNT(*)
-FROM mlb_parlay_legs_v2
-WHERE outcome = 'void'
-  AND created_at >= NOW() - INTERVAL '24 hours'
-GROUP BY void_reason;
-```
-Should see 0 or very few `early_exit_protection` voids. Any that appear should be genuine (player removed before facing 5 batters / recording 2 PAs).
+### 1. Verify Tomorrow Morning's 9 AM Pipeline (Manual — 9 AM)
+First full pipeline run with all Session 5 fixes. Check Railway logs for:
+- `[pitcher_stats] Ranked 192 qualified starters` — confirms IP threshold active
+- Batter strikeout legs now show `pitcher_era` and `pitcher_k9` populated in enrich_legs sample log
+- Score distribution shows meaningful spread for strikeout legs (not uniform 68-70)
+- Parlay compositions lead with high-scoring legs
 
-### 2. Monitor Parlay Win Rates on New Prop Set (Ongoing)
-First clean data under the new system starts June 1. Check after 7 days:
+Run this after 9 AM to confirm K9 rank is flowing into scores:
 ```sql
 SELECT
-    run_date,
-    COUNT(*) FILTER (WHERE outcome IN ('won','lost')) as resolved,
-    COUNT(*) FILTER (WHERE outcome = 'won') as won,
-    (COUNT(*) FILTER (WHERE outcome = 'won') * 100.0 /
-     NULLIF(COUNT(*) FILTER (WHERE outcome IN ('won','lost')), 0))::numeric(5,1) as win_rate
-FROM mlb_parlay_recommendations_v2
-WHERE run_date >= '2026-06-01'
-GROUP BY run_date
-ORDER BY run_date;
+    player_name,
+    stat,
+    pitcher_name,
+    pitcher_k9,
+    coverage_overall,
+    composite_score
+FROM mlb_scored_legs
+WHERE run_date = (CURRENT_DATE)::text
+  AND stat = 'strikeouts'
+  AND line = 0.5
+  AND position NOT IN ('SP','RP','P')
+ORDER BY composite_score DESC
+LIMIT 15;
 ```
+Expect meaningful score spread based on opposing pitcher K9 rank.
 
-### 3. Negative EV Legs in Parlay Selection (Discuss)
-Several legs in today's parlays show negative EV (e.g. Spencer Steer hits over -205 at EV=-17.2%). The composite score selects by coverage/consistency, not EV. Consider whether a minimum EV threshold should gate parlay selection — but don't implement until 7+ days of outcome data on the new system.
+### 2. ERA Rank Signal Re-Evaluation (June 12+)
+With the IP threshold fixed, ERA rank will now correctly identify elite starters. After 7+ days of clean data:
+- Re-run ERA tier win rate analysis on `mlb_scored_legs_enriched`
+- Determine whether to add ERA rank back as a scoring adjustment in enriched scorer
+- Check directional correctness: do hits over legs actually win less often vs true aces (low ERA rank)?
 
-### 4. Shadow vs Production Comparison (June 8+)
-Shadow pipeline now fully aligned with new prop set and single pool. After 7 days:
+### 3. Shadow vs Production Comparison (June 12+)
+After 7 days of clean data under Session 5 changes:
 ```sql
 SELECT
     'production' as pipeline,
@@ -100,7 +91,7 @@ SELECT
     (COUNT(*) FILTER (WHERE outcome = 'won') * 100.0 /
      NULLIF(COUNT(*) FILTER (WHERE outcome IN ('won','lost')), 0))::numeric(5,1) as win_rate
 FROM mlb_parlay_recommendations_v2
-WHERE run_date >= '2026-06-01'
+WHERE run_date >= '2026-06-05'
 UNION ALL
 SELECT
     'shadow' as pipeline,
@@ -109,66 +100,66 @@ SELECT
     (COUNT(*) FILTER (WHERE outcome = 'won') * 100.0 /
      NULLIF(COUNT(*) FILTER (WHERE outcome IN ('won','lost')), 0))::numeric(5,1) as win_rate
 FROM mlb_parlay_recommendations_enriched
-WHERE run_date >= '2026-06-01';
+WHERE run_date >= '2026-06-05';
 ```
 
-### 5. Health Check Alerts (Low Priority)
-Two persistent health warnings in logs:
-- `RESOLVER FAILURE: 254 props unresolved (>40%) for 2026-04-02` — stale April data, not affecting current operation
-- `HIT RATE HIGH: 64.9% over last 7 days` — this is expected and correct given the 65%+ coverage gate. The health check threshold (40-58%) was calibrated for the old system. Update the expected range to 63-72% to match the new prop set.
+### 4. Hits Under 0 Appearances in Pool
+Today's pool showed `0 unders` reaching the builder. This reduces pool diversity and makes hitting the +400-+700 odds window harder. Investigate whether hits under legs are being blocked upstream (coverage gate too strict at 70%) or whether there simply aren't enough qualifying legs on typical slates.
 
-### 6. `won_with_void` Outcome Tracking (Low Priority)
-Still not implemented. Parlays that win after a void leg are marked `won` same as clean wins. Deferred.
+### 5. Negative EV Legs in Parlay Selection
+Several legs in recent parlays show negative EV (e.g. Alex Bregman -244 at EV=-20.9%). The scorer selects by coverage/consistency, not EV. After 30+ days of outcome data on the new system, evaluate whether a minimum EV gate improves parlay quality.
 
-### 7. Dead ERA Adjustment Cleanup in simple_scorer.py (Low Priority)
-`opponent_adjustment` returns 0 for 100% of legs — the ERA/pitcher adjustment block still exists but never fires. Remove in a future cleanup session.
+### 6. Update `supabase-query-builder` SKILL.md
+Add anti-pattern: `ORDER BY` before `UNION ALL` causes syntax error. Use single `ORDER BY` at the end, or combine date ranges with `WHERE ... OR ...` on the same table.
 
----
+### 7. Health Check Threshold Update (Low Priority)
+Health check flags hit rate >58% as anomalous. With 65%+ coverage gate, expected range is 63-75%. Update threshold to avoid misleading log warnings.
 
-## Key Data Points from Today
+### 8. Dead ERA Adjustment Cleanup in `simple_scorer.py` (Low Priority)
+The raw `pitcher_era` block for hits props still exists but was validated as directionally unreliable. Remove after ERA rank signal is re-validated with clean data.
 
-- 60-day analysis: `hits over 0.5` at 75-79% coverage wins 75.4% (1,199 appearances). `SO over 0.5` at 75-79% wins 73.7% (133 appearances).
-- Parlay-level win rate across all coverage buckets: 5-8% regardless of avg_coverage — coverage alone insufficient
-- RBI under avg odds at 85%+ coverage: -348 (breakeven 77.7%, actual win rate 77.0% — underwater)
-- TB under 1.5: flat 57-63% win rate across ALL coverage buckets with 1,000+ appearances
-- June 1 production parlays: +613, +447, +419 (4-leg each, 12 unique players)
-- June 1 shadow parlays: +631, +529, +426, +402 (4-leg each, 16 unique players)
-- Pool size at -250 cap: ~18-22 eligible legs on typical weekday, 30-45 on full weekend slates
+### 9. `won_with_void` Outcome Tracking (Low Priority)
+Still not implemented.
 
 ---
 
-## Commits Today
-- `928b6c6` — EEP false-void fix + backfill script
-- `885a4a7` — Prop whitelist, 3-leg +300-+550, remove dead signals
-- `351ec61` — Anchor floor 65%, odds boundary fix
-- `1ebbb24` — Single flat pool, 4-leg +400-+700, -250 cap, remove anchor/swing
+## Key Data Findings From Today
+
+- `coverage_vs_hand` produces values within 0.5 points of `coverage_overall` on average; win rates identical (62.0% vs 62.3%) — retained as ±3 delta adjustment only
+- Park factor: strongest validated signal — 40% win rate in pitcher parks vs 70% in hitter parks for hits over
+- ERA rank: unreliable until IP threshold fix; needs re-evaluation with clean data
+- K9 rank: correct signal for batter strikeout props; unit test confirms 10-point spread elite vs weak
+- Parlay builder sort fix: Waldschmidt (78), Rice (76.8), Turner (76.6) now leading parlays vs Cruz (59), Andujar (59) before fix
+- Shadow resolution: 1,240 rows backfilled; ongoing resolution now wired up
+- Pitcher ranks: 192 qualified (was ~20-25); Ohtani, Cole, Harrison now correctly included
 
 ---
 
 ## System Health Indicators
 
 ### Green Lights
-✅ EEP void bug fixed and backfilled
-✅ 3 production parlays built on first run with new system
-✅ Shadow pipeline producing 4 parlays independently
-✅ Single flat pool working — no anchor/swing starvation
-✅ Training data logging (34 legs logged June 1)
-✅ Coverage gate working: only hits o/u 0.5 and SO over 0.5 reaching builder
-✅ Player diversity constraint working (12 unique players across 3 parlays)
-✅ -250 odds cap recovering previously excluded legs
+✅ Bug 1 fixed — batter SO legs fully enriched
+✅ Pitcher IP threshold fixed — 192 qualified starters
+✅ Opposing pitcher ranks attached to hitter legs
+✅ K9 rank signal firing in simple_scorer
+✅ Parlay builder score-sort + MAX_CANDIDATES 50
+✅ Shadow resolution backfilled and ongoing
+✅ Park factor signal validated and active
+✅ Enriched scorer corrections deployed
+✅ All changes committed and pushed
 
 ### Yellow Flags
-⚠️ Negative EV legs appearing in parlays (selection by score, not EV)
-⚠️ Health check hit rate threshold stale — needs updating to 63-72%
-⚠️ Only 3 parlays on thin 9-game slate — normal, expect 4-5 on full slates
-⚠️ `hits under 0.5` barely qualifying (70%+ gate, very few legs per day)
+⚠️ ERA rank signal needs re-evaluation with clean data (7+ days post IP-fix)
+⚠️ 0 hits under legs in today's pool — investigate coverage gate
+⚠️ Negative EV legs still appearing in parlays
+⚠️ Health check hit rate threshold stale (flags 63%+ as anomalous)
 
 ### Red Flags
 None currently
 
 ---
 
-**Last Review:** June 1, 2026
-**System Status:** ✅ Operational — Single Pool + Validated Prop Set Live
-**Next Review:** June 2, 2026 (Validate morning resolution + first full-day parlay quality)
-**Pending Code Changes:** won_with_void tracking, health check threshold update, dead ERA cleanup
+**Last Review:** June 5, 2026
+**System Status:** ✅ Operational — Full Signal Pipeline Fixed + Parlay Builder Corrected
+**Next Review:** June 6, 2026 (Validate 9 AM pipeline + K9 rank in scores)
+**Pending Code Changes:** ERA rank re-evaluation, hits under investigation, health check threshold, dead ERA cleanup
