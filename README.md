@@ -1,11 +1,11 @@
 # MLB Parlay Agent 🤖⚾
 
-**Last Updated:** June 5, 2026
-**Status:** ✅ Operational — Full Signal Pipeline Fixed + Parlay Builder Corrected
+**Last Updated:** June 8, 2026
+**Status:** ✅ Operational — Manual Regen Diversity + Full Signal Pipeline
 **Structure:** 4-leg parlays, +400 to +700 target
 **Latest Output:** 2-5 parlays/day (thin slate: 2, full slate: 4-5)
 
-An intelligent MLB parlay recommendation system that analyzes player performance data, calculates direction-aware coverage percentages, and builds optimized 4-leg parlays targeting +400 to +700 combined odds. A shadow enriched pipeline runs alongside production to evaluate additional scoring signals before promotion.
+An intelligent MLB parlay recommendation system that analyzes player performance data, calculates direction-aware coverage percentages, and builds optimized 4-leg parlays targeting +400 to +700 combined odds. A shadow enriched pipeline runs alongside production to evaluate additional scoring signals before promotion. Manual regeneration now excludes players from the prior run to deliver genuinely fresh picks.
 
 ---
 
@@ -13,15 +13,16 @@ An intelligent MLB parlay recommendation system that analyzes player performance
 
 1. **Fetches MLB Props** — Pulls 1,000+ player props daily from SportsGameOdds API
 2. **Prop Whitelist** — Keeps only `hits over 0.5`, `hits under 0.5`, `strikeouts over 0.5` (hitter only)
-3. **Coverage Gate** — 65% minimum `coverage_overall` (70% for hits under); checked before any scoring adjustments
+3. **Coverage Gate** — 65% minimum `coverage_overall` (70% for hits under); checked before scoring
 4. **Odds Cap** — Blocks any leg priced worse than -250; max +150
 5. **Calculates Coverage** — Direction-aware: "How often does this player go OVER/UNDER this line?"
-6. **Attaches Pitcher Signals** — Opposing pitcher ERA rank, K9 rank, WHIP rank attached to all hitter legs
+6. **Attaches Pitcher Signals** — Opposing pitcher ERA rank, K9 rank, WHIP rank on all hitter legs
 7. **Scores with Multi-Signal Scorer** — Coverage + consistency + K9 rank + ERA + lineup stability
 8. **Shadow Scores** — Parallel enriched scorer with park factor, opponent coverage split, blended ERA rank
 9. **Builds 4-Leg Parlays** — Single flat pool, score-sorted B&B search, +400 to +700 target
-10. **Logs Everything** — Production and shadow data to Supabase for tracking and analysis
-11. **Resolves Outcomes** — Updates legs, parlays, and shadow table with win/loss results each morning
+10. **Manual Regen Diversity** — Regenerate Now excludes prior-run players; auto runs use full pool
+11. **Logs Everything** — Production and shadow data to Supabase for tracking and analysis
+12. **Resolves Outcomes** — Updates legs, parlays, and shadow table with win/loss results each morning
 
 ---
 
@@ -35,7 +36,7 @@ Based on 60-day analysis across 90,000+ resolved leg outcomes:
 | **SO over 0.5** (hitter) | 69.0% | -199 | **+7pp** |
 | **hits under 0.5** | 66.7% | -127 | **+10.7pp** |
 
-Coverage IS predictive for hits over and SO over. For everything else (totalBases under, rbi under, pitcher SO), the signal is flat or the book has already priced it away.
+Coverage IS predictive for hits over and SO over. For everything else (totalBases under, rbi under, pitcher SO), the signal is flat or the book has priced it away.
 
 ---
 
@@ -50,32 +51,45 @@ Coverage IS predictive for hits over and SO over. For everything else (totalBase
 | Legs per parlay | 4 |
 | Target combined odds | +400 to +700 |
 | Max legs per game | 2 |
-| Player diversity | 1 player per parlay, 1 per batch |
+| Player diversity (intra) | 1 player per parlay |
+| Player diversity (manual regen) | Excludes prior-run players |
 
 ### **Score-Sorted Parlay Builder (June 5, 2026)**
 
-Pool is sorted by `composite_score` descending before the branch-and-bound search. The B&B explores the highest-quality legs first. `MAX_CANDIDATES = 50` ensures the search explores enough of the pool to find diverse combinations. B&B pruning bounds use `suffix_dec_sorted` to remain valid under any sort order.
+Pool sorted by `composite_score` DESC before branch-and-bound search. Highest-quality legs explored first. `MAX_CANDIDATES = 50` ensures meaningful pool exploration. B&B pruning via `suffix_dec_sorted` valid under any sort order.
 
-**Why this matters:** Previously the pool was sorted by odds for pruning efficiency. This caused cheap-odds, low-quality legs to be explored before expensive-odds, high-quality legs. Oneil Cruz (score 59, -148 odds) was explored before Ryan Waldschmidt (score 78, -176 odds). Fixed.
+### **Manual Regen Player Exclusion (June 8, 2026)**
+
+When you hit **Regenerate Now**, the pipeline queries the most recent batch's players and removes them from the eligible pool before building parlays. This ensures each press of Regenerate returns a genuinely different set of picks.
+
+```
+Press Regenerate (run 1) → full pool → picks players A, B, C, D, E
+Press Regenerate (run 2) → excludes A, B, C, D, E → picks from remaining pool
+Press Regenerate (run 3) → excludes run 2's players → picks from remaining pool
+```
+
+Fallback: if fewer than 4 legs remain after exclusion, the full pool is used (logged as `[manual_regen] Pool too thin`).
+
+Automated pipeline runs (9am, 12pm, 5:30pm) are unaffected — they always use the full eligible pool.
 
 ---
 
 ### **Pitcher Signal Pipeline (June 5, 2026)**
 
-All hitter legs now receive opposing pitcher rank signals:
+All hitter legs receive opposing pitcher rank signals:
 
 ```
-get_pitcher_ranks(season)          → 192 qualified starters (3+ starts, 3.0+ IP/start)
+get_pitcher_ranks(season)           → 192 qualified starters (3+ starts, 3.0+ IP/start)
     ↓
-_attach_pitcher_rank_signals()     → attaches opp_pitcher_era_rank, opp_pitcher_k9_rank,
-                                     opp_pitcher_whip_rank to ALL hitter legs
+_attach_pitcher_rank_signals()      → attaches opp_pitcher_era_rank, opp_pitcher_k9_rank,
+                                      opp_pitcher_whip_rank to ALL hitter legs
     ↓
-simple_scorer.calculate_score()    → uses opp_pitcher_k9_rank for SO props (±5)
-                                     uses pitcher_era for hits props (±5)
+simple_scorer.calculate_score()     → uses opp_pitcher_k9_rank for SO props (±5)
+                                      uses pitcher_era for hits props (±5)
 ```
 
 **Previously broken (fixed June 5):**
-- Batter strikeout legs were classified as pitcher props due to `stat in _PITCHER_STATS`, receiving NULL pitcher data
+- Batter strikeout legs classified as pitcher props due to `stat in _PITCHER_STATS` → NULL pitcher data
 - `_attach_pitcher_rank_signals()` only processed pitcher prop legs, skipping all hitter legs
 - IP threshold of 50 innings excluded Ohtani, Cole, Harrison from ranking pool
 
@@ -90,7 +104,7 @@ simple_scorer.calculate_score()    → uses opp_pitcher_k9_rank for SO props (±
 ```
 
 `coverage_overall` = always the base signal and gate signal.
-`coverage_vs_hand` = delta adjustment at 30% weight, capped ±3 points. Validated: produces values within 0.5 points of overall, identical win rates with vs without.
+`coverage_vs_hand` = delta adjustment at 30% weight, capped ±3 points.
 
 ---
 
@@ -111,13 +125,13 @@ else:            adj =  0   # neutral
 
 ### **Shadow Enriched Pipeline (3 Signals Active)**
 
-Runs after every production pipeline. Writes to separate shadow tables for A/B comparison. Resolution now wired up — shadow outcomes updated after every morning resolution.
+Runs after every production pipeline. Writes to separate shadow tables for A/B comparison. Resolution wired — shadow outcomes updated after every morning resolution.
 
-**Signal 1 — Blended ERA Rank:** Season ERA rank (50%) + pitcher's last-3-start ERA rank (50%). Computed and stored on all hits legs. NOT applied to score pending revalidation after pitcher IP fix.
+**Signal 1 — Blended ERA Rank:** Season ERA rank × 0.5 + last-3-start ERA rank × 0.5. Computed and stored. NOT applied to score pending revalidation after pitcher IP fix.
 
 **Signal 2 — Opponent-Specific Coverage:** Batter's hit rate vs tonight's specific opponent (min 3 games, 25% delta, ±8 cap). ~20-35% population rate early season.
 
-**Signal 3 — Ballpark Factor:** 30-row `ballpark_factors` static table (Coors 115 → Petco 94). Validated: 30-point win rate spread between pitcher parks (40%) and hitter parks (70%). Strongest validated enriched signal.
+**Signal 3 — Ballpark Factor:** 30-row `ballpark_factors` static table. Validated: 30-point win rate spread between pitcher parks (40%) and hitter parks (70%). Strongest validated enriched signal.
 
 ---
 
@@ -125,7 +139,7 @@ Runs after every production pipeline. Writes to separate shadow tables for A/B c
 - **9 AM ET:** Resolution + fetch/score/build (shadow runs after)
 - **12 PM ET:** Fresh props refresh (shadow runs after)
 - **5:30 PM ET:** Final refresh before games (shadow runs after)
-- **Manual:** Regenerate button in web UI
+- **Manual Regenerate:** Excludes prior-run players; shadow runs after
 
 ---
 
@@ -223,6 +237,7 @@ mlb-agent/
 ## 🚦 System Status
 
 ### **✅ Working Well**
+- Manual regen player exclusion with fallback
 - Full pitcher signal pipeline (IP fix + Bug 1 fix + rank attachment to hitter legs)
 - K9 rank signal for batter strikeout props
 - Score-sorted parlay builder with MAX_CANDIDATES 50
@@ -232,50 +247,48 @@ mlb-agent/
 - Direction-aware coverage calculation
 - Consistency signal
 - Park factor signal (validated — 30pp spread)
-- Shadow enriched pipeline (3 signals, resolution now wired)
-- EEP false-void bug fixed
-- Player diversity constraint
+- Shadow enriched pipeline (3 signals, resolution wired)
+- Player diversity constraint (intra-parlay)
 - Pipeline scheduler (3× daily)
 - Morning resolution correct for both prod and shadow
 
 ### **📊 Under Evaluation**
-- ERA rank signal for hits props (needs 7+ days clean data post IP-fix)
-- K9 rank signal for SO props (first clean measurement after Bug 1 fix)
+- ERA rank signal for hits props (7+ days clean data post IP-fix)
+- K9 rank signal for SO props (first clean measurement post Bug 1 fix)
 - Shadow vs production comparison (target June 12+)
-- `hits under 0.5` viability (0 legs in today's pool — investigate)
+- Manual regen fallback threshold (monitor `[manual_regen] Pool too thin` logs)
 
 ### **⚠️ Known Issues / Pending**
-- Health check hit rate threshold stale (flags 65%+ as anomalous — expected with new gate)
+- ~60% of SO legs missing pitcher enrichment (NaN pitcher_name)
+- No lineup confirmation gate — Volpe-style voids still possible
+- `hits under 0.5`: 0 legs in recent pools — investigate coverage gate
+- Health check hit rate threshold stale (flags 65%+ as anomalous)
 - Negative EV legs appearing in parlays (selection by score, not EV)
 - `won_with_void` outcome not tracked separately
-- Raw `pitcher_era` adjustment in `simple_scorer.py` hits props — pending revalidation
+- Raw `pitcher_era` adjustment in `simple_scorer.py` pending revalidation
 
 ---
 
 ## 🔄 Recent Changes
 
+### **June 8, 2026: Manual Regen Player Exclusion** (`cd52b3a`)
+- `run_pipeline()` in `main.py`: when `source == "manual"`, queries most recent batch's player names and filters them from `qualifying_legs` before `build_parlays()`
+- Fallback: full pool used if fewer than 4 legs remain after exclusion
+- Automated pipeline runs unaffected
+
 ### **June 5, 2026: Opposing Pitcher Ranks → Hitter Legs + K9 Rank in Scorer** (`e67896e`)
-- `_attach_pitcher_rank_signals()` now attaches `opp_pitcher_era_rank`, `opp_pitcher_k9_rank`, `opp_pitcher_whip_rank` to all hitter legs
-- `simple_scorer.py` batter SO props use `opp_pitcher_k9_rank` (±5) with raw K9 fallback
-- Unit test: 75 (elite K9) > 70 (no rank) > 65 (weak K9) ✅
+- `_attach_pitcher_rank_signals()` attaches `opp_pitcher_era_rank`, `opp_pitcher_k9_rank`, `opp_pitcher_whip_rank` to all hitter legs
+- `simple_scorer.py` batter SO props use `opp_pitcher_k9_rank` (±5)
 
 ### **June 5, 2026: Full Signal Pipeline + Parlay Builder Corrections** (`1ab63c2`)
 - Pitcher IP threshold: 50 IP → per-start (3+ starts, 3.0 IP/start) — pool 20-25 → 192
-- Bug 1: batter SO legs now fully enriched (pitcher_era, pitcher_k9, pitcher_hand)
-- Enriched scorer: base signal standardized, +3 bonus removed, ERA scoring removed, K9 rank added
+- Bug 1: batter SO legs now fully enriched
+- Enriched scorer: base signal standardized, +3 bonus removed, ERA removed, K9 rank added
 - Parlay builder: score-sort + MAX_CANDIDATES 50 + suffix_dec_sorted pruning fix
 
 ### **June 5, 2026: Shadow Resolution Backfill**
 - 1,240 rows backfilled via bulk SQL UPDATE
 - Morning resolver now writes to `mlb_scored_legs_enriched` ongoing
-
-### **June 1, 2026: Single Flat Pool + 4-Leg Parlays** (`1ebbb24`)
-- Eliminated anchor/swing two-pool system
-- 4-leg parlays, +400 to +700, -250 odds cap
-
-### **June 1, 2026: EEP False-Void Fix** (`928b6c6`)
-- `plateAppearances` and `battersFaced` use `is not None` guard
-- Backfilled May 29–June 1
 
 ---
 
@@ -292,13 +305,15 @@ FROM mlb_parlay_recommendations_v2
 WHERE run_date >= CURRENT_DATE - 7
 GROUP BY run_date ORDER BY run_date DESC;
 
--- Strikeout leg score spread (validate K9 rank signal)
-SELECT player_name, stat, pitcher_name, pitcher_k9, coverage_overall, composite_score
+-- SO enrichment rate (how many legs have pitcher data)
+SELECT
+    COUNT(*) as total_so_legs,
+    COUNT(pitcher_name) as with_pitcher,
+    (COUNT(pitcher_name) * 100.0 / COUNT(*))::numeric(5,1) as pct_enriched
 FROM mlb_scored_legs
 WHERE run_date = (CURRENT_DATE)::text
   AND stat = 'strikeouts' AND line = 0.5
-  AND position NOT IN ('SP','RP','P')
-ORDER BY composite_score DESC;
+  AND position NOT IN ('SP','RP','P');
 
 -- Shadow vs production comparison
 SELECT 'production' as pipeline,
@@ -315,26 +330,13 @@ SELECT 'shadow' as pipeline,
      NULLIF(COUNT(*) FILTER (WHERE outcome IN ('won','lost')), 0))::numeric(5,1) as win_rate
 FROM mlb_parlay_recommendations_enriched WHERE run_date >= '2026-06-05';
 
--- Coverage bucket performance (signal validation)
-SELECT stat, direction,
-    CASE WHEN coverage_overall < 65 THEN '< 65%'
-         WHEN coverage_overall < 70 THEN '65-69%'
-         WHEN coverage_overall < 75 THEN '70-74%'
-         WHEN coverage_overall < 80 THEN '75-79%'
-         ELSE '80%+' END as coverage_bucket,
-    COUNT(*) FILTER (WHERE result IN ('won','lost')) as appearances,
-    (COUNT(*) FILTER (WHERE result = 'won') * 100.0 /
-     NULLIF(COUNT(*) FILTER (WHERE result IN ('won','lost')), 0))::numeric(5,1) as win_rate
-FROM mlb_scored_legs
-WHERE result IN ('won','lost') AND coverage_overall IS NOT NULL
-  AND stat IN ('hits','strikeouts') AND line = 0.5
-GROUP BY stat, direction, coverage_bucket
-HAVING COUNT(*) >= 20
-ORDER BY stat, direction, coverage_bucket;
+-- Manual regen exclusion working?
+-- Check Railway logs for: [manual_regen] Excluding N players from last run
+-- Check Railway logs for: [manual_regen] Pool too thin (fallback fired)
 ```
 
 ---
 
-**Last Updated:** June 5, 2026
-**System Status:** ✅ Operational — Full Signal Pipeline Fixed + Score-Sorted Builder Live
-**Next Review:** June 6, 2026 (Morning resolution + K9 rank validation)
+**Last Updated:** June 8, 2026
+**System Status:** ✅ Operational — Manual Regen Diversity + Full Signal Pipeline
+**Next Review:** June 9, 2026 (Monitor exclusion logs + SO enrichment rates)
