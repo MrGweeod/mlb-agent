@@ -25,6 +25,7 @@ MIN_PARLAY_ODDS   = 400
 MAX_PARLAY_ODDS   = 700
 TOTAL_LEGS        = 4
 MIN_COV_POOL      = 65.0
+MIN_COV_POOL_UNDER = 40.0  # Direction-aware floor for under props
 POOL_MIN_ODDS     = -250
 POOL_MAX_ODDS     = 150
 MAX_LEGS_PER_GAME = 2
@@ -79,7 +80,9 @@ def _filter_legs(legs: list) -> list:
 
     for leg in legs:
         score = leg.get("composite_score", 0)
-        if score < MIN_COV_POOL:
+        direction = leg.get("direction", "over").lower()
+        floor = MIN_COV_POOL_UNDER if direction == "under" else MIN_COV_POOL
+        if score < floor:
             low_score_blocked += 1
             continue
         odds = leg.get("best_odds")
