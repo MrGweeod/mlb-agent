@@ -213,10 +213,10 @@ def _save_enriched_parlays(
                     (parlay_id, player_id, player_name, team, stat, line,
                      direction, odds, composite_score, coverage, ev,
                      game_id, opposing_pitcher_id, opposing_pitcher_name,
-                     blended_era_rank, park_adjustment, coverage_vs_opponent,
-                     outcome)
+                     blended_era_rank, park_factor, park_adjustment,
+                     coverage_vs_opponent, outcome)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, 'pending')
+                        %s, %s, %s, %s, %s, %s, %s, 'pending')
                 """,
                 (
                     parlay_id,
@@ -234,6 +234,7 @@ def _save_enriched_parlays(
                     leg.get("opposing_pitcher_id"),
                     leg.get("opposing_pitcher_name"),
                     leg.get("blended_era_rank"),
+                    leg.get("park_factor"),
                     leg.get("park_adjustment"),
                     leg.get("coverage_vs_opponent"),
                 ),

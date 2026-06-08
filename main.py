@@ -327,13 +327,20 @@ def _find_qualifying_legs(
         coverage_overall_raw = coverage.get("coverage_overall") or 0.0
         coverage_pct = coverage.get("coverage_vs_hand") or coverage_overall_raw
 
-        # Gate 1: hard minimum coverage for all props
-        if coverage_overall_raw < 65.0:
+        # Gate 1: direction-aware coverage floor
+        # For overs: standard 65% minimum
+        # For unders: 40% minimum — a hitter going hitless 40%+ of games
+        #   corresponds to roughly a .240 batting average, targeting genuine
+        #   weak hitters. The 65% over gate is structurally impossible for
+        #   unders (no healthy MLB hitter is hitless 65%+ of the time).
+        if direction == "over" and coverage_overall_raw < 65.0:
+            continue
+        if direction == "under" and coverage_overall_raw < 40.0:
             continue
 
-        # Gate 2: hits under requires stricter floor — thin high-coverage sample
+        # Gate 2: hits under requires stricter floor within the under gate
         if stat == "hits" and direction == "under":
-            if coverage_overall_raw < 70.0:
+            if coverage_overall_raw < 40.0:
                 continue
 
         # Single pool check: odds in [-250, +150]

@@ -73,6 +73,22 @@ def calculate_composite_score(leg):
             elif pitcher_era < 3.0: # Ace pitcher
                 score -= 5 if direction == "over" else -5
 
+        # WHIP rank signal for hits props
+        # WHIP directly measures hits+walks per inning — most relevant signal for hits props
+        # Rank 1 (elite, low WHIP) = suppresses hits = bad for over, good for under
+        # Rank 30 (poor, high WHIP) = allows hits = good for over, bad for under
+        whip_rank = leg.get("opp_pitcher_whip_rank")
+        if whip_rank is not None:
+            # Normalize rank 1-30 → adjustment -5 to +5
+            # rank 1 → -5 (elite pitcher, suppresses hits)
+            # rank 15 → 0 (average)
+            # rank 30 → +5 (poor pitcher, allows hits)
+            whip_adj = round((whip_rank - 15.5) / 2.9, 1)
+            whip_adj = max(-5.0, min(5.0, whip_adj))
+            if direction == "under":
+                whip_adj = -whip_adj  # invert: elite WHIP pitcher = good for under
+            score += whip_adj
+
     # For hitter strikeout props: K-rate matters
     if stat == "strikeouts" and direction == "over":
         k9_rank = leg.get("opp_pitcher_k9_rank")

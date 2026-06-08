@@ -104,10 +104,12 @@ def _compute_blended_era_rank(
     try:
         game_log = get_pitcher_game_log(pitcher_id_int, season)
     except Exception:
-        return float(era_rank), None
+        normalized_solo = 1 + (era_rank - 1) * (29.0 / (max(len(pitcher_ranks), 30) - 1))
+        return round(max(1.0, min(30.0, normalized_solo)), 1), None
 
     if not game_log:
-        return float(era_rank), None
+        normalized_solo = 1 + (era_rank - 1) * (29.0 / (max(len(pitcher_ranks), 30) - 1))
+        return round(max(1.0, min(30.0, normalized_solo)), 1), None
 
     # Filter to starts only (gamesStarted == 1 in the stat dict)
     starts = [
@@ -116,7 +118,8 @@ def _compute_blended_era_rank(
     ]
     if not starts:
         # Reliever — no starts, use season ERA rank only (no blending)
-        return float(era_rank), None
+        normalized_solo = 1 + (era_rank - 1) * (29.0 / (max(len(pitcher_ranks), 30) - 1))
+        return round(max(1.0, min(30.0, normalized_solo)), 1), None
 
     # Last 3 starts (game_log is oldest-first so last element = most recent)
     recent = starts[-3:]
@@ -131,8 +134,13 @@ def _compute_blended_era_rank(
     norm = max(0.0, min(1.0, (recent_era - ERA_MIN) / (ERA_MAX - ERA_MIN)))
     recent_era_rank = max(1, min(n, round(1 + norm * (n - 1))))
 
-    blended = (era_rank * 0.5) + (recent_era_rank * 0.5)
-    return blended, recent_era_rank
+    raw_blended = (era_rank * 0.5) + (recent_era_rank * 0.5)
+    # Normalize raw_blended (which is on a 1-N scale where N = pool size,
+    # currently ~192) back to a 1-30 scale so downstream bucket thresholds
+    # (elite ≤10, avg 11-20, weak 21+) are meaningful regardless of pool size.
+    normalized = 1 + (raw_blended - 1) * (29.0 / (n - 1)) if n > 1 else raw_blended
+    blended_normalized = round(max(1.0, min(30.0, normalized)), 1)
+    return blended_normalized, recent_era_rank
 
 
 # ── Signal 2: Opponent-Specific Coverage Split ───────────────────────────────
