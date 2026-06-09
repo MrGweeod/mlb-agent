@@ -789,24 +789,31 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
             from src.utils.db import get_conn
             conn = get_conn()
             cur = conn.cursor()
+            # First: identify the prior batch_id for logging
             cur.execute("""
-                SELECT DISTINCT l.player_name
-                FROM mlb_parlay_legs_v2 l
-                JOIN mlb_parlay_recommendations_v2 p ON p.id = l.parlay_id
-                WHERE p.run_date = CURRENT_DATE
-                  AND p.batch_id = (
-                      SELECT batch_id
-                      FROM mlb_parlay_recommendations_v2
-                      WHERE run_date = CURRENT_DATE
-                      ORDER BY created_at DESC
-                      LIMIT 1
-                  )
+                SELECT batch_id
+                FROM mlb_parlay_recommendations_v2
+                WHERE run_date = CURRENT_DATE
+                ORDER BY created_at DESC
+                LIMIT 1
             """)
-            excluded_players = {row[0] for row in cur.fetchall()}
+            prior_batch_row = cur.fetchone()
+            prior_batch_id = prior_batch_row["batch_id"] if prior_batch_row else None
+            if prior_batch_id:
+                print(f"[manual_regen] Prior batch found: {prior_batch_id}")
+                cur.execute("""
+                    SELECT DISTINCT l.player_name
+                    FROM mlb_parlay_legs_v2 l
+                    JOIN mlb_parlay_recommendations_v2 p ON p.id = l.parlay_id
+                    WHERE p.run_date = CURRENT_DATE
+                      AND p.batch_id = %s
+                """, (prior_batch_id,))
+                excluded_players = {row["player_name"] for row in cur.fetchall() if row["player_name"]}
+                print(f"[manual_regen] Found {len(excluded_players)} player(s) in prior batch: {sorted(excluded_players)}")
+            else:
+                print("[manual_regen] No prior batch found for today — skipping exclusion")
             cur.close()
             conn.close()
-            if excluded_players:
-                print(f"[manual_regen] Excluding {len(excluded_players)} players from last run: {sorted(excluded_players)}")
         except Exception as _excl_err:
             print(f"[manual_regen] Could not fetch exclusion list (non-fatal): {_excl_err}")
             excluded_players = set()
@@ -814,14 +821,19 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
     # Apply exclusion to qualifying_legs, with fallback if pool goes too thin
     if excluded_players:
         preferred_legs = [l for l in qualifying_legs if l.get("player_name") not in excluded_players]
+        legs_excluded = len(qualifying_legs) - len(preferred_legs)
         # Need at least 4 legs to build any parlay
         if len(preferred_legs) >= 4:
-            print(f"[manual_regen] Pool after exclusion: {len(preferred_legs)} legs (was {len(qualifying_legs)})")
+            print(
+                f"[manual_regen] Excluded {legs_excluded} leg(s) — "
+                f"pool: {len(qualifying_legs)} → {len(preferred_legs)}"
+            )
             qualifying_legs = preferred_legs
         else:
             print(
                 f"[manual_regen] Pool too thin after exclusion "
-                f"({len(preferred_legs)} legs) — falling back to full pool of {len(qualifying_legs)}"
+                f"({len(preferred_legs)} legs, excluded {legs_excluded}) — "
+                f"falling back to full pool of {len(qualifying_legs)}"
             )
 
     # ── Step 8: Build Hybrid Parlays ──────────────────────────────────────────
