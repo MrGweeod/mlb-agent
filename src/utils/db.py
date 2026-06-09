@@ -776,7 +776,6 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
             leg.get("coverage_overall"),
             leg.get("coverage_vs_hand"),
             leg.get("coverage_recent_10"),
-            leg.get("coverage_recent_5"),
             leg.get("pitcher_id"),
             leg.get("pitcher_name"),
             leg.get("pitcher_team"),
@@ -785,6 +784,9 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
             leg.get("pitcher_whip"),
             leg.get("batter_hand"),
             leg.get("pitcher_vs_batter_hand_era"),
+            leg.get("opp_pitcher_era_rank") if leg.get("opp_pitcher_era_rank") is not None else leg.get("pitcher_era_rank"),
+            leg.get("opp_pitcher_k9_rank")  if leg.get("opp_pitcher_k9_rank")  is not None else leg.get("pitcher_k9_rank"),
+            leg.get("opp_pitcher_whip_rank") if leg.get("opp_pitcher_whip_rank") is not None else leg.get("pitcher_whip_rank"),
         )
         for leg in legs
         if leg.get("stat") and leg.get("player_name") and leg.get("odd_id")
@@ -802,9 +804,10 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
              opponent_adjustment, position, in_parlay,
              game_pk, player_id, opposing_pitcher_id, logged_at, odd_id,
              game_start_time, pitcher_hand, composite_score,
-             coverage_overall, coverage_vs_hand, coverage_recent_10, coverage_recent_5,
+             coverage_overall, coverage_vs_hand, coverage_recent_10,
              pitcher_id, pitcher_name, pitcher_team, pitcher_era, pitcher_k9, pitcher_whip,
-             batter_hand, pitcher_vs_batter_hand_era)
+             batter_hand, pitcher_vs_batter_hand_era,
+             pitcher_era_rank, pitcher_k9_rank, pitcher_whip_rank)
         VALUES %s
         ON CONFLICT (run_date, odd_id) DO UPDATE
             SET composite_score             = COALESCE(mlb_scored_legs.composite_score,             EXCLUDED.composite_score),
@@ -812,7 +815,6 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
                 coverage_overall            = EXCLUDED.coverage_overall,
                 coverage_vs_hand            = EXCLUDED.coverage_vs_hand,
                 coverage_recent_10          = EXCLUDED.coverage_recent_10,
-                coverage_recent_5           = EXCLUDED.coverage_recent_5,
                 pitcher_id                  = COALESCE(mlb_scored_legs.pitcher_id,                  EXCLUDED.pitcher_id),
                 pitcher_name                = COALESCE(mlb_scored_legs.pitcher_name,                EXCLUDED.pitcher_name),
                 pitcher_team                = COALESCE(mlb_scored_legs.pitcher_team,                EXCLUDED.pitcher_team),
@@ -821,7 +823,10 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
                 pitcher_whip                = COALESCE(mlb_scored_legs.pitcher_whip,                EXCLUDED.pitcher_whip),
                 pitcher_hand                = COALESCE(mlb_scored_legs.pitcher_hand,                EXCLUDED.pitcher_hand),
                 batter_hand                 = COALESCE(mlb_scored_legs.batter_hand,                 EXCLUDED.batter_hand),
-                pitcher_vs_batter_hand_era  = COALESCE(mlb_scored_legs.pitcher_vs_batter_hand_era,  EXCLUDED.pitcher_vs_batter_hand_era)
+                pitcher_vs_batter_hand_era  = COALESCE(mlb_scored_legs.pitcher_vs_batter_hand_era,  EXCLUDED.pitcher_vs_batter_hand_era),
+                pitcher_era_rank            = COALESCE(mlb_scored_legs.pitcher_era_rank,            EXCLUDED.pitcher_era_rank),
+                pitcher_k9_rank             = COALESCE(mlb_scored_legs.pitcher_k9_rank,             EXCLUDED.pitcher_k9_rank),
+                pitcher_whip_rank           = COALESCE(mlb_scored_legs.pitcher_whip_rank,           EXCLUDED.pitcher_whip_rank)
         """,
         rows,
     )
@@ -870,6 +875,11 @@ def log_training_data_legs(legs: list[dict], run_date: str) -> int:
             leg.get("opponent_adjustment"),
             leg.get("trend_score"),
             ts,
+            leg.get("coverage_overall"),
+            leg.get("coverage_recent_10"),
+            leg.get("opp_pitcher_era_rank") if leg.get("opp_pitcher_era_rank") is not None else leg.get("pitcher_era_rank"),
+            leg.get("opp_pitcher_k9_rank")  if leg.get("opp_pitcher_k9_rank")  is not None else leg.get("pitcher_k9_rank"),
+            leg.get("opp_pitcher_whip_rank") if leg.get("opp_pitcher_whip_rank") is not None else leg.get("pitcher_whip_rank"),
         ))
 
     if not rows:
@@ -884,7 +894,8 @@ def log_training_data_legs(legs: list[dict], run_date: str) -> int:
             (player_id, player_name, stat, direction, line, odds,
              odd_id, game_date, game_pk,
              coverage_pct, composite_score, opponent_adjustment, trend_score,
-             logged_at)
+             logged_at, coverage_overall, coverage_recent_10,
+             pitcher_era_rank, pitcher_k9_rank, pitcher_whip_rank)
         VALUES %s
         ON CONFLICT (odd_id) DO NOTHING
         """,
