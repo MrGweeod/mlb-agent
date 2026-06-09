@@ -1,233 +1,200 @@
 # MLB Parlay Agent — Session Handoff
-**Last Updated:** June 8, 2026 (Session 7 — Performance Analysis + Hits Under Pipeline Fix)
+**Last Updated:** June 9, 2026 (Session 9 — Performance Analysis + Data Pipeline Gaps + TB Under + Bug Fixes)
 
 ## Current Status
-✅ **OPERATIONAL — SESSION 7 DEPLOYED**
-✅ **Direction-aware coverage gate: unders use 40% floor, overs use 65% floor**
-✅ **Direction-aware parlay builder score floor: unders use 40.0, overs use 65.0**
-✅ **Shadow ERA rank normalization: blended_era_rank now 1-30 scale (was 1-192)**
-✅ **park_factor now persisted to mlb_parlay_legs_enriched (was always NULL)**
-✅ **WHIP rank signal added to simple_scorer.py for hits props (±5)**
-✅ **870 historical shadow legs backfilled with park_factor (819 + 51 ATH/AZ fix)**
-✅ **Backfill script rewritten: game_pk map (1 API call/game) + ABR_ALIASES**
+✅ **OPERATIONAL — SESSION 9 DEPLOYED**
+✅ **Training data pipeline gaps identified and fixed (6 gaps)**
+✅ **Prop-specific pitcher signal routing in shadow pipeline**
+✅ **Total Bases under 1.5 added to coverage pipeline for shadow validation**
+✅ **Manual regen player exclusion fixed (was silently failing since June 8)**
+✅ **Deprecated recommendation_logger FK crash fixed**
+✅ **Shadow pipeline now running after every production run**
+✅ **Pitcher enrichment rate: 52% → 100%**
 
 ---
 
-## What Happened on June 8, 2026 (Session 7)
+## What Happened on June 9, 2026 (Session 9)
 
-### Performance Review — June 5–7
-Reviewed 3-day parlay and leg performance post-Session 5 signal fixes:
+### Era-Based Performance Analysis
+Pulled 558 resolved parlays across three eras to evaluate whether strategy changes improved results:
 
-**Parlay win rates:**
-| Date | Production | Shadow |
-|---|---|---|
-| 6/5 | 20.0% | 20.0% |
-| 6/6 | 25.0% | 16.7% |
-| 6/7 | 20.0% | 20.0% |
-
-Shadow not beating production yet — blocked by ERA rank scale bug and park_factor NULL bug (both fixed this session).
-
-**Leg win rates (June 5–7):**
-| Stat | Direction | Win Rate | Notes |
+| Era | Resolved | Win Rate | Avg Odds |
 |---|---|---|---|
-| strikeouts | over | **80.6%** | Strong — well above 69% baseline |
-| hits | over | 53.4% | Below breakeven — primary loss driver |
-| hits | under | 0% | Only 1 leg in 3 days — gate was broken |
+| 1 — High odds (pre anchor/swing) | 508 | 6.5% | +1263 |
+| 2 — Anchor/Swing | 58 | 6.9% | +1054 |
+| 3 — Flat pool +400–+700 | 136 | 19.1% | +464 |
 
-**Coverage bucket analysis revealed hits over signal is broken in 70-74% bucket:**
-- 75-79% coverage: 61.5% win rate
-- 70-74% coverage: **45.2% win rate** ← below breakeven, inverted
-- 65-69% coverage: 53.7% win rate
+**Key finding:** Neither era is materially beating the market — all three are near breakeven when odds are factored in. Era 3's higher win rate is offset by lower odds. The real improvement in Era 3 came from prop whitelist cleanup (removing hits under, SO under, walks under which were active loss drivers in Era 1).
 
-The 70-74% bucket is where Soto, Steer, Bregman clustered — all going hitless (actual_value = 0.00 for every losing leg).
+### Training Data Deep Dive
+Discovered the coverage calculation flip date: **week of April 27, 2026**. Hits over jumped from 31.5% to 57.6% and hits under dropped from 68.5% to 41.9% in a single week — a mirror image flip confirming a direction logic fix landed that week. All training data before April 27 is built on incorrect coverage calculations and must not be used for signal validation.
 
-### Root Cause: Hits Under Gate Was Structurally Broken
-`coverage_overall >= 65%` is impossible for hits under — a healthy MLB hitter goes hitless in only 27-35% of games. No hitter can ever clear 65% hitless rate. Result: 1 hits under leg across 3 days of data.
+**Clean data (April 27+) coverage bucket analysis confirmed:**
+- Coverage IS predictive for hits over and SO over in the 65–84% range
+- 85%+ coverage is a trap — win rates collapse (hits over drops from 71.8% to 31.5%)
+- TB under shows 60–61% win rate in 65–84% bucket but breakeven is 61–64% — marginal edge only
 
-**Fix 1 — `main.py` direction-aware gate:**
-```python
-# Over: 65% floor (unchanged)
-if direction == "over" and coverage_overall_raw < 65.0:
-    continue
-# Under: 40% floor (~.240 BA hitter, genuinely weak)
-if direction == "under" and coverage_overall_raw < 40.0:
-    continue
+### Training Data Gap Analysis (6 Gaps Fixed)
+Discovered that pitcher rank signals, coverage_overall, and coverage_recent_10 were never being written to mlb_training_data. Full gap list and fixes:
+
+| Gap | Severity | Fix |
+|---|---|---|
+| `coverage_overall` + `coverage_recent_10` not in training data | Critical | Added to log_training_data_legs() INSERT |
+| `pitcher_era_rank`, `k9_rank`, `whip_rank` not in training data | Critical | Wired from leg dict to training data upsert |
+| `coverage_vs_hand` only 57% populated | Medium | Fallback to coverage_overall when None in coverage.py |
+| `coverage_recent_5` only 3% populated (deprecated) | Medium | Removed from all INSERTs |
+| Pitcher enrichment failures silent | Medium | Added [enrich_legs] failure logging with player/team context |
+| Shadow pipeline not at parity | Medium | coverage_recent_5 removed, rank columns added to enriched INSERT |
+
+**Supabase migrations run:**
+```sql
+ALTER TABLE mlb_training_data ADD COLUMN IF NOT EXISTS coverage_overall double precision;
+ALTER TABLE mlb_training_data ADD COLUMN IF NOT EXISTS coverage_recent_10 double precision;
+ALTER TABLE mlb_scored_legs ADD COLUMN IF NOT EXISTS pitcher_k9_rank integer;
+ALTER TABLE mlb_scored_legs ADD COLUMN IF NOT EXISTS pitcher_whip_rank integer;
+ALTER TABLE mlb_scored_legs_enriched ADD COLUMN IF NOT EXISTS pitcher_era_rank integer;
+ALTER TABLE mlb_scored_legs_enriched ADD COLUMN IF NOT EXISTS pitcher_k9_rank integer;
+ALTER TABLE mlb_scored_legs_enriched ADD COLUMN IF NOT EXISTS pitcher_whip_rank integer;
 ```
 
-**Fix 2 — `parlay_builder.py` direction-aware score floor:**
-```python
-MIN_COV_POOL_UNDER = 40.0
-floor = MIN_COV_POOL_UNDER if direction == "under" else MIN_COV_POOL
-if score < floor:
-    continue
-```
+### Prop-Specific Pitcher Signal Routing (Shadow Only)
+Implemented isolated pitcher signal routing in enriched_scorer.py based on prop type:
 
-**Result:** Today's pipeline: 30 overs + 30 unders = 60 eligible legs. Gate working. Unders still not appearing in final parlays — they score 43-61 vs overs scoring 65-81, lose pool competition on raw score. Decided to wait for validation data before normalizing scores across directions.
+| Prop | Signal | Cap | Rationale |
+|---|---|---|---|
+| Total Bases under 1.5 | WHIP rank only | ±5 | WHIP = hits+walks/IP, most direct TB signal |
+| Strikeouts over 0.5 | K/9 rank only | ±5 | K/9 literally measures strikeout rate |
+| Hits over/under 0.5 | ERA + K/9 + WHIP | ±2 each (±6 max) | All three dimensions affect hits |
 
-### Shadow Pipeline Bugs Fixed
-Three bugs found in shadow pipeline via diagnostic queries:
+Also added `whip_adj`, `k9_adj`, `era_adj` columns to training data for future signal validation.
 
-**Bug 1 — `blended_era_rank` scale was 1-192, not 1-30**
-Pool size grew to 192 qualified starters but normalization used `n=192` for both season rank and recent form rank. ERA bucket thresholds (elite ≤10, avg 11-20, weak 21+) were meaningless. Fixed in `enriched_scorer.py` — all 4 return paths now normalize to 1-30.
+### Total Bases Under 1.5 Added to Coverage Pipeline
+TB under was not flowing through the production coverage pipeline at all — it was being fetched from SGO but dropped before coverage was calculated. Fixed by:
+- Adding `("totalBases", "under", 1.5)` to ALLOWED_PROPS in main.py
+- Adding `production_legs` filter before build_parlays() to exclude TB from production parlays
+- TB under now flows through coverage → scoring → mlb_scored_legs → shadow pipeline
+- **Result today:** 113 TB under legs scored, 108/113 (95.6%) with pitcher_whip_rank populated
 
-**Bug 2 — `park_factor` not written to `mlb_parlay_legs_enriched`**
-Column was missing from INSERT statement in `run_enriched_pipeline.py`. `park_adjustment` was stored but `park_factor` (the raw integer) was not. Fixed — column added to INSERT.
+### Bug Fixes
+**FK crash on every pipeline run:** `recommendation_logger.py` was trying to write to `mlb_recommendations_deprecated_20260512` (a renamed legacy table). Removed the import and call entirely from main.py. The module is now dead code.
 
-**Bug 3 — `recent_form_rank` NULL for reliever/no-start paths**
-Three early-return paths in `_compute_blended_era_rank()` were returning raw `float(era_rank)` on the 1-192 scale. All fixed to normalize to 1-30.
+**Shadow pipeline never ran:** The FK crash was happening after production parlays were saved but before the shadow pipeline call, causing every run to error out before reaching run_enriched_pipeline(). Fixed by removing the crash.
 
-### Backfill
-- 870 historical `mlb_parlay_legs_enriched` rows backfilled with `park_factor`
-- Original script had per-leg API calls — rewrote to game_pk map (1 call per unique game)
-- ABR_ALIASES added: `ATH → OAK`, `AZ → ARI`
-- Final result: 870/870 updated, 0 skipped
+**Manual regen exclusion silently failing since June 8:** `get_conn()` uses RealDictCursor which returns dict rows — the exclusion query was using `row[0]` (integer index) which raised KeyError silently. Every manual regen fell back to full pool. Fixed to `row["player_name"]`. First working manual regen confirmed: 20 players excluded, 33 legs dropped, completely different parlays generated.
 
-### WHIP Signal Added to Production Scorer
-`opp_pitcher_whip_rank` was already attached to all hitter legs but not used for hits props. Added to `simple_scorer.py`:
-- Rank 1 (elite, low WHIP) → -5 for over, +5 for under
-- Rank 15 (average) → 0
-- Rank 30 (poor, high WHIP) → +5 for over, -5 for under
-- Formula: `(whip_rank - 15.5) / 2.9`, capped ±5, inverted for unders
+---
+
+## Commits This Session
+- `314c59e` — fix: gap1 - add coverage_overall and coverage_recent_10 to training data upsert
+- `76e2090` — fix: gap2 - write pitcher_era_rank, pitcher_k9_rank, pitcher_whip_rank to scored legs and training data
+- `14e28e1` — fix: gap3 - fallback coverage_vs_hand to coverage_overall when None
+- `546b370` — fix: gap4 - remove deprecated coverage_recent_5
+- `587709f` — fix: gap5 - log enrichment failures in enrich_legs with player/team context
+- `ae087fe` — feat: shadow - prop-specific pitcher signal routing in enriched scorer
+- `7bcfa49` — fix: remove deprecated recommendation_logger write path causing FK crash
+- `ead44f8` — feat: add totalBases under 1.5 to coverage pipeline for shadow validation
+- `[pending]` — fix: manual regen exclusion - RealDictCursor requires row key not index
 
 ---
 
 ## Pending Items — Next Session
 
-### 1. Monitor Hits Under Validation Data (Highest Priority)
-Under legs are now in the pool and being scored. Need outcome data to validate the signal before normalizing scores. Run daily:
-```sql
-SELECT
-    player_name, stat, direction,
-    coverage_overall, composite_score,
-    result, actual_value,
-    pitcher_name, pitcher_whip
-FROM mlb_scored_legs
-WHERE run_date >= '2026-06-08'
-  AND stat = 'hits' AND direction = 'under'
-  AND result IN ('won', 'lost')
-ORDER BY run_date DESC, composite_score DESC;
-```
-After 50+ resolved legs: evaluate whether WHIP correlates with win rate and whether score normalization is justified.
-
-### 2. Shadow Pipeline Signal Re-Evaluation (June 12+)
-ERA rank and park factor bugs are now fixed. After 3+ days of clean shadow data:
-- Re-run ERA tier win rate analysis with corrected 1-30 buckets
-- Re-run park factor bucket analysis with populated data
-- Compare shadow vs production win rates
-
+### 1. Monitor TB Under Validation Data (Highest Priority)
+113 TB under legs scored today, 108 with WHIP rank. Need resolved outcomes to validate WHIP signal correlation. Run after ~2 weeks of accumulation:
 ```sql
 SELECT
     CASE
-        WHEN le.blended_era_rank <= 10 THEN 'elite (1-10)'
-        WHEN le.blended_era_rank <= 20 THEN 'avg (11-20)'
-        ELSE 'weak (21-30)'
-    END as era_bucket,
-    le.stat, le.direction,
-    COUNT(*) FILTER (WHERE le.outcome IN ('won','lost')) as resolved,
-    (COUNT(*) FILTER (WHERE le.outcome = 'won') * 100.0 /
-     NULLIF(COUNT(*) FILTER (WHERE le.outcome IN ('won','lost')), 0))::numeric(5,1) as win_rate
-FROM mlb_parlay_legs_enriched le
-JOIN mlb_parlay_recommendations_enriched re ON re.id = le.parlay_id
-WHERE re.run_date >= '2026-06-08'
-  AND le.blended_era_rank IS NOT NULL
-GROUP BY era_bucket, le.stat, le.direction
-HAVING COUNT(*) FILTER (WHERE le.outcome IN ('won','lost')) >= 5
-ORDER BY le.stat, le.direction, era_bucket;
+        WHEN pitcher_whip_rank <= 8 THEN '1_elite'
+        WHEN pitcher_whip_rank <= 16 THEN '2_above_avg'
+        WHEN pitcher_whip_rank <= 24 THEN '3_below_avg'
+        ELSE '4_weak'
+    END as whip_tier,
+    COUNT(*) FILTER (WHERE result IN ('hit','miss')) as resolved,
+    (COUNT(*) FILTER (WHERE result = 'hit') * 100.0 /
+     NULLIF(COUNT(*) FILTER (WHERE result IN ('hit','miss')), 0))::numeric(5,1) as hit_rate_pct
+FROM mlb_training_data
+WHERE game_date >= '2026-04-27'
+  AND stat = 'totalBases' AND direction = 'under'
+  AND result IN ('hit','miss')
+  AND pitcher_whip_rank IS NOT NULL
+GROUP BY whip_tier ORDER BY whip_tier;
 ```
 
-### 3. Hits Under Score Normalization (After Validation)
-Under legs currently score 43-61 vs overs scoring 65-81 — overs always win the pool competition. Two options:
-- **Option A:** Separate pool slots (1-2 guaranteed under slots per parlay)
-- **Option B:** Normalize under scores so 40% hitless ≈ 70% hit rate in edge terms
+### 2. Coverage 85%+ Ceiling (Quick Win)
+Training data confirmed 85%+ coverage is a trap — win rates collapse. Add a hard ceiling of 84% to the production coverage gate to stop inflated-coverage legs from polluting the pool. One-line fix in main.py.
 
-Decision deferred until 50+ resolved under outcomes validate the signal. Do not implement before validation data exists.
-
-### 4. Lineup Confirmation Gate (High Priority)
-Anthony Volpe-style voids still possible — player not in lineup gets voided, killing the parlay. Blueprint Phase 3 item with demonstrated impact. Needs `main.py` + `enrich_legs.py`.
-
-### 5. SO Enrichment NaN Investigation (~60% of SO legs)
-~60% of strikeout legs have `pitcher_name = NaN`. K9 rank signal missing for those legs. Investigate timing vs game_pk mismatch.
-
+### 3. Shadow vs Production Comparison (June 12+)
+ERA rank scale and park_factor bugs fixed June 8. Shadow pipeline now running cleanly. After 3+ days of clean data, compare shadow vs production win rates:
 ```sql
-SELECT
-    COUNT(*) as total_so_legs,
-    COUNT(pitcher_name) as with_pitcher,
-    (COUNT(pitcher_name) * 100.0 / COUNT(*))::numeric(5,1) as pct_enriched
-FROM mlb_scored_legs
-WHERE run_date = (CURRENT_DATE)::text
-  AND stat = 'strikeouts' AND line = 0.5
-  AND position NOT IN ('SP','RP','P');
+SELECT 'production' as pipeline,
+    COUNT(*) FILTER (WHERE outcome = 'won') as won,
+    COUNT(*) FILTER (WHERE outcome IN ('won','lost')) as resolved,
+    (COUNT(*) FILTER (WHERE outcome = 'won') * 100.0 /
+     NULLIF(COUNT(*) FILTER (WHERE outcome IN ('won','lost')), 0))::numeric(5,1) as win_rate
+FROM mlb_parlay_recommendations_v2 WHERE run_date >= '2026-06-09'
+UNION ALL
+SELECT 'shadow' as pipeline, ...
+FROM mlb_parlay_recommendations_enriched WHERE run_date >= '2026-06-09';
 ```
 
-### 6. ERA Rank Re-Evaluation (June 12+)
-192 qualified starters now ranked correctly. After 7 days clean post-IP-fix data, re-validate ERA rank signal for hits over props. If directionally correct (elite ERA → lower hits over win rate), add back to enriched scorer.
+### 4. Hits Under Score Normalization (After 50+ Resolved Legs)
+Under legs scoring 43-61 vs overs scoring 65-81 — losing pool competition. Options:
+- Option A: Guaranteed under slots per parlay (1-2)
+- Option B: Normalize scores so 40% hitless ≈ 70% hit rate in edge terms
+Do not implement before 50+ resolved under outcomes.
 
-### 7. Promote Shadow to Production (June 15+)
-After ERA rank and park factor signals validate via shadow comparison. Target: mid-June.
+### 5. Lineup Confirmation Gate (High Priority)
+Volpe-style voids still possible. Blueprint Phase 3 item. Needs main.py + enrich_legs.py.
 
-### 8. Dead ERA Cleanup in `simple_scorer.py` (Low Priority)
-Raw `pitcher_era` block for hits props validated as directionally unreliable. Remove after ERA rank signal re-validates.
+### 6. TB Under Promotion Decision (Late June)
+After WHIP signal validation (~2 weeks data), decide whether to promote TB under to production whitelist. Decision criteria: does elite WHIP tier (rank 1-8) win at 65%+ vs weak WHIP tier (rank 23-30) winning at <55%? If spread ≥10pp, promote.
 
-### 9. Manual Regen Fallback Threshold Review (Low Priority)
-Monitor Railway logs for `[manual_regen] Pool too thin`. If firing regularly, raise threshold from 4 to 8-10.
+### 7. SO Enrichment NaN Investigation
+~0% NaN today (100% enrichment rate) — this may have been resolved by the pipeline fixes. Confirm over 3+ days before closing.
 
-### 10. Health Check Threshold Update (Low Priority)
-Flags hit rate >58% as anomalous. Expected range with 65%+ gate is 63-75%. Update to avoid misleading warnings.
-
-### 11. `won_with_void` Outcome Tracking (Low Priority)
-Still not implemented.
+### 8. Manual Regen Fallback Threshold
+Monitor `[manual_regen] Pool too thin` in Railway logs. If firing regularly, raise threshold from 4 to 8-10.
 
 ---
 
 ## Key Data Findings From This Session
 
-- SO over win rate June 5-7: **80.6%** — significantly above 69% baseline, signal is real
-- Hits over win rate June 5-7: 53.4% — below breakeven at typical odds
-- Hits over 70-74% coverage bucket: **45.2% win rate** — inverted, worst bucket
-- All losing hits over legs had actual_value = 0.00 (hitless, not unlucky)
-- Losers faced *worse* pitchers on average than winners — ERA not explaining losses
-- Under legs today after fix: 41 scored, 30 cleared builder floor, 0 in final parlays (score competition)
-- WHIP signal firing correctly on today's under legs: Harrison 1.03 → boost, Abbott 1.44 → boost for over
-
----
-
-## Commits This Session
-- `[pending]` — fix: direction-aware gate + shadow ERA rank normalization + park_factor + WHIP signal
-- `[pending]` — fix: backfill script - game_pk map + ABR_ALIASES for ATH/OAK and AZ/ARI
-- `[pending]` — fix: direction-aware score floor in parlay builder - unders use 40.0 not 65.0
+- Clean training data cutoff: **April 27, 2026** — everything before is built on incorrect coverage calculation
+- 85%+ coverage bucket: hits over drops to 31.5%, SO over drops to 46.8% — confirmed trap
+- TB under 45-54% bucket: 76.0% hit rate on 25 legs — strongest TB signal but small sample
+- TB over: no edge at any coverage level, book prices it away completely — excluded permanently
+- Pitcher enrichment rate: 52% → 100% after pipeline fixes today
+- TB under legs today: 113 scored, avg score 60.8, 95.6% with WHIP rank
+- Manual regen working: 20 players excluded, completely different parlay set confirmed
 
 ---
 
 ## System Health Indicators
 
 ### Green Lights
-✅ Direction-aware coverage gate deployed (overs 65%, unders 40%)
-✅ Direction-aware parlay builder floor (overs 65.0, unders 40.0)
-✅ Hits under legs now scoring and reaching builder pool (30 today)
-✅ WHIP rank signal firing for hits props in production
-✅ Shadow ERA rank normalized to 1-30 (was 1-192)
-✅ park_factor now persisting to mlb_parlay_legs_enriched
-✅ 870 historical shadow legs backfilled with park_factor
-✅ Backfill script: game_pk map + ABR_ALIASES (ATH/AZ)
-✅ Manual regen player exclusion with fallback
-✅ SO over signal strong: 80.6% win rate June 5-7
-✅ All changes committed and pushed
+✅ Manual regen player exclusion working (first confirmed run today)
+✅ Shadow pipeline running after every production run
+✅ Pitcher enrichment 100% (was 52%)
+✅ TB under 1.5 flowing through coverage pipeline
+✅ Training data now capturing coverage_overall, coverage_recent_10, pitcher rank signals
+✅ All 6 training data gaps fixed
+✅ FK crash resolved
+✅ Prop-specific pitcher signal routing in shadow (WHIP→TB, K9→SO, ERA+K9+WHIP→hits)
+✅ 85%+ coverage trap identified and documented (gate fix pending)
 
 ### Yellow Flags
-⚠️ Hits under legs not reaching parlays yet (score normalization needed — awaiting validation data)
-⚠️ Hits over 70-74% coverage bucket underperforming (45.2% win rate)
-⚠️ ~60% of SO legs still missing pitcher enrichment (NaN pitcher_name)
-⚠️ ERA rank signal needs 3+ days clean shadow data post-fix
+⚠️ 85%+ coverage ceiling not yet implemented in production gate
+⚠️ TB under not in production parlays yet — awaiting WHIP signal validation
+⚠️ Hits under legs not reaching parlays (score normalization needed)
 ⚠️ No lineup confirmation gate — Volpe-style voids still possible
-⚠️ Negative EV legs appearing in parlays
-⚠️ Health check hit rate threshold stale
+⚠️ Shadow vs production comparison needs 3+ more days clean data
 
 ### Red Flags
 None currently
 
 ---
 
-**Last Review:** June 8, 2026
-**System Status:** ✅ Operational — Hits Under Pipeline Unblocked + Shadow Fixes
-**Next Review:** June 9, 2026 (Monitor hits under outcomes + shadow ERA rank buckets)
-**Pending Decisions:** Hits under score normalization (after 50+ resolved legs), shadow promotion (June 15+)
+**Last Review:** June 9, 2026
+**System Status:** ✅ Operational — Training Data Gaps Fixed + TB Under Shadow Validation Active
+**Next Review:** June 10, 2026 (Monitor TB under scoring + shadow pipeline + manual regen logs)
+**Pending Decisions:** TB under promotion (late June), hits under score normalization (after 50+ resolved legs)
