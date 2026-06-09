@@ -251,9 +251,10 @@ def _find_qualifying_legs(
     seen_odd_ids: set[str] = set()
 
     ALLOWED_PROPS = {
-        ("hits",       "over",  0.5),
-        ("hits",       "under", 0.5),
-        ("strikeouts", "over",  0.5),  # hitter K only — pitcher SO removed
+        ("hits",        "over",  0.5),
+        ("hits",        "under", 0.5),
+        ("strikeouts",  "over",  0.5),  # hitter K only — pitcher SO removed
+        ("totalBases",  "under", 1.5),  # shadow validation only — never enters production parlays
     }
 
     for prop in sgo_props:
@@ -828,14 +829,21 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
     tier_label = f"Tier {tier_info['tier']}" if tier_info else "Tier 4 (thin slate)"
     print(f"\n[8/8] Building hybrid parlays ({len(schedule)} games → {tier_label})...")
 
+    # Exclude totalBases legs from production parlays — they are scored and
+    # logged for shadow validation but must never enter live parlays.
+    production_legs = [l for l in qualifying_legs if l.get("stat") != "totalBases"]
+    tb_shadow_count = len(qualifying_legs) - len(production_legs)
+    if tb_shadow_count:
+        print(f"  [{tb_shadow_count} totalBases leg(s) held for shadow — excluded from parlays]")
+
     parlays = build_parlays(
-        qualifying_legs,
+        production_legs,
         top_n=5,
         num_games=len(schedule),
     )
     print(f"  Built {len(parlays)} parlay(s)")
 
-    # Log all scored legs regardless of parlay outcome
+    # Log ALL scored legs (including totalBases shadow legs) regardless of parlay outcome
     parlay_odd_ids = {leg["odd_id"] for p in parlays for leg in p.get("legs", [])}
     n_logged = log_scored_legs(qualifying_legs, today, parlay_odd_ids)
     if n_logged:
