@@ -271,6 +271,22 @@ def run_enriched_pipeline(scored_legs: list, production_batch_id: str = "") -> N
     # Deep copy so enriched scoring never mutates production leg dicts
     enriched_legs = copy.deepcopy(scored_legs)
 
+    # Shadow pipeline prop whitelist — only score validated prop types
+    # totalBases line gate in enriched_scorer acts as a secondary safety net
+    _SHADOW_WHITELIST = {
+        ("hits", "over", 0.5),
+        ("hits", "under", 0.5),
+        ("strikeouts", "over", 0.5),
+        ("totalBases", "under", 1.5),
+    }
+    enriched_legs = [
+        leg for leg in enriched_legs
+        if (leg.get("stat"), leg.get("direction"), leg.get("best_line")) in _SHADOW_WHITELIST
+    ]
+    if not enriched_legs:
+        print("[ENRICHED PIPELINE] No qualifying legs after whitelist filter — skipping")
+        return
+
     # Build team maps for opponent matching and park factor lookup
     team_id_to_abbr, abbr_to_team_id = _build_team_maps()
 

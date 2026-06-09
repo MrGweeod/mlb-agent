@@ -880,6 +880,9 @@ def log_training_data_legs(legs: list[dict], run_date: str) -> int:
             leg.get("opp_pitcher_era_rank") if leg.get("opp_pitcher_era_rank") is not None else leg.get("pitcher_era_rank"),
             leg.get("opp_pitcher_k9_rank")  if leg.get("opp_pitcher_k9_rank")  is not None else leg.get("pitcher_k9_rank"),
             leg.get("opp_pitcher_whip_rank") if leg.get("opp_pitcher_whip_rank") is not None else leg.get("pitcher_whip_rank"),
+            leg.get("whip_adj"),
+            leg.get("k9_adj"),
+            leg.get("era_adj"),
         ))
 
     if not rows:
@@ -895,7 +898,8 @@ def log_training_data_legs(legs: list[dict], run_date: str) -> int:
              odd_id, game_date, game_pk,
              coverage_pct, composite_score, opponent_adjustment, trend_score,
              logged_at, coverage_overall, coverage_recent_10,
-             pitcher_era_rank, pitcher_k9_rank, pitcher_whip_rank)
+             pitcher_era_rank, pitcher_k9_rank, pitcher_whip_rank,
+             whip_adj, k9_adj, era_adj)
         VALUES %s
         ON CONFLICT (odd_id) DO NOTHING
         """,

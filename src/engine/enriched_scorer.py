@@ -253,11 +253,12 @@ def _calculate_enriched_score(
     ballpark_factors: dict,
     opp_team_id: int | None,
     home_team_abbr: str | None,
-) -> dict:
+) -> dict | None:
     """
     Compute enriched composite score for one leg.
 
-    Returns a dict of enriched fields to merge into the leg dict.
+    Returns a dict of enriched fields to merge into the leg dict,
+    or None if the leg should be excluded entirely (e.g. totalBases non-1.5 line).
     """
     enriched = {}
 
@@ -292,6 +293,10 @@ def _calculate_enriched_score(
     stat = leg.get("stat", "")
     direction = leg.get("direction", "over")
 
+    # Line gate: totalBases is only meaningful at the 1.5 line
+    if stat == "totalBases" and leg.get("best_line") != 1.5:
+        return None
+
     # ── Signal 1: Blended ERA rank replaces raw pitcher_era in matchup calc ───
     blended_era_rank, recent_form_rank = _compute_blended_era_rank(
         leg, pitcher_ranks, season
@@ -299,20 +304,69 @@ def _calculate_enriched_score(
     enriched["blended_era_rank"] = blended_era_rank
     enriched["recent_form_rank"] = recent_form_rank
 
-    # K-rate adjustment (hitter SO props only)
+    # K/9 rank signal for strikeouts over props
+    # Low K/9 rank (rank 1) = elite strikeout pitcher = boost OVER
+    # High K/9 rank (rank 30) = weak strikeout pitcher = penalize OVER
     if stat == "strikeouts" and direction == "over":
-        pitcher_id = leg.get("pitcher_id") or leg.get("opposing_pitcher_id")
-        if pitcher_id:
-            try:
-                pid_int = int(pitcher_id)
-                k9_rank = pitcher_ranks.get(pid_int, {}).get("k9_rank")
-                if k9_rank is not None:
-                    if k9_rank <= 8:    # elite K pitcher — batter more likely to K
-                        score += 5
-                    elif k9_rank >= 23: # weak K pitcher — batter less likely to K
-                        score -= 5
-            except (ValueError, TypeError):
-                pass
+        k9_rank = leg.get("opp_pitcher_k9_rank")
+        if k9_rank is not None:
+            # rank 1 → +5, rank 15.5 → 0, rank 30 → -5
+            k9_adj = round((15.5 - k9_rank) / 2.9, 1)
+            k9_adj = max(-5.0, min(5.0, k9_adj))
+            score += k9_adj
+            enriched["k9_adj"] = k9_adj
+
+    # Combined pitcher signal for hits props — ERA + K/9 + WHIP each capped ±2
+    if stat == "hits":
+        pitcher_adj = 0.0
+
+        era_rank = leg.get("opp_pitcher_era_rank")
+        if era_rank is not None:
+            # High ERA rank = weak pitcher = favorable for hits over
+            era_adj = round((era_rank - 15.5) / 14.5, 1)
+            era_adj = max(-2.0, min(2.0, era_adj))
+            pitcher_adj += era_adj
+            enriched["era_adj"] = era_adj
+
+        k9_rank = leg.get("opp_pitcher_k9_rank")
+        if k9_rank is not None:
+            # High K/9 rank = weak strikeout pitcher = favorable for hits over
+            k9_adj = round((k9_rank - 15.5) / 14.5, 1)
+            k9_adj = max(-2.0, min(2.0, k9_adj))
+            pitcher_adj += k9_adj
+            enriched["k9_adj"] = k9_adj
+
+        whip_rank = leg.get("opp_pitcher_whip_rank")
+        if whip_rank is not None:
+            # High WHIP rank = weak pitcher = favorable for hits over
+            whip_adj = round((whip_rank - 15.5) / 14.5, 1)
+            whip_adj = max(-2.0, min(2.0, whip_adj))
+            pitcher_adj += whip_adj
+            enriched["whip_adj"] = whip_adj
+
+        if direction == "under":
+            pitcher_adj = -pitcher_adj
+            if "era_adj" in enriched:
+                enriched["era_adj"] = -enriched["era_adj"]
+            if "k9_adj" in enriched:
+                enriched["k9_adj"] = -enriched["k9_adj"]
+            if "whip_adj" in enriched:
+                enriched["whip_adj"] = -enriched["whip_adj"]
+        score += pitcher_adj
+
+    # WHIP rank signal for totalBases props
+    # Low WHIP (rank 1) = elite pitcher = fewer baserunners = boost UNDER, penalize OVER
+    # High WHIP (rank 30) = weak pitcher = more baserunners = boost OVER, penalize UNDER
+    if stat == "totalBases":
+        whip_rank = leg.get("opp_pitcher_whip_rank")
+        if whip_rank is not None:
+            # rank 1 → -5, rank 15.5 → 0, rank 30 → +5
+            whip_adj = round((whip_rank - 15.5) / 2.9, 1)
+            whip_adj = max(-5.0, min(5.0, whip_adj))
+            if direction == "under":
+                whip_adj = -whip_adj  # invert: elite WHIP boosts under
+            score += whip_adj
+            enriched["whip_adj"] = whip_adj
 
     # Lineup stability (unchanged from simple_scorer)
     lineup_consistency = leg.get("lineup_consistency")
@@ -342,6 +396,9 @@ def _calculate_enriched_score(
     if park_adjustment is not None:
         score += park_adjustment
 
+    enriched.setdefault("era_adj", None)
+    enriched.setdefault("k9_adj", None)
+    enriched.setdefault("whip_adj", None)
     enriched["composite_score"] = max(5.0, min(95.0, score))
     return enriched
 
@@ -399,7 +456,14 @@ def score_legs(
                 opp_team_id=opp_team_id,
                 home_team_abbr=home_team_abbr,
             )
-            leg.update(enriched_fields)
+            if enriched_fields is None:
+                # Leg excluded by line gate (e.g. totalBases non-1.5 line)
+                leg["composite_score"] = None
+                leg.setdefault("era_adj", None)
+                leg.setdefault("k9_adj", None)
+                leg.setdefault("whip_adj", None)
+            else:
+                leg.update(enriched_fields)
         except Exception as e:
             # Per-leg failure must not crash the pipeline — keep original score
             print(f"[enriched_scorer] Score failed for {leg.get('player_name')}: {e}")
@@ -410,6 +474,9 @@ def score_legs(
             leg.setdefault("park_adjustment", None)
             leg.setdefault("blended_era_rank", None)
             leg.setdefault("recent_form_rank", None)
+            leg.setdefault("era_adj", None)
+            leg.setdefault("k9_adj", None)
+            leg.setdefault("whip_adj", None)
 
     if legs:
         scores = [l["composite_score"] for l in legs if l.get("composite_score") is not None]
