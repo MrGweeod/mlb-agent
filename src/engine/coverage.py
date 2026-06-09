@@ -328,6 +328,9 @@ def _hitter_coverage(
     except Exception:
         pass
 
+    if coverage_vs_hand is None:
+        coverage_vs_hand = coverage_overall
+
     return {
         "coverage_overall":   coverage_overall,
         "coverage_vs_hand":   coverage_vs_hand,
