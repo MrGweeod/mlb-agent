@@ -371,7 +371,6 @@ def _find_qualifying_legs(
             "coverage_overall":    coverage.get("coverage_overall"),
             "coverage_vs_hand":    coverage.get("coverage_vs_hand"),
             "coverage_recent_10":  coverage.get("coverage_recent_10"),
-            "coverage_recent_5":   coverage.get("coverage_recent_5"),
             "games_total":         coverage.get("games_total"),
             "games_vs_hand":       coverage.get("games_vs_hand"),
             "games_recent":        coverage.get("games_recent"),
