@@ -221,12 +221,26 @@ def enrich_legs(
             continue
 
         if not pitcher_id:
+            print(f"  [enrich_legs] No opposing pitcher for team={team} player={leg.get('player_name')} stat={stat} — adjustment=0.0")
             leg["opponent_adjustment"] = 0.0
+            leg["pitcher_id"]   = None
+            leg["pitcher_name"] = None
+            leg["pitcher_era"]  = None
+            leg["pitcher_k9"]   = None
+            leg["pitcher_whip"] = None
+            leg["pitcher_vs_batter_hand_era"] = None
             continue
 
         profile = profiles.get(pitcher_id)
         if not profile:
+            print(f"  [enrich_legs] No profile for pitcher_id={pitcher_id} team={team} player={leg.get('player_name')} — adjustment=0.0")
             leg["opponent_adjustment"] = 0.0
+            leg["pitcher_id"]   = None
+            leg["pitcher_name"] = None
+            leg["pitcher_era"]  = None
+            leg["pitcher_k9"]   = None
+            leg["pitcher_whip"] = None
+            leg["pitcher_vs_batter_hand_era"] = None
             continue
 
         # Attach raw pitcher profile stats so they persist in mlb_scored_legs
