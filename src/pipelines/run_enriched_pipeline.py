@@ -91,7 +91,6 @@ def _log_enriched_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> 
             leg.get("coverage_overall"),
             leg.get("coverage_vs_hand"),
             leg.get("coverage_recent_10"),
-            leg.get("coverage_recent_5"),
             leg.get("pitcher_id"),
             leg.get("pitcher_name"),
             leg.get("pitcher_era"),
@@ -103,6 +102,9 @@ def _log_enriched_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> 
             str(leg.get("opposing_pitcher_id")) if leg.get("opposing_pitcher_id") else None,
             leg.get("odd_id"),
             leg.get("odd_id") in parlay_odd_ids,
+            leg.get("opp_pitcher_era_rank") if leg.get("opp_pitcher_era_rank") is not None else leg.get("pitcher_era_rank"),
+            leg.get("opp_pitcher_k9_rank")  if leg.get("opp_pitcher_k9_rank")  is not None else leg.get("pitcher_k9_rank"),
+            leg.get("opp_pitcher_whip_rank") if leg.get("opp_pitcher_whip_rank") is not None else leg.get("pitcher_whip_rank"),
             # Enriched-only columns
             leg.get("coverage_vs_opponent"),
             leg.get("games_vs_opponent"),
@@ -125,9 +127,10 @@ def _log_enriched_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> 
         INSERT INTO mlb_scored_legs_enriched
             (run_date, player_name, team, opponent, stat, line, direction, odds,
              coverage_pct, p_over, ev_per_unit, composite_score,
-             coverage_overall, coverage_vs_hand, coverage_recent_10, coverage_recent_5,
+             coverage_overall, coverage_vs_hand, coverage_recent_10,
              pitcher_id, pitcher_name, pitcher_era, pitcher_k9, pitcher_whip,
              batter_hand, game_pk, player_id, opposing_pitcher_id, odd_id, in_parlay,
+             pitcher_era_rank, pitcher_k9_rank, pitcher_whip_rank,
              coverage_vs_opponent, games_vs_opponent, park_factor, park_adjustment,
              blended_era_rank, recent_form_rank)
         VALUES %s
