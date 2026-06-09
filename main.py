@@ -36,7 +36,6 @@ from src.engine.coverage import calculate_coverage, PROP_STAT_MAP
 from src.engine.parlay_builder import build_parlays, _tier_params
 from src.pipelines.enrich_legs import enrich_legs
 from src.pipelines.trend_analysis import get_trend_signal
-from src.tracker.recommendation_logger import log_recommendations
 from src.utils.db import log_scored_legs, log_training_data_legs, save_parlay_recommendation, save_parlay_recommendations_v2, set_player_position
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -951,9 +950,6 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
                 f"{dl}{leg['best_line']}{direction_tag} ({leg['best_odds']}) "
                 f"hist={leg['coverage_pct']}%{ev_str}"
             )
-
-    # Persist recommendations for calibration tracking
-    log_recommendations(parlays)
 
     # Shadow enriched pipeline — never blocks production
     try:
