@@ -1,12 +1,12 @@
 # MLB Parlay Agent — Build Status
-**Last Updated:** June 12, 2026 (Session 10 — Lineup Confirmation + CLV Tracking + Backtest Harness + Correlation Spec)
+**Last Updated:** June 13, 2026 (Session 11 — Bug Fixes, Shadow Audit, Pipeline Congruence)
 
-## Overall System Status: ✅ OPERATIONAL — SESSION 10 DEPLOYED
+## Overall System Status: ✅ OPERATIONAL — SESSION 11 DEPLOYED
 ```
 ┌────────────────────────────────────────────────────────────────────────────────┐
 │                         SYSTEM HEALTH DASHBOARD                                │
 ├────────────────────────────────────────────────────────────────────────────────┤
-│ Prop Whitelist (Production):    ✅ HITS OVER 0.5 + SO OVER 0.5               │
+│ Prop Whitelist (Production):    ✅ HITS O/U 0.5 + SO OVER 0.5               │
 │ Prop Whitelist (Coverage):      ✅ + TOTALBASES UNDER 1.5 (shadow only)      │
 │ Coverage Gate (Overs):          ✅ 65% FLOOR                                  │
 │ Coverage Gate (Unders):         ✅ 40% FLOOR                                  │
@@ -25,24 +25,24 @@
 │ LINEUP CONFIRMATION LAYER                                                      │
 │ Scheduler Table:                ✅ mlb_pending_lineup_checks LIVE             │
 │ Drain Cron (1-min):             ✅ RUNNING IN server.py                      │
-│ T-45 Lineup Checks:             ✅ SCHEDULED AFTER 9AM PIPELINE              │
+│ main.py Wiring:                 ✅ DEPLOYED JUNE 13 (was missing since S10)  │
+│ T-45 Lineup Checks:             ✅ 11 ROWS WRITTEN FOR TONIGHT'S SLATE      │
+│ T-1 CLV Checks:                 ✅ 11 ROWS WRITTEN FOR TONIGHT'S SLATE      │
 │ Four-State Annotation:          ✅ MISSING/CONFIRMED/OUT_OF_RANGE/SCRATCHED  │
 │ CLR Run Type:                   ✅ BUILT — UPSTREAM-ONLY REPLACEMENT POOL    │
 │ Slot Gate (soft, -8pts):        ✅ IN simple_scorer.py                       │
 │ Batting Order Backfill:         ✅ 881/1031 LEGS (85.5%) JUNE 1-10          │
 │ Hydrate Parser:                 ✅ VERIFIED 19/19 ON REAL GAME DATA          │
-│ verify_lineup_layer.py:         ✅ ALL SECTIONS PASSING                      │
-│ Live Annotation Mix:            ⚠️ NOT YET OBSERVED (first live slate pending)│
+│ Live Annotation Mix:            ⚠️ FIRST LIVE CHECK FIRES TONIGHT 6:25PM ET │
 ├────────────────────────────────────────────────────────────────────────────────┤
 │ CLV TRACKING LAYER                                                             │
 │ check_type Column:              ✅ ON mlb_pending_lineup_checks               │
 │ closing_odds Column:            ✅ ON mlb_scored_legs                         │
-│ CLV Rows Scheduled at T-1:      ✅ AFTER EVERY 9AM PIPELINE RUN              │
+│ CLV Rows Scheduled at T-1:      ✅ 11 ROWS WRITTEN FOR TONIGHT'S SLATE      │
+│ First Live Capture:             ⚠️ FIRES TONIGHT 6:39PM ET — UNVERIFIED     │
 │ SGO Reuse:                      ✅ get_player_props() IMPORTED VERBATIM      │
 │ compute_clv() Unit Tests:       ✅ 7/7 PASSING                               │
-│ verify_clv.py:                  ✅ 10/10 (2 skipped — expected)              │
-│ Live CLV Capture:               ⚠️ CLOCK STARTED JUNE 12 — NO DATA YET     │
-│ First CLV Read:                 ⏳ ~JUNE 26 (2 weeks)                        │
+│ First CLV Read:                 ⏳ ~JUNE 26 (2 weeks of data needed)         │
 ├────────────────────────────────────────────────────────────────────────────────┤
 │ SHADOW PIPELINE                                                                │
 │ Shadow Pipeline:                ✅ RUNNING AFTER EVERY PRODUCTION RUN        │
@@ -50,14 +50,21 @@
 │ Park Factor Signal:             ✅ VALIDATED + PERSISTING CORRECTLY           │
 │ Shadow Resolution:              ✅ WIRED + ONGOING                            │
 │ Prop-Specific Pitcher Routing:  ✅ WHIP→TB, K9→SO, ERA+K9+WHIP→HITS        │
-│ Offense Stack Bonus:            ⚠️ SPEC READY — NOT YET BUILT               │
+│ K/9 Direction (SO Over):        ✅ FIXED JUNE 13 (was inverted since build)  │
+│ Historical Backfill:            ✅ 72 LEGS CORRECTED (JUNE 9-12)             │
+│ 7-Day Comparison Window:        ⚠️ TAINTED — DISCARD. CLOCK RESETS TODAY    │
+│ Offense Stack Bonus:            ✅ BUILT + 3 BUGS FIXED — SHADOW ONLY       │
+│ Stack Bonus Verification:       ✅ 13/13 TESTS PASS                          │
+│ Stack Promotion Criteria:       ⏳ NEED 7 CLEAN SHADOW DAYS (from June 13)  │
 ├────────────────────────────────────────────────────────────────────────────────┤
 │ SCORING + SIGNALS                                                              │
 │ Direction-Aware Coverage:       ✅ coverage_overall BASE SIGNAL               │
 │ Consistency Signal:             ✅ GAP-BASED ±6/±4/±2/+2/+1                 │
 │ WHIP Rank Signal (Hits Prod):   ✅ FIRING IN simple_scorer.py               │
 │ K9 Rank Signal (SO Prod):       ✅ FIRING IN simple_scorer.py               │
-│ Pitcher Ranks Pool:             ✅ 192 QUALIFIED STARTERS                    │
+│ K9 Direction (Enriched):        ✅ FIXED JUNE 13 (inverted since June 9)    │
+│ Pitcher Ranks Pool:             ✅ 201 QUALIFIED STARTERS (as of June 13)   │
+│ Rank Normalization:             ✅ DYNAMIC MAX RANK — no hardcoded 30        │
 │ Pitcher Rank Population:        ✅ 85.5% ERA/K9/WHIP RANKS, 98% RAW ERA    │
 │ coverage_vs_hand Fallback:      ✅ FALLS BACK TO coverage_overall            │
 ├────────────────────────────────────────────────────────────────────────────────┤
@@ -77,6 +84,7 @@
 │ Web UI:                         ✅ FUNCTIONAL                                 │
 │ Deployment:                     ✅ LIVE (Railway auto-deploy)                │
 │ FK Crash (rec_logger):          ✅ FIXED — DEPRECATED LOGGER REMOVED        │
+│ Abandoned ML Model (health chk):⚠️ STILL LOADING — 3min pause per run       │
 └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -84,56 +92,50 @@
 
 ## Recent Deployments
 
+### 🎯 June 13, 2026 (Session 11): Stack Bonus Bugs + K/9 Fix + main.py Deploy
+
+#### Fix: Stack Bonus 3-Bug Hotfix
+Three correctness bugs found and fixed before first pipeline run.
+
+**Bug 1 — Rank scale hardcoded to 1-30 (actual: 1-196):**
+All `pitcher_vulnerability()` normalization formulas used `/29.0` — producing scores of -5.69 to +6.72. Fixed to dynamic max rank computed from the scored leg pool at runtime.
+
+**Bug 2 — K/9 direction inverted in `pitcher_vulnerability()`:**
+`(30 - k9_rank) / 29` gave rank 1 (elite) a vulnerability of 1.0. Fixed: all three stats now use `(rank - 1) / (max_rank - 1)`.
+
+**Bug 3 — Stack eligibility direction-blind:**
+All (stat, direction) combinations counted toward stacks and received the bonus. Fixed: `STACK_ELIGIBLE_PROPS = {("hits", "over")}` — only props where a vulnerable pitcher helps the bet qualify.
+
+Files modified: `src/engine/enriched_scorer.py`, `src/pipelines/run_enriched_pipeline.py`
+Files created: `sql/stack_bonus_migration.sql` (applied), `scripts/verify_stack_bonus.py`
+Commit: `409f5d6`
+
+#### Fix: K/9 Direction Inverted in Enriched Scorer
+The K/9 signal for SO over in `_calculate_enriched_score()` was also inverted — separate from the stack bonus bug. `(15.5 - k9_rank) / 2.9` boosted SO over legs facing elite K pitchers (wrong direction). Fixed to `(k9_rank - 15.5) / 2.9`.
+
+Impact: 100% of shadow parlay legs over the 7-day window were SO over. All were anti-selected for the full window. 7-day shadow comparison invalid — discard.
+
+Files modified: `src/engine/enriched_scorer.py`
+Files created: `scripts/backfill_k9_adj_june.py`
+Commits: `34751c2`, `f834177`
+
+Historical backfill: 72 SO over legs in `mlb_scored_legs_enriched` (June 9-12) had `composite_score` corrected. Score delta: ~+10 points per leg (full -5→+5 flip). June 5-8 untouched (no `pitcher_k9_rank` data for those dates).
+
+#### Fix: main.py Session 10 Changes Never Deployed
+`log_slate_start_times()`, `CLV_OFFSET_MINUTES`, `LINEUP_CHECK_OFFSET_MINUTES`, and `BATTING_ORDER_FAVORABLE` constants were committed locally but never pushed. Railway had been running pre-Session-10 `main.py` since June 12.
+
+Resolution: Committed and pushed. `log_slate_start_times()` called manually via Claude Code. 22 pending check rows written for tonight's slate.
+
+---
+
 ### 🎯 June 12, 2026 (Session 10): Lineup Confirmation + CLV + Backtest + Correlation Spec
 
-#### New: Lineup Confirmation Layer (5 phases)
-Full event-driven lineup annotation and parlay resolution layer.
-
-Migrations applied:
-```sql
--- Lineup layer
-ALTER TABLE mlb_scored_legs ADD COLUMN IF NOT EXISTS batting_order integer;
-ALTER TABLE mlb_scored_legs ADD COLUMN IF NOT EXISTS lineup_check_status text;
-ALTER TABLE mlb_scored_legs ADD COLUMN IF NOT EXISTS lineup_checked_at timestamp without time zone;
-ALTER TABLE mlb_parlay_legs_v2 ADD COLUMN IF NOT EXISTS batting_order integer;
-ALTER TABLE mlb_parlay_legs_v2 ADD COLUMN IF NOT EXISTS lineup_check_status varchar;
-ALTER TABLE mlb_parlay_legs_v2 ADD COLUMN IF NOT EXISTS lineup_checked_at timestamp with time zone;
-ALTER TABLE mlb_parlay_recommendations_v2 ADD COLUMN IF NOT EXISTS superseded_by_batch_id varchar;
-ALTER TABLE mlb_parlay_recommendations_v2 ADD COLUMN IF NOT EXISTS superseded_reason text;
-CREATE TABLE IF NOT EXISTS mlb_pending_lineup_checks (...);
-```
-
-Files created: `sql/lineup_confirmation_migration.sql`, `src/apis/lineup_confirmation.py`, `src/pipelines/lineup_scheduler.py`, `scripts/backfill_batting_order.py`, `verify_lineup_layer.py`
-Files modified: `src/web/server.py`, `src/engine/simple_scorer.py`, `main.py`
-
-#### New: CLV Tracking Layer
-Closing odds snapshot at T-1 for all scored legs. Reuses lineup scheduler with `check_type` discriminator.
-
-Migrations applied:
-```sql
-ALTER TABLE mlb_pending_lineup_checks ADD COLUMN IF NOT EXISTS check_type text NOT NULL DEFAULT 'lineup';
-ALTER TABLE mlb_scored_legs ADD COLUMN IF NOT EXISTS closing_odds text;
-ALTER TABLE mlb_scored_legs ADD COLUMN IF NOT EXISTS closing_odds_captured_at timestamp without time zone;
-CREATE INDEX IF NOT EXISTS idx_pending_checks_type ON mlb_pending_lineup_checks (check_type, status, trigger_at);
-```
-
-Files created: `sql/clv_tracking_migration.sql`, `src/apis/clv_tracker.py`, `verify_clv.py`
-Files modified: `src/apis/lineup_confirmation.py` (check_type dispatch), `main.py` (CLV_OFFSET_MINUTES, schedule_clv_checks)
-
-#### New: Backtest Harness
-`scripts/run_backtest.py` — read-only replay harness for June 1-10 window.
-
-**Results (v2 — clean 533-leg production pool):**
-| Variant | Leg Δ | Parlay Δ | Verdict |
-|---|---|---|---|
-| EV-sort | +0.0pp | -6.2pp | Discard |
-| Slot gate | -0.0pp | -9.7pp | Discard |
-| Combined | -0.1pp | -8.6pp | Discard |
-
-Root cause: pool-thinning. 533 production legs + 4-leg minimum + construction constraints → filtering drops parlays from 191 to 43-49.
-
-#### New: Correlation Restructure Spec
-`CORRELATION_RESTRUCTURE_SPEC.md` — offense stack bonus for shadow pipeline. Ready for Claude Code.
+See prior session handoff for full detail. Key items that are now confirmed deployed:
+- Lineup confirmation layer (5 phases) — all migrations applied
+- CLV tracking layer — all migrations applied
+- Batting order backfill 881/1031 (85.5%)
+- Backtest harness (EV-sort and slot gate both discard on clean 533-leg pool)
+- Stack bonus spec written
 
 ---
 
@@ -152,7 +154,7 @@ ALLOWED_PROPS = {
 # Production parlays:
 production_legs = [l for l in qualifying_legs if l.get("stat") != "totalBases"]
 
-# Shadow whitelist:
+# Shadow whitelist (same as ALLOWED_PROPS):
 _SHADOW_WHITELIST = {
     ("hits", "over", 0.5),
     ("hits", "under", 0.5),
@@ -206,25 +208,39 @@ BATTING_ORDER_FAVORABLE = {
 | `manual` | Manual regenerate (excludes prior-run players) |
 | `confirmed_lineup_resolution` | Auto-rebuild after scratch/out-of-range detection |
 
+### **6. Stack Bonus Config (Shadow Only)**
+```python
+STACK_VULNERABILITY_THRESHOLD = 0.60   # bottom ~40% of actual rank pool
+STACK_BONUS                   = 4.0    # points added per eligible stack leg
+STACK_MIN_LEGS                = 2      # minimum same-team legs to qualify
+STACK_ELIGIBLE_PROPS = {
+    ("hits", "over"),   # only prop where vulnerable pitcher helps the bet
+}
+```
+
 ---
 
-## Performance Metrics (June 1-10, production pool)
+## Performance Metrics
 
-### Production Baseline (533 resolved legs, 191 parlays)
+### Production Baseline (June 1-10, clean 533-leg pool)
 | Prop | Win Rate | Avg Odds | Breakeven | Edge |
 |---|---|---|---|---|
-| Hits over | 59.9% | -202 | 66.9% | **-7.0pp** |
-| SO over | 65.2% | -166 | 62.4% | **+2.8pp** |
-| Parlay win rate | 22.5% | +458 | 17.9% | **+4.6pp** |
+| Hits over | 59.9% | -202 | 66.9% | **-7.0pp** ⚠️ |
+| SO over | 65.2% | -166 | 62.4% | **+2.8pp** ✅ |
+| Hits under | 39.2% | ~-150 | 40.0% | **-0.8pp** ⚠️ |
+| Parlay (4-leg) | 22.5% | +458 | 17.9% | **+4.6pp** ✅ |
 
-### Diagnostic Findings (June 12)
+### Shadow Pipeline Status
+7-day comparison (June 5-12) is invalid due to inverted K/9 signal. **Discard entirely.** Clean shadow vs production comparison starts June 13.
+
+### Diagnostic Findings (June 12-13)
 | Test | Result |
 |---|---|
 | Adverse selection | Disconfirmed — selected legs match pool win rates |
-| Score signal | Healthy — monotonic 63.7% → 68.5% across score buckets |
+| Score signal (production) | Healthy — monotonic 63.7% → 68.5% across score buckets |
 | Same-game correlation | Positive — 20.0% vs 12.6% win rate with/without same-game pair |
-| EV-sort on clean pool | +0.0pp leg improvement — coverage_overall not discriminating within validated pool |
-| Slot gate on clean pool | -0.0pp leg improvement — hypothesis contradicted (slots 6-9 > slots 1-5) |
+| Shadow 7-day underperformance | Explained by inverted K/9 signal — not signal quality |
+| Pipeline congruence | Confirmed — identical leg pools, correct TB exclusion |
 
 ---
 
@@ -232,11 +248,10 @@ BATTING_ORDER_FAVORABLE = {
 
 | Item | File | Priority |
 |---|---|---|
-| Build offense stack bonus | `src/engine/enriched_scorer.py`, `run_enriched_pipeline.py` | **Highest** — spec ready |
-| Add 84% coverage ceiling | `main.py` | High — trap confirmed |
-| Apply stack_bonus_migration.sql | Supabase | With stack bonus build |
-| verify_common.py refactor | `verify_lineup_layer.py`, `verify_clv.py` | Low |
+| Add 84% coverage ceiling | `main.py` | **High** — trap confirmed, one-line fix |
+| Remove abandoned ML model from health check | `scripts/training_health_check.py` | Medium — 3min pause per run |
 | TB under promotion to production | `main.py` | Medium — after WHIP validation (late June) |
+| verify_common.py refactor | `verify_lineup_layer.py`, `verify_clv.py` | Low |
 | Dead ERA cleanup in `simple_scorer.py` | `simple_scorer.py` | Low |
 | Health check threshold update | `server.py` | Low |
 | `won_with_void` outcome tracking | `parlay_outcome_resolver.py` | Low |
@@ -244,5 +259,5 @@ BATTING_ORDER_FAVORABLE = {
 ---
 
 **Build Status:** ✅ HEALTHY
-**Last Deployment:** June 12, 2026 — Lineup confirmation + CLV tracking layers live
-**Next Review:** June 13, 2026 — Monitor CLV capture + lineup annotation on first live slate
+**Last Deployment:** June 13, 2026 — Stack bonus (3 bugs fixed) + K/9 direction fix + main.py lineup/CLV wiring
+**Next Review:** June 14, 2026 — Verify lineup annotation + CLV capture from tonight's games
