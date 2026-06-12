@@ -21,8 +21,98 @@ import statsapi
 from src.apis.mlb_stats import get_schedule
 from src.apis.pitcher_stats import get_pitcher_ranks
 from src.engine import enriched_scorer
+from src.engine.enriched_scorer import (
+    STACK_BONUS,
+    STACK_MIN_LEGS,
+    STACK_VULNERABILITY_THRESHOLD,
+    STACK_ELIGIBLE_PROPS,
+    pitcher_vulnerability,
+)
 from src.engine.parlay_builder import build_hybrid_parlays
 from src.utils.db import get_conn
+
+
+def apply_stack_bonuses(scored_legs: list[dict]) -> list[dict]:
+    """
+    Post-scoring pass. For each qualifying offense stack, apply STACK_BONUS
+    to each leg in the stack. Modifies composite_score in place.
+
+    A qualifying stack: 2+ legs sharing (team, game_pk) where the opposing
+    pitcher's vulnerability score >= STACK_VULNERABILITY_THRESHOLD.
+
+    Also sets stack_bonus_applied and pitcher_vulnerability on every leg.
+    """
+    today = datetime.date.today().isoformat()
+
+    # Compute dynamic max ranks from the full scored leg pool
+    max_era_rank  = max((leg.get("opp_pitcher_era_rank")  or leg.get("pitcher_era_rank")  or 0 for leg in scored_legs), default=0)
+    max_k9_rank   = max((leg.get("opp_pitcher_k9_rank")   or leg.get("pitcher_k9_rank")   or 0 for leg in scored_legs), default=0)
+    max_whip_rank = max((leg.get("opp_pitcher_whip_rank") or leg.get("pitcher_whip_rank") or 0 for leg in scored_legs), default=0)
+    print(f"[stack_bonus] {today}: max ranks — ERA={max_era_rank}, K/9={max_k9_rank}, WHIP={max_whip_rank}")
+    print(f"[stack_bonus] {today}: filtering for stack-eligible props: {STACK_ELIGIBLE_PROPS}")
+
+    # Initialise stack tracking fields on all legs (vulnerability stored for data collection)
+    for leg in scored_legs:
+        leg.setdefault("stack_bonus_applied", False)
+        leg["pitcher_vulnerability"] = pitcher_vulnerability(leg, max_era_rank, max_k9_rank, max_whip_rank)
+
+    # Group by (team, game_pk) — only count stack-eligible (stat, direction) pairs
+    groups: dict[tuple, list[dict]] = {}
+    for leg in scored_legs:
+        key = (leg.get("team"), leg.get("game_pk"))
+        prop_key = (leg.get("stat"), leg.get("direction"))
+        if key[0] and key[1] and prop_key in STACK_ELIGIBLE_PROPS:
+            groups.setdefault(key, []).append(leg)
+
+    qualifying_stacks = 0
+    for (team, game_pk), group_legs in groups.items():
+        if len(group_legs) < STACK_MIN_LEGS:
+            # Too few legs — log non-qualifying if vulnerability is computed
+            vuln = group_legs[0].get("pitcher_vulnerability")
+            if vuln is not None:
+                print(
+                    f"[stack_bonus] No qualifying stacks: {team} (game {game_pk}) "
+                    f"— only {len(group_legs)} leg(s) (need {STACK_MIN_LEGS})"
+                )
+            continue
+
+        # All legs in the group face the same pitcher — use first leg's data
+        vuln = group_legs[0].get("pitcher_vulnerability")
+
+        if vuln is None:
+            print(f"[stack_bonus] {team} (game {game_pk}) — no pitcher data, skipping")
+            continue
+
+        if vuln < STACK_VULNERABILITY_THRESHOLD:
+            print(
+                f"[stack_bonus] No qualifying stacks: {team} (game {game_pk}) "
+                f"— vulnerability={vuln:.2f} (below threshold {STACK_VULNERABILITY_THRESHOLD})"
+            )
+            continue
+
+        # Qualifying stack — apply bonus to each leg
+        for leg in group_legs:
+            current = leg.get("composite_score")
+            if current is not None:
+                leg["composite_score"] = min(95.0, current + STACK_BONUS)
+            leg["stack_bonus_applied"] = True
+        qualifying_stacks += 1
+        print(
+            f"[stack_bonus] Stack: {team} (game {game_pk}) "
+            f"— pitcher_vulnerability={vuln:.2f} "
+            f"— {len(group_legs)} leg(s) boosted (+{STACK_BONUS} each)"
+        )
+
+    if qualifying_stacks:
+        stacked_games = len({leg.get("game_pk") for leg in scored_legs if leg.get("stack_bonus_applied")})
+        print(
+            f"[stack_bonus] {today}: {qualifying_stacks} qualifying stack(s) detected "
+            f"across {stacked_games} game(s)"
+        )
+    else:
+        print(f"[stack_bonus] {today}: no qualifying stacks detected")
+
+    return scored_legs
 
 
 def _build_team_maps() -> tuple[dict, dict]:
@@ -112,6 +202,9 @@ def _log_enriched_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> 
             leg.get("park_adjustment"),
             leg.get("blended_era_rank"),
             leg.get("recent_form_rank"),
+            # Stack bonus columns
+            leg.get("stack_bonus_applied", False),
+            leg.get("pitcher_vulnerability"),
         ))
 
     if not rows:
@@ -132,7 +225,8 @@ def _log_enriched_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> 
              batter_hand, game_pk, player_id, opposing_pitcher_id, odd_id, in_parlay,
              pitcher_era_rank, pitcher_k9_rank, pitcher_whip_rank,
              coverage_vs_opponent, games_vs_opponent, park_factor, park_adjustment,
-             blended_era_rank, recent_form_rank)
+             blended_era_rank, recent_form_rank,
+             stack_bonus_applied, pitcher_vulnerability)
         VALUES %s
         ON CONFLICT (run_date, odd_id) DO UPDATE
             SET composite_score        = EXCLUDED.composite_score,
@@ -142,7 +236,9 @@ def _log_enriched_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> 
                 park_adjustment        = EXCLUDED.park_adjustment,
                 blended_era_rank       = EXCLUDED.blended_era_rank,
                 recent_form_rank       = EXCLUDED.recent_form_rank,
-                in_parlay              = EXCLUDED.in_parlay
+                in_parlay              = EXCLUDED.in_parlay,
+                stack_bonus_applied    = EXCLUDED.stack_bonus_applied,
+                pitcher_vulnerability  = EXCLUDED.pitcher_vulnerability
         """,
         rows,
     )
@@ -313,6 +409,9 @@ def run_enriched_pipeline(scored_legs: list, production_batch_id: str = "") -> N
         abbr_to_team_id=abbr_to_team_id,
         game_pk_to_home_abbr=game_pk_to_home_abbr,
     )
+
+    # Post-scoring stack bonus pass (must run after individual scores, before DB write)
+    apply_stack_bonuses(enriched_legs)
 
     # Build 4-leg +400-+700 shadow parlays from single flat pool
     shadow_parlays = build_hybrid_parlays(

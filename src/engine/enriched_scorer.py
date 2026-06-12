@@ -24,6 +24,65 @@ _PROP_STAT_MAP = {
 
 _ballpark_cache: dict | None = None
 
+# ── Stack bonus constants ─────────────────────────────────────────────────────
+
+STACK_VULNERABILITY_THRESHOLD = 0.60   # bottom ~40% of the actual rank pool
+STACK_BONUS                   = 4.0    # points added to composite_score per stack leg
+STACK_MIN_LEGS                = 2      # minimum same-team legs to qualify as a stack
+
+# Only props where a vulnerable (bad) pitcher helps the bet qualify for stacking
+STACK_ELIGIBLE_PROPS = {
+    ("hits", "over"),         # bad pitcher → more hits → over hits
+    # Future: ("totalBases", "over"), ("rbi", "over") if added to whitelist
+}
+
+
+# ── Pitcher vulnerability scoring ─────────────────────────────────────────────
+
+def pitcher_vulnerability(
+    leg: dict,
+    max_era_rank: int = 0,
+    max_k9_rank: int = 0,
+    max_whip_rank: int = 0,
+) -> float | None:
+    """
+    Returns a vulnerability score in [0, 1] where 1.0 = weakest possible pitcher.
+
+    Rank convention (all three stats): rank 1 = best pitcher, max rank = worst.
+      - ERA rank 1  = lowest ERA = toughest to score against
+      - K/9 rank 1  = highest K/9 = most strikeouts = toughest to hit against
+      - WHIP rank 1 = lowest WHIP = fewest baserunners
+
+    All three: (rank - 1) / (max_rank - 1) → high rank = more vulnerable.
+
+    Returns None if insufficient data to score.
+    """
+    def _get_rank(leg: dict, opp_key: str, fallback_key: str):
+        v = leg.get(opp_key)
+        return v if v is not None else leg.get(fallback_key)
+
+    era_rank  = _get_rank(leg, "opp_pitcher_era_rank",  "pitcher_era_rank")
+    k9_rank   = _get_rank(leg, "opp_pitcher_k9_rank",   "pitcher_k9_rank")
+    whip_rank = _get_rank(leg, "opp_pitcher_whip_rank", "pitcher_whip_rank")
+
+    scores = []
+    if era_rank is not None and max_era_rank > 1:
+        scores.append((era_rank - 1) / (max_era_rank - 1))
+    if k9_rank is not None and max_k9_rank > 1:
+        scores.append((k9_rank - 1) / (max_k9_rank - 1))
+    if whip_rank is not None and max_whip_rank > 1:
+        scores.append((whip_rank - 1) / (max_whip_rank - 1))
+
+    if not scores:
+        # Fall back to raw ERA if ranks missing (98% populated)
+        era = leg.get("pitcher_era")
+        if era is not None:
+            # ERA > 4.50 = vulnerable; normalize roughly to [0,1] capped at ERA 7.0
+            return min(float(era) / 7.0, 1.0)
+        return None                                  # truly no data — no score
+
+    return sum(scores) / len(scores)               # average of available signals
+
 
 # ── Ballpark factor cache ─────────────────────────────────────────────────────
 
