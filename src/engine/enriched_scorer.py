@@ -364,13 +364,15 @@ def _calculate_enriched_score(
     enriched["recent_form_rank"] = recent_form_rank
 
     # K/9 rank signal for strikeouts over props
-    # Low K/9 rank (rank 1) = elite strikeout pitcher = boost OVER
-    # High K/9 rank (rank 30) = weak strikeout pitcher = penalize OVER
+    # Rank convention: rank 1 = highest K/9 = elite = TOUGH for batter to strike out against
+    # High rank = weak K pitcher = favorable for batter SO over
     if stat == "strikeouts" and direction == "over":
         k9_rank = leg.get("opp_pitcher_k9_rank")
         if k9_rank is not None:
-            # rank 1 → +5, rank 15.5 → 0, rank 30 → -5
-            k9_adj = round((15.5 - k9_rank) / 2.9, 1)
+            # rank 1 → -5 (elite K pitcher, penalize SO over)
+            # rank 15.5 → 0 (neutral)
+            # high rank → +5 capped (weak K pitcher, boost SO over)
+            k9_adj = round((k9_rank - 15.5) / 2.9, 1)
             k9_adj = max(-5.0, min(5.0, k9_adj))
             score += k9_adj
             enriched["k9_adj"] = k9_adj
