@@ -60,6 +60,26 @@ _PITCHER_POSITIONS = frozenset({"P", "SP", "RP", "TWP"})
 _FILTER_MIN_ODDS = -500
 _FILTER_MAX_ODDS = +500
 
+# ── Lineup Confirmation Layer ──────────────────────────────────────────────────
+LINEUP_CHECK_OFFSET_MINUTES      = 45     # T-minus offset for primary check (Decision B)
+LINEUP_CHECK_SECOND_PASS         = False  # set True to enable a late T-15 confirmation pass
+LINEUP_CHECK_SECOND_PASS_OFFSET  = 15
+LINEUP_DRAIN_INTERVAL_MINUTES    = 1      # how often the drain cron polls the DB
+CLV_OFFSET_MINUTES               = 1      # snapshot closing odds at game_start_time − 1 minute
+
+# Favorable batting-order slots per bet type.  PROPOSED DEFAULTS — flagged as tunable.
+# Reasoning: hit-frequency props scale with plate appearances, which scale with slot.
+# Slots 1-5 average ~4.2-4.8 PA/game; slots 7-9 average ~3.5-3.7.  These ranges are a
+# starting hypothesis, NOT a validated fact — revisit after the backtest harness runs.
+BATTING_ORDER_FAVORABLE: dict[tuple, range] = {
+    ("hits",       "over"):  range(1, 6),   # slots 1-5
+    ("strikeouts", "over"):  range(1, 7),   # slots 1-6 (more PA = more K chances)
+    ("totalBases", "under"): range(1, 10),  # slot largely irrelevant for under; allow all
+    ("hits",       "under"): range(1, 10),  # allow all; low-PA actually helps an under
+}
+# Default for any (stat, direction) not listed: allow all slots (range(1,10)).
+# NOTE: validate these ranges against backfilled Jun 1-10 history before trusting in prod.
+
 # In-process caches (reset each process run)
 _player_id_cache: dict[str, int | None] = {}
 _team_abbr_cache: dict[int, str] = {}   # team_id → abbreviation
@@ -981,6 +1001,109 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
     return parlays
 
 
+def log_slate_start_times() -> None:
+    """
+    Read today's scored legs, group game_pks by start time, and persist lineup-check
+    triggers to mlb_pending_lineup_checks via schedule_lineup_checks().
+
+    Called at the end of run_morning_pipeline() after run_pipeline() has written
+    today's scored legs (which carry game_start_time + game_pk).
+    """
+    from src.utils.db import get_conn
+    from src.pipelines.lineup_scheduler import schedule_lineup_checks
+
+    today_str = str(date.today())
+    today_date = date.today()
+
+    conn = get_conn()
+    cur  = conn.cursor()
+    cur.execute(
+        """
+        SELECT DISTINCT game_pk, game_start_time
+        FROM mlb_scored_legs
+        WHERE run_date = %s
+          AND game_pk IS NOT NULL
+        """,
+        (today_str,),
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    if not rows:
+        print("[log_slate_start_times] No scored legs with game_pk found — skipping lineup scheduling.")
+        return
+
+    # Group game_pks by start time; fall back to statsapi schedule for missing times
+    groups: dict[datetime, list[int]] = {}
+    missing_pks: list[int] = []
+
+    for row in rows:
+        gst = row["game_start_time"]
+        gpk = int(row["game_pk"])
+        if not gst:
+            missing_pks.append(gpk)
+            continue
+        try:
+            dt = datetime.fromisoformat(str(gst))
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+            groups.setdefault(dt, []).append(gpk)
+        except Exception:
+            missing_pks.append(gpk)
+
+    # Fall back to statsapi for any games missing start time
+    if missing_pks:
+        print(f"[log_slate_start_times] {len(missing_pks)} game(s) missing start time — fetching from statsapi")
+        try:
+            import statsapi as _sa
+            sched = _sa.schedule(date=today_str.replace("-", "/"))
+            pk_to_time: dict[int, datetime] = {}
+            for g in sched:
+                try:
+                    dt_str = g.get("game_datetime", "")
+                    dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+                    if dt.tzinfo is not None:
+                        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+                    pk_to_time[int(g["game_id"])] = dt
+                except Exception:
+                    pass
+            for gpk in missing_pks:
+                if gpk in pk_to_time:
+                    groups.setdefault(pk_to_time[gpk], []).append(gpk)
+                else:
+                    print(f"[log_slate_start_times] WARNING: game_pk={gpk} not found in statsapi schedule")
+        except Exception as _err:
+            print(f"[log_slate_start_times] statsapi fallback failed: {_err}")
+
+    if not groups:
+        print("[log_slate_start_times] No start-time groups built — skipping lineup scheduling.")
+        return
+
+    print(f"[log_slate_start_times] {len(groups)} start-time group(s) across {sum(len(v) for v in groups.values())} game(s)")
+
+    n = schedule_lineup_checks(
+        groups=groups,
+        run_date=today_date,
+        offset_minutes=LINEUP_CHECK_OFFSET_MINUTES,
+        second_pass=LINEUP_CHECK_SECOND_PASS,
+        second_pass_offset=LINEUP_CHECK_SECOND_PASS_OFFSET,
+    )
+    print(f"[log_slate_start_times] {n} lineup-check row(s) scheduled.")
+
+    # Schedule CLV snapshot at game_start_time − CLV_OFFSET_MINUTES (T-1)
+    try:
+        from src.apis.clv_tracker import schedule_clv_checks
+        n_clv = schedule_clv_checks(
+            groups=groups,
+            run_date=today_date,
+            offset_minutes=CLV_OFFSET_MINUTES,
+        )
+        print(f"[log_slate_start_times] {n_clv} CLV-check row(s) scheduled.")
+    except Exception as _clv_err:
+        print(f"[log_slate_start_times] CLV scheduling failed (non-fatal): {_clv_err}")
+
+
 def run_morning_pipeline(source: str | None = None) -> None:
     """
     Morning pipeline (9 AM ET):
@@ -1065,6 +1188,12 @@ def run_morning_pipeline(source: str | None = None) -> None:
 
     # Step 5: Full pipeline run for today (fetch props, score legs, build parlays)
     run_pipeline(source=source)
+
+    # Step 6: Schedule lineup checks for today's games (event-driven layer)
+    try:
+        log_slate_start_times()
+    except Exception as _lss_err:
+        print(f"  WARNING: lineup scheduling failed (non-fatal): {_lss_err}")
 
 
 def run_targeted_pipeline(buffer_minutes: int = 15, source: str = "auto") -> None:
