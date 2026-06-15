@@ -75,7 +75,7 @@ def schedule_lineup_checks(
                 (run_date, start_time, pass_number),
             )
 
-            game_pks_str = ",".join(str(pk) for pk in game_pks)
+            game_pks_str = "{" + ",".join(str(pk) for pk in game_pks) + "}"
             cur.execute(
                 """
                 INSERT INTO mlb_pending_lineup_checks
