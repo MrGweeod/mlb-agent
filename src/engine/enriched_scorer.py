@@ -352,6 +352,9 @@ def _calculate_enriched_score(
     stat = leg.get("stat", "")
     direction = leg.get("direction", "over")
 
+    n = max(len(pitcher_ranks), 2)
+    midpoint = (n + 1) / 2.0
+
     # Line gate: totalBases is only meaningful at the 1.5 line
     if stat == "totalBases" and leg.get("best_line") != 1.5:
         return None
@@ -372,7 +375,7 @@ def _calculate_enriched_score(
             # rank 1 → -5 (elite K pitcher, penalize SO over)
             # rank 15.5 → 0 (neutral)
             # high rank → +5 capped (weak K pitcher, boost SO over)
-            k9_adj = round((k9_rank - 15.5) / 2.9, 1)
+            k9_adj = round((k9_rank - midpoint) / (midpoint - 1) * 5.0, 1)
             k9_adj = max(-5.0, min(5.0, k9_adj))
             score += k9_adj
             enriched["k9_adj"] = k9_adj
@@ -384,7 +387,7 @@ def _calculate_enriched_score(
         era_rank = leg.get("opp_pitcher_era_rank")
         if era_rank is not None:
             # High ERA rank = weak pitcher = favorable for hits over
-            era_adj = round((era_rank - 15.5) / 14.5, 1)
+            era_adj = round((era_rank - midpoint) / (midpoint - 1) * 2.0, 1)
             era_adj = max(-2.0, min(2.0, era_adj))
             pitcher_adj += era_adj
             enriched["era_adj"] = era_adj
@@ -392,7 +395,7 @@ def _calculate_enriched_score(
         k9_rank = leg.get("opp_pitcher_k9_rank")
         if k9_rank is not None:
             # High K/9 rank = weak strikeout pitcher = favorable for hits over
-            k9_adj = round((k9_rank - 15.5) / 14.5, 1)
+            k9_adj = round((k9_rank - midpoint) / (midpoint - 1) * 2.0, 1)
             k9_adj = max(-2.0, min(2.0, k9_adj))
             pitcher_adj += k9_adj
             enriched["k9_adj"] = k9_adj
@@ -400,7 +403,7 @@ def _calculate_enriched_score(
         whip_rank = leg.get("opp_pitcher_whip_rank")
         if whip_rank is not None:
             # High WHIP rank = weak pitcher = favorable for hits over
-            whip_adj = round((whip_rank - 15.5) / 14.5, 1)
+            whip_adj = round((whip_rank - midpoint) / (midpoint - 1) * 2.0, 1)
             whip_adj = max(-2.0, min(2.0, whip_adj))
             pitcher_adj += whip_adj
             enriched["whip_adj"] = whip_adj
@@ -422,7 +425,7 @@ def _calculate_enriched_score(
         whip_rank = leg.get("opp_pitcher_whip_rank")
         if whip_rank is not None:
             # rank 1 → -5, rank 15.5 → 0, rank 30 → +5
-            whip_adj = round((whip_rank - 15.5) / 2.9, 1)
+            whip_adj = round((whip_rank - midpoint) / (midpoint - 1) * 5.0, 1)
             whip_adj = max(-5.0, min(5.0, whip_adj))
             if direction == "under":
                 whip_adj = -whip_adj  # invert: elite WHIP boosts under
