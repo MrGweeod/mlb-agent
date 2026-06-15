@@ -1,264 +1,265 @@
 # MLB Parlay Agent — Session Handoff
-**Last Updated:** June 13, 2026 (Session 11 — Bug Fixes, Shadow Validation, Pipeline Congruence Audit)
+**Last Updated:** June 15, 2026 (Session 12 — Weekend Review, Shadow Audit, Pipeline Fixes)
 
 ## Current Status
-✅ **OPERATIONAL — SESSION 11 DEPLOYED**
-✅ **Stack bonus built + 3 critical bugs fixed (dynamic rank scale, K/9 direction, direction-blind eligibility)**
-✅ **K/9 direction bug fixed in enriched scorer (SO over legs were anti-selected for 7+ days)**
-✅ **Historical composite scores backfilled for June 5-12 SO over legs (72 legs corrected)**
-✅ **main.py lineup/CLV wiring deployed — lineup checks firing live for first time today**
-✅ **22 lineup + CLV check rows written for tonight's slate (11 start-time groups, 15 games)**
-✅ **Pipeline congruence audit complete — production and shadow correctly aligned**
-✅ **SUPABASE_SCHEMA_REFERENCE.md updated to current state**
+✅ **OPERATIONAL — SESSION 12 DEPLOYED**
+✅ **lineup_scheduler.py created and pushed — lineup/CLV checks now firing for first time**
+✅ **game_pks postgres array format bug fixed**
+✅ **Cross-run 2x player cap deployed — replaces manual-only regen exclusion**
+✅ **mlb_scored_legs_enriched.result now resolving — 11-day backfill complete (June 4–14)**
+✅ **Dynamic rank normalization fixed in _calculate_enriched_score() — 4 signal paths corrected**
 
 ---
 
-## What Happened on June 13, 2026 (Session 11)
+## What Happened on June 15, 2026 (Session 12)
 
-### Stack Bonus Build (Claude Code)
-Ran `CORRELATION_RESTRUCTURE_SPEC.md` through Claude Code. Built all 5 phases:
-- `pitcher_vulnerability()` function with ERA/K9/WHIP rank composite score
-- `apply_stack_bonuses()` post-scoring pass in `run_enriched_pipeline.py`
-- `stack_bonus_applied` and `pitcher_vulnerability` columns migrated and applied to `mlb_scored_legs_enriched`
-- Logging with `[stack_bonus]` prefix matching Railway log format
+### Weekend Performance Review (June 12–14)
 
-**Bugs found in the initial build and fixed (all in same session):**
+**Production parlay outcomes:**
+- June 13: 4/12 resolved (33.3%) — 9AM strong at 3/5 (60%), midday 1/5, evening 0/2
+- June 14: 1/10 resolved (10%) — weak across all sources
+- June 15: 5 parlays pending (all 9AM)
 
-#### Bug 1 — Rank Scale Hardcoded to 1-30 (Actual: 1-196)
-Pitcher rank pool is 192 qualified starters, not 30 teams. All normalization formulas used `/29.0` and `(30 - rank)`, producing vulnerability scores of -5.69 to +6.72 instead of 0-1. The 0.60 threshold was triggering on almost every pitcher with rank ≥18.
+**Production leg win rates (June 12–14, resolved only):**
+- hits/over: 66.9% (145 appearances) ✅
+- strikeouts/over: 87.1% (31 appearances) ✅
+- hits/under: 73.7% (19 appearances — small sample)
 
-**Fix:** Dynamic max-rank computation from scored leg pool at runtime. All formulas replaced with `(rank - 1) / (max_rank - 1)`.
-
-#### Bug 2 — K/9 Direction Inverted in `pitcher_vulnerability()`
-Formula `(30 - k9_rank) / 29` gave rank 1 (elite K pitcher) a vulnerability of 1.0 — maximum vulnerability. Correct: rank 1 = lowest vulnerability.
-
-**Fix:** All three stats now use `(rank - 1) / (max_rank - 1)` — high rank = more vulnerable across ERA, K/9, and WHIP.
-
-#### Bug 3 — Stack Eligibility Direction-Blind
-`apply_stack_bonuses()` grouped legs by `(team, game_pk)` with no filter on stat/direction. Hits/under and SO/over legs counted toward `STACK_MIN_LEGS` and received the +4.0 bonus even though a vulnerable pitcher hurts those bets.
-
-**Fix:** Added `STACK_ELIGIBLE_PROPS = {("hits", "over")}` constant. Grouping loop filters by `(stat, direction)` before counting toward stacks.
-
-**Verification:** 13/13 tests pass in `scripts/verify_stack_bonus.py`.
-
-**Commits:** `409f5d6` — stack bonus (3-bug hotfix)
+**Root cause of June 12 parlay underperformance:** Player concentration. McGonigle appeared in 5 separate parlays, Hoerner in 5, Torres in 4. All had bad games — multiple parlays sank simultaneously. The existing manual regen exclusion only applied to manual regenerations and only looked at the most recent batch; automated runs had zero cross-run diversification.
 
 ---
 
-### K/9 Direction Bug in Enriched Scorer (Critical — Found During Shadow Audit)
-Separate from the stack bonus fix. The K/9 signal in `_calculate_enriched_score()` for SO over props was also inverted.
+### Fix 1 — lineup_scheduler.py Missing Module (Critical)
 
-**Evidence:** 100% of shadow parlay legs over the 7-day window were SO over. The formula `(15.5 - k9_rank) / 2.9` gave rank 1 (elite K pitcher) a +5.0 boost to SO over — the wrong direction. Shadow pipeline was systematically anti-selecting every SO over leg for at least 7 days.
+**Problem:** Every morning pipeline since June 13 silently failed with:
+```
+WARNING: lineup scheduling failed (non-fatal): No module named 'src.pipelines.lineup_scheduler'
+```
+`src/pipelines/lineup_scheduler.py` was never committed to the repo. `log_slate_start_times()` was wired correctly in `main.py` but the import crashed immediately. As a result:
+- `mlb_pending_lineup_checks` had zero rows every day
+- `lineup_check_status` was NULL on all legs
+- CLV checks never fired (same scheduler, same table)
+- CLV capture rate was 0% for every day since June 13
 
-**Fix:** `(k9_rank - 15.5) / 2.9` — rank 1 = elite K pitcher = penalize SO over. One line changed in `src/engine/enriched_scorer.py`.
+**Fix:** Created `src/pipelines/lineup_scheduler.py` with `schedule_lineup_checks()` function.
 
-**Historical backfill:** `scripts/backfill_k9_adj_june.py` recomputed `composite_score` for 72 SO over legs in `mlb_scored_legs_enriched` (June 9-12 only — June 5-8 had no `pitcher_k9_rank` data). Scores shifted ~+10 points across all 72 legs (full -5→+5 flip). June 5-8 untouched.
+**Secondary bug found:** `game_pks` was serialized as a comma-separated string (`"822724,823371"`) but the Supabase column expects a PostgreSQL array (`{822724,823371}`). Fixed with `"{" + ",".join(str(pk) for pk in game_pks) + "}"`.
 
-**7-day shadow comparison is tainted and should be discarded.** Clean shadow vs production comparison clock starts from today's first automated pipeline run.
+**Backfill:** Ran `log_slate_start_times()` manually after deploy. 8 lineup + 8 CLV check rows written for June 15 slate. First lineup check: ~5:55 PM ET. First CLV: ~6:39 PM ET.
 
-**Commits:** `34751c2` — K/9 direction fix | `f834177` — backfill script
-
----
-
-### main.py Deployment Gap Found and Fixed
-The lineup confirmation and CLV scheduling changes from Session 10 were never pushed to GitHub. `log_slate_start_times()`, `CLV_OFFSET_MINUTES`, `LINEUP_CHECK_OFFSET_MINUTES`, and `BATTING_ORDER_FAVORABLE` constants existed on disk but Railway was running the pre-Session-10 version of `main.py`.
-
-**Evidence:** `git show HEAD:main.py | grep "schedule_clv_checks"` returned no matches.
-
-**Fix:** Committed and pushed the uncommitted `main.py` diff.
-
-**Impact:** This explains why `lineup_check_status` was NULL for all June 12 legs and why CLV capture rate was 0%. Neither layer had ever actually run.
-
-**First live run:** `log_slate_start_times()` called manually today via Claude Code after the push. 22 rows written to `mlb_pending_lineup_checks` (11 lineup + 11 CLV) for tonight's slate. First lineup check fires at 6:25PM ET (22:25 UTC).
+**Commits:** `f23abfa` — create missing lineup_scheduler | sed fix — game_pks array format
 
 ---
 
-### Shadow Pipeline Performance Audit (June 5-12)
-Full investigation into the 13.6pp shadow vs production parlay win rate gap.
+### Fix 2 — Cross-Run 2x Player Cap
 
-**Key findings:**
-- Resolution is correct — shadow leg outcomes match production leg outcomes
-- Pool overlap is high — 28 of 29 shadow unique legs on June 8 also in production
-- June 8 shadow: 0/40 parlays, but leg win rate was 53.3% vs production 59.2% — variance at construction level
-- June 11 shadow: 1/14 parlays despite **62.8% leg win rate** (higher than production's 56.5%) — same construction clustering issue
-- Root cause confirmed: **inverted K/9 signal** in enriched scorer drove anti-selection of SO over legs for the entire window
-- 7-day comparison invalid — discard entirely. Shadow comparison clock resets today.
+**Problem:** Player diversity constraint (1 player per parlay) only applied within a single parlay build. The same player could anchor 3-5 different parlays in one automated run, and reappear again in the next run. The existing manual regen exclusion only applied to manual regenerations and only excluded players from the most recent batch — never touched automated runs.
 
----
+**Fix:** Replaced the entire manual regen exclusion block in `main.py` with a cross-run cap that applies to all sources. Before each build, queries `mlb_parlay_legs_v2` to count today's prior parlay appearances per player. Any player with ≥2 appearances today is removed from the selection pool for the current run.
 
-### Pipeline Congruence Audit
-Verified production and shadow pipelines are correctly aligned. Full `main.py` review:
+**Rules (two separate constraints working together):**
+1. Within a single run: max 1 parlay per player (existing intra-build constraint — unchanged)
+2. Across all runs today: max 2 total parlay appearances — removed from pool after 2nd appearance
+3. Fallback: if cap leaves fewer than 20 legs, restores full pool with `[player_cap] Pool too thin` warning
 
-| Check | Status |
-|---|---|
-| Same prop whitelist | ✅ Both use `ALLOWED_PROPS` |
-| TB under held from production parlays | ✅ Line 866 — excluded before `build_parlays()` |
-| TB under passed to shadow | ✅ `qualifying_legs` (full pool) passed to enriched pipeline |
-| Same coverage gates (65%/40%) | ✅ Applied before either pipeline |
-| Same legs pool to shadow | ✅ `qualifying_legs` passed verbatim |
-| Shadow linked to production batch | ✅ `production_batch_id` passed |
-| Lineup/CLV scheduled after 9AM | ✅ `log_slate_start_times()` in `run_morning_pipeline` |
-| Manual regen schedules lineup/CLV | ❌ Not called — expected, 9AM handles it |
-
-**Note:** The abandoned ML model (GradientBoostingClassifier) is still loading via `scripts/training_health_check.py` at the end of every pipeline run. This causes sklearn version warnings and a ~3 minute pause. Low priority to remove — it's a monitoring script, not scoring.
+**Commit:** `116ae9b` — cross-run 2x player cap
 
 ---
 
-### Schema Reference Updated
-`SUPABASE_SCHEMA_REFERENCE.md` fully updated. Previously missing:
-- `mlb_scored_legs_enriched` table (entire table was absent)
-- `mlb_pending_lineup_checks` table
-- `ballpark_factors` table
-- 10 new columns across `mlb_scored_legs`, `mlb_parlay_legs_v2`, `mlb_parlay_recommendations_v2`
-- `stack_bonus_applied` and `pitcher_vulnerability` columns on `mlb_scored_legs_enriched`
-- Schema change log added
+### Fix 3 — mlb_scored_legs_enriched.result Never Resolving
+
+**Problem:** `mlb_scored_legs_enriched.result` was NULL for every leg from June 4–June 14 (12 consecutive days). `mlb_parlay_legs_enriched.outcome` was being resolved correctly (shadow parlay win rates were valid), but the outcome resolver never wrote results back to `mlb_scored_legs_enriched`. This made all individual-leg signal validation queries return no data — stack bonus win rate analysis, pitcher rank bucket analysis, WHIP/ERA/K9 signal validation all returned zero rows.
+
+**First backfill attempt failed:** Initial script called `resolve_enriched_parlays()` but those legs were already resolved — no longer `pending`. The function exited early finding nothing to process.
+
+**Fix:** Two parts:
+1. Added mirror block in `outcome_resolver.py` — after updating `mlb_parlay_legs_enriched`, immediately runs an UPDATE on `mlb_scored_legs_enriched` with the same outcome and actual_value
+2. Replaced backfill script with a direct `UPDATE ... FROM` JOIN between `mlb_scored_legs_enriched` and `mlb_scored_legs` on `(player_name, stat, run_date)` — bypasses the pending filter entirely
+
+**Result:** 1,543 enriched scored legs resolved across June 4–14.
+
+**Commits:** `34b39a9` — mirror fix in resolver | `d8d64aa` — direct sync backfill script
+
+---
+
+### Shadow Pipeline Signal Audit (First Real Data)
+
+With `mlb_scored_legs_enriched.result` now populated, ran first meaningful signal validation.
+
+**Shadow scored leg win rates (June 4–14):**
+| Stat | Direction | Legs | Win Rate | Avg Score |
+|------|-----------|------|----------|-----------|
+| strikeouts/over | 199 | 63.3% | 71.7 |
+| hits/over | 343 | 61.5% | 71.2 |
+| totalBases/under | 638 | 56.1% | 56.9 |
+| hits/under | 363 | 44.1% | 44.1 |
+
+**Shadow parlay construction finding:** TB/under appeared in 103 shadow parlays (52.6% win rate). Every single resolved shadow parlay contained at least one TB/under leg — 0 resolved shadow parlays exist without TB/under. This is the primary driver of shadow underperforming production. Confirms TB/under block from production is correct.
+
+**Stack bonus (11 legs resolved):** 72.7% vs 55.3% non-stack. Direction is correct, sample too small to promote.
+
+**Pitcher signal audit (June 12–14 clean window):**
+- ERA rank: Nearly all legs landing in elite (1-50) bucket — revealed rank normalization bug (Fix 4)
+- K9 for hits/over: Weak K pitchers (rank 151+) at 40% win rate vs above-avg K at 76.7% — counterintuitive, signal direction needs more investigation with clean data
+- WHIP: Completely flat across all buckets for all prop types — no predictive value on current sample
+- K9 for SO/over: Weak K at 52.2% vs above-avg at 66.7% — directionally correct but scale was broken
+
+---
+
+### Fix 4 — Dynamic Rank Normalization in _calculate_enriched_score()
+
+**Problem:** Session 11 fixed the rank scale bug in `pitcher_vulnerability()` (stack bonus function), applying dynamic pool size from `len(pitcher_ranks)`. However, three separate signal paths inside `_calculate_enriched_score()` were missed and still used hardcoded values assuming a 30-pitcher pool:
+
+| Signal | Old Formula | Problem |
+|--------|-------------|---------|
+| SO/over K/9 | `(k9_rank - 15.5) / 2.9` | Midpoint 15.5 assumes 30 pitchers |
+| hits ERA/K9/WHIP | `(rank - 15.5) / 14.5` | Same hardcoded midpoint |
+| totalBases WHIP | `(whip_rank - 15.5) / 2.9` | Same hardcoded midpoint |
+
+With 192 pitchers in the pool, any pitcher ranked above ~29 immediately hit the ±2 or ±5 adjustment cap. The signal was effectively binary — elite pitchers (rank 1-29) got the full negative cap, everyone else got the full positive cap. No discrimination within the pool.
+
+**Fix:** Added dynamic pool size at the top of `_calculate_enriched_score()`:
+```python
+n = max(len(pitcher_ranks), 2)
+midpoint = (n + 1) / 2.0
+```
+All four signal formulas now use `(rank - midpoint) / (midpoint - 1) * scale` — same pattern as `pitcher_vulnerability()`.
+
+**Verification:** `scripts/test_enriched_rank_normalization.py` confirms rank-96 (true midpoint of 192) now returns 0.0 adjustment, not +2.0 (old capped value). All 5 assertions pass.
+
+**Commit:** `0a7ae36` — dynamic rank normalization in _calculate_enriched_score()
 
 ---
 
 ## Pending Items — Next Session
 
-### 1. Verify First Live Lineup Check Tonight (Immediate)
-First check fires at **6:25PM ET** (22:25 UTC) for game_pk 823370.
+### 1. Verify June 15 Lineup Checks and CLV Fired (Immediate)
+First night with a correctly deployed lineup_scheduler. Verify before touching anything else.
 
-After it fires, run:
 ```sql
-SELECT check_type, start_time_group, status, fired_at, completed_at, result_note
+-- Did checks complete?
+SELECT check_type, status, COUNT(*) as checks,
+    MIN(fired_at) as first_fired,
+    MAX(completed_at) as last_completed
 FROM mlb_pending_lineup_checks
-WHERE run_date = CURRENT_DATE
-ORDER BY check_type, trigger_at;
-```
-Healthy: rows move to `completed`, `result_note` shows annotation counts.
+WHERE run_date = '2026-06-15'
+GROUP BY check_type, status;
 
-Also run:
-```sql
+-- Did lineup statuses populate?
 SELECT lineup_check_status, COUNT(*) as legs
-FROM mlb_scored_legs
-WHERE run_date = CURRENT_DATE::text
+FROM mlb_scored_legs WHERE run_date = '2026-06-15'
 GROUP BY lineup_check_status;
-```
-Healthy: mix of `LINEUP_CONFIRMED` and `MISSING_LINEUP_CONFIRMATION`. If all still NULL, the drain cron in `server.py` may not be running — check Railway logs for `[drain]` lines.
 
-### 2. Verify First Live CLV Capture Tonight
-First CLV check fires at **6:39PM ET** (22:39 UTC).
-
-After it fires:
-```sql
+-- CLV capture rate?
 SELECT stat, direction,
-    COUNT(*) as total_legs,
-    COUNT(*) FILTER (WHERE closing_odds IS NOT NULL) as clv_captured,
+    COUNT(*) FILTER (WHERE closing_odds IS NOT NULL) as captured,
+    COUNT(*) as total,
     (COUNT(*) FILTER (WHERE closing_odds IS NOT NULL) * 100.0 /
      NULLIF(COUNT(*), 0))::numeric(5,1) as capture_rate_pct
-FROM mlb_scored_legs
-WHERE run_date = CURRENT_DATE::text
+FROM mlb_scored_legs WHERE run_date = '2026-06-15'
 GROUP BY stat, direction;
 ```
-If capture rate near 0%, the SGO natural-key match `(player_id, stat, line, direction)` is failing. Inspect a raw SGO response to compare key format vs what's stored in `mlb_scored_legs`.
 
-### 3. Monitor Shadow Pipeline Quality (Fresh Start)
-Shadow vs production comparison is clean starting from today's 9AM pipeline run (first one after K/9 fix deployed). The 7-day historical data is tainted and must be excluded from any analysis.
+### 2. Verify Cross-Run Player Cap in Railway Logs
+Check Railway logs for June 16 pipeline runs. Look for `[player_cap]` lines. Expected behavior:
+- 9AM: `No players at cap yet today` (first run of day)
+- Midday: `N player(s) at 2-parlay cap — removed X leg(s)` for players who appeared in 9AM parlays
+- Evening: larger cap list including midday players
 
-After 5+ days of clean shadow data, run the leg win rate comparison by stat to confirm the K/9 fix is working correctly — SO over shadow legs should now show higher win rates on nights with weak K pitchers vs elite K pitchers.
+### 3. 84% Coverage Ceiling — Quick Win (Next Session Priority)
+One-line fix in `main.py`. Trap confirmed (hits/over drops from 71.8% to 31.5% above 84%). No data required. Claude Code task — should be first code change next session.
 
-### 4. Stack Bonus Promotion Criteria (After 7 Clean Shadow Days)
-Promotion requires all three:
+### 4. Monitor Shadow Pitcher Signals (June 16+ data only)
+The dynamic rank normalization fix means shadow scores will have meaningful spread starting June 16. Run the pitcher bucket analysis again in 5 days using June 16+ data only. Key question: does the K/9 direction for hits/over remain counterintuitive with clean data?
+
+```sql
+SELECT
+    CASE
+        WHEN pitcher_k9_rank <= 48 THEN 'elite (1-48)'
+        WHEN pitcher_k9_rank <= 96 THEN 'above avg (49-96)'
+        WHEN pitcher_k9_rank <= 144 THEN 'below avg (97-144)'
+        WHEN pitcher_k9_rank > 144 THEN 'weak (145+)'
+        ELSE 'no data'
+    END as k9_bucket,
+    stat, direction,
+    COUNT(*) FILTER (WHERE result IN ('won','lost')) as legs,
+    (COUNT(*) FILTER (WHERE result = 'won') * 100.0 /
+     NULLIF(COUNT(*) FILTER (WHERE result IN ('won','lost')), 0))::numeric(5,1) as win_rate_pct
+FROM mlb_scored_legs_enriched
+WHERE run_date >= '2026-06-16'
+  AND result IN ('won', 'lost')
+  AND stat IN ('hits', 'strikeouts')
+GROUP BY k9_bucket, stat, direction
+ORDER BY stat, direction, k9_bucket;
+```
+
+### 5. Stack Bonus Promotion Evaluation (After June 20)
+Clean shadow data starts June 13. Re-evaluate after June 20 (7 clean days). Promotion requires all three:
 - Stack legs win ≥5pp more than non-stack legs
 - Shadow parlay win rate ≥ production parlay win rate
 - ≥2 qualifying stacks per day average
 
-Monitoring query (run after 7 days):
-```sql
-SELECT
-    stack_bonus_applied,
-    COUNT(*) FILTER (WHERE result IN ('won','lost')) as resolved,
-    (COUNT(*) FILTER (WHERE result = 'won') * 100.0 /
-     NULLIF(COUNT(*) FILTER (WHERE result IN ('won','lost')), 0))::numeric(5,1) as win_rate
-FROM mlb_scored_legs_enriched
-WHERE run_date >= (CURRENT_DATE - INTERVAL '7 days')::text
-GROUP BY stack_bonus_applied;
-```
-
-### 5. 84% Coverage Ceiling (Quick Win — Still Pending)
-One-line fix in `main.py` coverage gate. Trap confirmed (hits/over drops from 71.8% to 31.5% above 84%). Quick Claude Code task.
+Current read (11 legs): 72.7% vs 55.3% — direction right, sample too small.
 
 ### 6. CLV First Read (~June 26)
-```sql
-SELECT stat, direction,
-    COUNT(*) FILTER (WHERE closing_odds IS NOT NULL) AS captured,
-    (AVG(
-        CASE WHEN closing_odds IS NULL OR odds IS NULL THEN NULL
-        ELSE
-            (CASE WHEN closing_odds::numeric < 0
-                  THEN ABS(closing_odds::numeric)/(ABS(closing_odds::numeric)+100)
-                  ELSE 100/(closing_odds::numeric+100) END)
-          - (CASE WHEN odds::numeric < 0
-                  THEN ABS(odds::numeric)/(ABS(odds::numeric)+100)
-                  ELSE 100/(odds::numeric+100) END)
-        END
-    ) * 100)::numeric(5,2) AS avg_clv_pct
-FROM mlb_scored_legs
-WHERE run_date >= '2026-06-13'
-  AND closing_odds IS NOT NULL
-GROUP BY stat, direction ORDER BY avg_clv_pct DESC;
-```
-Expected: SO/over positive CLV, hits/over near zero or negative.
+CLV capture started June 15 (first confirmed working night). First meaningful read ~June 26.
 
-### 7. TB Under WHIP Signal Validation (Late June)
-Run ~June 26 — same timing as CLV first read.
-
-### 8. Hits/Under Performance Reassessment
-Currently in production whitelist at 39.2% win rate on clean June data (40% breakeven). Decision deferred pending better scoring accuracy. CLV will provide cleaner read. No action until CLV data matures.
+### 7. hits/under Reassessment
+44.1% win rate in shadow scored legs — below breakeven. Currently in production whitelist at low frequency (53 appearances June 4–14 in production parlays, 51.4% win rate). Deferred pending CLV data and cleaner scoring.
 
 ---
 
-## Key Data Findings This Session
+## Session 12 Commits
 
-- **K/9 direction was inverted in enriched scorer for entire operational history** — SO over shadow legs were systematically anti-selected. 7-day shadow comparison invalid.
-- **Stack bonus initial build had 3 correctness bugs** — all fixed before first pipeline run. No corrupted data written.
-- **main.py Session 10 changes were never deployed** — lineup layer and CLV layer were built but had never actually run until today.
-- **Pipeline congruence confirmed** — production and shadow receive identical leg pools. TB under correctly held from production parlays.
-- **Pitcher rank pool is 192-201 starters** — not 30. Any hardcoded rank normalization using 30 as max is wrong.
-- **Shadow parlay underperformance is fully explained by the K/9 inversion** — not a signal quality problem, not construction failure.
+| Commit | Message |
+|--------|---------|
+| `f23abfa` | fix: create missing lineup_scheduler module |
+| sed fix | fix: game_pks must be postgres array format {x,y} not csv string |
+| `116ae9b` | feat: cross-run 2x player cap — players appearing in 2 parlays today removed from future runs |
+| `34b39a9` | fix: mirror resolved outcomes to mlb_scored_legs_enriched + backfill script |
+| `d8d64aa` | fix: backfill enriched scored legs via direct sync from mlb_scored_legs |
+| `0a7ae36` | fix: dynamic rank normalization in _calculate_enriched_score() — same fix as pitcher_vulnerability() |
 
 ---
 
 ## Bugs Fixed This Session
 
 | Bug | File | Impact | Fix |
-|---|---|---|---|
-| Rank scale 1-30 hardcoded (actual 1-196) | `enriched_scorer.py` | Stack vulnerability scores outside [0,1] | Dynamic max rank from leg pool |
-| K/9 direction inverted in `pitcher_vulnerability()` | `enriched_scorer.py` | Stack bonus boosted wrong legs | Formula flipped: `(rank-1)/(max-1)` |
-| Stack eligibility direction-blind | `run_enriched_pipeline.py` | Hits/under and SO/over received bonus | `STACK_ELIGIBLE_PROPS` filter added |
-| K/9 direction inverted in `_calculate_enriched_score()` | `enriched_scorer.py` | 7 days of anti-selected SO over legs | Formula flipped: `(k9_rank-15.5)/2.9` |
-| main.py Session 10 changes never pushed | `main.py` | Lineup/CLV layers never ran | Committed and pushed |
+|-----|------|--------|-----|
+| lineup_scheduler.py missing from repo | `src/pipelines/lineup_scheduler.py` | Lineup/CLV checks never fired since June 13 | Created missing file |
+| game_pks wrong format (csv vs postgres array) | `src/pipelines/lineup_scheduler.py` | INSERT crashing on array format | `{x,y}` format |
+| Cross-run player concentration | `main.py` | Same player in 4-5 parlays sank simultaneously | 2x daily cap replacing manual-only exclusion |
+| enriched result never written to scored legs | `src/tracker/outcome_resolver.py` | 12 days of NULL shadow scored leg results | Mirror block added, 11-day backfill |
+| Rank normalization hardcoded to 30-pitcher pool | `src/engine/enriched_scorer.py` | All pitcher signals binary-capped, no discrimination | Dynamic midpoint from `len(pitcher_ranks)` |
 
 ---
 
 ## System Health Indicators
 
 ### Green Lights
-✅ Stack bonus built, 3 bugs fixed, 13/13 verification tests pass
-✅ K/9 direction correct in both enriched scorer and pitcher_vulnerability
-✅ Historical SO over scores backfilled (June 9-12, 72 legs)
-✅ main.py deployed — lineup/CLV scheduling live for first time
-✅ 22 pending check rows written for tonight's slate
-✅ Pipeline congruence verified — production and shadow correctly aligned
-✅ Schema reference updated and complete
+✅ lineup_scheduler.py deployed — lineup and CLV checks should fire tonight for first time
+✅ Cross-run player cap live — concentration problem addressed
+✅ mlb_scored_legs_enriched.result populated — shadow signal validation now possible
+✅ Dynamic rank normalization correct in both pitcher_vulnerability() and _calculate_enriched_score()
+✅ Stack bonus early signal positive (72.7% vs 55.3% — 11 legs)
+✅ Production leg win rates strong (hits/over 66.9%, SO/over 87.1% — June 12–14)
+✅ TB/under correctly blocked from production parlays (shadow data confirms: 52.6% win rate)
 
 ### Yellow Flags
-⚠️ First live lineup annotation not yet observed — T-45 fires tonight (6:25PM ET)
-⚠️ CLV capture not yet verified live — T-1 fires tonight (6:39PM ET)
-⚠️ 7-day shadow comparison invalid — clean data starts today
-⚠️ Stack bonus needs 7 clean shadow days before promotion evaluation
-⚠️ 84% coverage ceiling still not implemented
-⚠️ TB under shadow validation ongoing
-⚠️ Hits/under at borderline breakeven — deferred pending CLV
+⚠️ First live lineup annotation not yet verified — check June 15 results at start of next session
+⚠️ CLV capture rate unverified live — check June 15 results
+⚠️ Shadow pitcher signals (K9 direction for hits/over) counterintuitive — needs 5 more clean days
+⚠️ Stack bonus needs more data before promotion decision (11 legs resolved)
+⚠️ 84% coverage ceiling still not implemented — quick win for next session
+⚠️ WHIP signal flat across all buckets — may need to be removed from hits scoring
+⚠️ hits/under at 44.1% in shadow — below breakeven, deferred
 
 ### Red Flags
 None currently
 
 ---
 
-**Last Review:** June 13, 2026
-**System Status:** ✅ Operational — K/9 Fixed, Stack Bonus Live, Lineup Layer Active
-**Next Review:** June 14, 2026 (Verify lineup annotation + CLV capture from tonight's games)
-**Pending Decisions:** 84% ceiling (quick win), TB under promotion (late June), hits/over whitelist (after CLV)
+**Last Review:** June 15, 2026
+**System Status:** ✅ Operational — Lineup/CLV Active, Player Cap Live, Shadow Signals Corrected
+**Next Review:** June 16, 2026 — Verify lineup/CLV from June 15 slate + player cap in Railway logs + 84% ceiling fix
+**Pending Decisions:** 84% ceiling (next session quick win), K/9 direction for hits/over (after June 20 data), stack bonus promotion (after June 20), TB under promotion (late June after CLV matures)
