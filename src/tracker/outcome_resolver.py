@@ -735,6 +735,24 @@ def resolve_enriched_parlays(run_date: str, verbose: bool = True) -> dict:
         cur.close()
         conn.close()
 
+        # Mirror result back to mlb_scored_legs_enriched
+        if outcome in ("won", "lost", "void"):
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE mlb_scored_legs_enriched
+                SET result = %s, actual_value = %s
+                WHERE player_name = %s
+                  AND stat = %s
+                  AND run_date = %s
+                """,
+                (outcome, result_value, leg["player_name"], leg["stat"], run_date),
+            )
+            conn.commit()
+            cur.close()
+            conn.close()
+
         if outcome in counts:
             counts[outcome] += 1
 
