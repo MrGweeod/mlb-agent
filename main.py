@@ -802,59 +802,40 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
             avg = sum(stat_scores) / len(stat_scores)
             print(f"[main]   {stat}: {len(stat_scores)} legs, avg score {avg:.1f}")
 
-    # ── Manual regen: exclude players from most recent prior run today ────────────
-    excluded_players: set[str] = set()
-    if source == "manual":
-        try:
-            from src.utils.db import get_conn
-            conn = get_conn()
-            cur = conn.cursor()
-            # First: identify the prior batch_id for logging
-            cur.execute("""
-                SELECT batch_id
-                FROM mlb_parlay_recommendations_v2
-                WHERE run_date = CURRENT_DATE
-                ORDER BY created_at DESC
-                LIMIT 1
-            """)
-            prior_batch_row = cur.fetchone()
-            prior_batch_id = prior_batch_row["batch_id"] if prior_batch_row else None
-            if prior_batch_id:
-                print(f"[manual_regen] Prior batch found: {prior_batch_id}")
-                cur.execute("""
-                    SELECT DISTINCT l.player_name
-                    FROM mlb_parlay_legs_v2 l
-                    JOIN mlb_parlay_recommendations_v2 p ON p.id = l.parlay_id
-                    WHERE p.run_date = CURRENT_DATE
-                      AND p.batch_id = %s
-                """, (prior_batch_id,))
-                excluded_players = {row["player_name"] for row in cur.fetchall() if row["player_name"]}
-                print(f"[manual_regen] Found {len(excluded_players)} player(s) in prior batch: {sorted(excluded_players)}")
-            else:
-                print("[manual_regen] No prior batch found for today — skipping exclusion")
-            cur.close()
-            conn.close()
-        except Exception as _excl_err:
-            print(f"[manual_regen] Could not fetch exclusion list (non-fatal): {_excl_err}")
-            excluded_players = set()
+    orig_qualifying_legs = list(qualifying_legs)
 
-    # Apply exclusion to qualifying_legs, with fallback if pool goes too thin
-    if excluded_players:
-        preferred_legs = [l for l in qualifying_legs if l.get("player_name") not in excluded_players]
-        legs_excluded = len(qualifying_legs) - len(preferred_legs)
-        # Need at least 4 legs to build any parlay
-        if len(preferred_legs) >= 4:
-            print(
-                f"[manual_regen] Excluded {legs_excluded} leg(s) — "
-                f"pool: {len(qualifying_legs)} → {len(preferred_legs)}"
-            )
-            qualifying_legs = preferred_legs
+    # ── Cross-run player cap: max 2 parlay appearances per player per day ────────
+    # A player selected in any prior parlay today is tracked. Once they've
+    # appeared in 2 parlays across all runs today, they are removed from the
+    # pool for this run. Players with 0 or 1 prior appearances remain eligible.
+    try:
+        from src.utils.db import get_conn
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT l.player_name, COUNT(*) as appearances
+            FROM mlb_parlay_legs_v2 l
+            JOIN mlb_parlay_recommendations_v2 p ON p.id = l.parlay_id
+            WHERE p.run_date = CURRENT_DATE
+            GROUP BY l.player_name
+            HAVING COUNT(*) >= 2
+        """)
+        capped_players = {row["player_name"] for row in cur.fetchall()}
+        cur.close()
+        conn.close()
+        if capped_players:
+            before = len(qualifying_legs)
+            qualifying_legs = [l for l in qualifying_legs if l.get("player_name") not in capped_players]
+            removed = before - len(qualifying_legs)
+            print(f"[player_cap] {len(capped_players)} player(s) at 2-parlay cap — removed {removed} leg(s): {sorted(capped_players)}")
         else:
-            print(
-                f"[manual_regen] Pool too thin after exclusion "
-                f"({len(preferred_legs)} legs, excluded {legs_excluded}) — "
-                f"falling back to full pool of {len(qualifying_legs)}"
-            )
+            print("[player_cap] No players at cap yet today")
+        # Fallback: if cap leaves pool too thin, restore full pool
+        if len(qualifying_legs) < 20:
+            print(f"[player_cap] Pool too thin after cap ({len(qualifying_legs)} legs) — restoring full pool")
+            qualifying_legs = [l for l in orig_qualifying_legs if l.get("stat") != "totalBases"] if "orig_qualifying_legs" in dir() else qualifying_legs
+    except Exception as _cap_err:
+        print(f"[player_cap] Could not apply player cap (non-fatal): {_cap_err}")
 
     # ── Step 8: Build Hybrid Parlays ──────────────────────────────────────────
     tier_info  = _tier_params(len(schedule))
