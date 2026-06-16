@@ -1060,6 +1060,28 @@ async def _pipeline_scheduler() -> None:
             print(f"[scheduler] {next_label} pipeline error: {exc}")
 
 
+async def _lineup_drain_scheduler() -> None:
+    """
+    Background task that polls mlb_pending_lineup_checks every minute and fires
+    run_lineup_check() for any rows where trigger_at <= now() and status='pending'.
+
+    Runs independently of the main pipeline scheduler.  One bad game never
+    crashes the loop — exceptions are caught per-row and status set to 'failed'.
+    """
+    from main import LINEUP_DRAIN_INTERVAL_MINUTES
+
+    print(f"[lineup_drain] Drain cron started (interval: {LINEUP_DRAIN_INTERVAL_MINUTES}m)")
+
+    while True:
+        await asyncio.sleep(LINEUP_DRAIN_INTERVAL_MINUTES * 60)
+        try:
+            from src.apis.lineup_confirmation import drain_due_lineup_checks
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, drain_due_lineup_checks)
+        except Exception as exc:
+            print(f"[lineup_drain] drain error (non-fatal): {exc}")
+
+
 async def start_server() -> web.AppRunner:
     """
     Start the aiohttp server and pipeline scheduler.
@@ -1076,6 +1098,10 @@ async def start_server() -> web.AppRunner:
     # Start the background pipeline scheduler
     asyncio.ensure_future(_pipeline_scheduler())
     print("[web] Pipeline scheduler started (9 AM resolution + full fetch, 12 PM + 5:30 PM full refresh, skip resolution)")
+
+    # Start the lineup-confirmation drain cron (event-driven, every 1 min)
+    asyncio.ensure_future(_lineup_drain_scheduler())
+    print("[web] Lineup drain cron started (polls mlb_pending_lineup_checks every 1 min)")
 
     return runner
 

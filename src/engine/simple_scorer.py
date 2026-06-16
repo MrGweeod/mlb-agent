@@ -114,6 +114,26 @@ def calculate_composite_score(leg):
     if lineup_consistency is not None and lineup_consistency < 0.50:
         score -= 5
 
+    # ============================================
+    # 5. BATTING ORDER SLOT: PA-frequency signal
+    # ============================================
+    # Only applied when batting_order is known AND the stat/direction pair has
+    # a defined favorable range.  No penalty when slot is unknown (MISSING) —
+    # absence of data is not evidence of a bad slot.  Hard exclusion of confirmed
+    # unfavorable slots happens only through the lineup-resolution path (§7 spec),
+    # not here — this keeps the 9 AM pool intact before any lineups have posted.
+    batting_order = leg.get("batting_order")
+    if batting_order is not None:
+        try:
+            from main import BATTING_ORDER_FAVORABLE
+            stat      = leg.get("stat", "")
+            direction = (leg.get("direction") or "over").lower()
+            favorable_range = BATTING_ORDER_FAVORABLE.get((stat, direction))
+            if favorable_range is not None and int(batting_order) not in favorable_range:
+                score -= 8  # tunable — sink in pool but do not silently delete
+        except Exception:
+            pass  # never let a missing constant crash the scorer
+
     return max(5, min(95, score))
 
 

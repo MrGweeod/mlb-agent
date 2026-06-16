@@ -267,6 +267,14 @@ def resolve_parlay_recommendations_v2(date: str, verbose: bool = True) -> dict:
                     (void_reason, leg["player_name"], leg["stat"], date),
                 )
                 conn.commit()
+                cur.execute(
+                    "UPDATE mlb_scored_legs_enriched SET result = 'void', actual_value = NULL"
+                    " WHERE player_name = %s AND stat = %s AND direction = %s"
+                    "   AND run_date = %s AND line = %s",
+                    (leg["player_name"], leg["stat"],
+                     (leg["direction"] or "over").lower(), date, leg["line"]),
+                )
+                conn.commit()
                 cur.close()
                 conn.close()
                 continue
@@ -297,6 +305,14 @@ def resolve_parlay_recommendations_v2(date: str, verbose: bool = True) -> dict:
                         (void_reason, leg["player_name"], leg["stat"], date),
                     )
                     conn.commit()
+                    cur.execute(
+                        "UPDATE mlb_scored_legs_enriched SET result = 'void', actual_value = NULL"
+                        " WHERE player_name = %s AND stat = %s AND direction = %s"
+                        "   AND run_date = %s AND line = %s",
+                        (leg["player_name"], leg["stat"],
+                         (leg["direction"] or "over").lower(), date, leg["line"]),
+                    )
+                    conn.commit()
                     cur.close()
                     conn.close()
                     continue
@@ -323,6 +339,14 @@ def resolve_parlay_recommendations_v2(date: str, verbose: bool = True) -> dict:
                         (void_reason, leg["player_name"], leg["stat"], date),
                     )
                     conn.commit()
+                    cur.execute(
+                        "UPDATE mlb_scored_legs_enriched SET result = 'void', actual_value = NULL"
+                        " WHERE player_name = %s AND stat = %s AND direction = %s"
+                        "   AND run_date = %s AND line = %s",
+                        (leg["player_name"], leg["stat"],
+                         (leg["direction"] or "over").lower(), date, leg["line"]),
+                    )
+                    conn.commit()
                     cur.close()
                     conn.close()
                     continue
@@ -344,6 +368,14 @@ def resolve_parlay_recommendations_v2(date: str, verbose: bool = True) -> dict:
                     (void_reason, leg["player_name"], leg["stat"], date),
                 )
                 conn.commit()
+                cur.execute(
+                    "UPDATE mlb_scored_legs_enriched SET result = 'void', actual_value = NULL"
+                    " WHERE player_name = %s AND stat = %s AND direction = %s"
+                    "   AND run_date = %s AND line = %s",
+                    (leg["player_name"], leg["stat"],
+                     (leg["direction"] or "over").lower(), date, leg["line"]),
+                )
+                conn.commit()
                 cur.close()
                 conn.close()
                 continue
@@ -363,6 +395,14 @@ def resolve_parlay_recommendations_v2(date: str, verbose: bool = True) -> dict:
             cur.execute(
                 "UPDATE mlb_parlay_legs_v2 SET outcome = %s, result_value = %s WHERE id = %s",
                 (outcome, result_value, leg["id"]),
+            )
+            conn.commit()
+            cur.execute(
+                "UPDATE mlb_scored_legs_enriched SET result = %s, actual_value = %s"
+                " WHERE player_name = %s AND stat = %s AND direction = %s"
+                "   AND run_date = %s AND line = %s",
+                (outcome, result_value, leg["player_name"], leg["stat"],
+                 direction, date, leg["line"]),
             )
             conn.commit()
             cur.close()
