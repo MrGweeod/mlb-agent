@@ -948,6 +948,44 @@ def get_players_used_today(run_date: str) -> set:
         conn.close()
 
 
+def get_enriched_players_used_today(run_date: str) -> set[str]:
+    """
+    Get set of player IDs already used in 2+ shadow parlays today.
+
+    Mirrors get_players_used_today() but queries the enriched shadow tables.
+    Returns player_ids (as strings) for players who have appeared in 2 or more
+    shadow parlays today — same 2x threshold as production.
+
+    Args:
+        run_date: Date string (YYYY-MM-DD)
+
+    Returns:
+        set: Player IDs (as strings) at or above the 2-parlay cap today
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT l.player_id, COUNT(*) as appearances
+            FROM mlb_parlay_legs_enriched l
+            JOIN mlb_parlay_recommendations_enriched r ON r.id = l.parlay_id
+            WHERE r.run_date = %s::date
+            GROUP BY l.player_id
+            HAVING COUNT(*) >= 2
+            """,
+            (run_date,),
+        )
+        rows = cur.fetchall()
+        return {str(row["player_id"]) for row in rows}
+    except Exception as e:
+        print(f"[ERROR] Failed to get enriched players used today: {e}")
+        return set()  # fail open — don't block parlay generation
+    finally:
+        cur.close()
+        conn.close()
+
+
 def get_pitcher_profile(pitcher_id: str, max_age_hours: int = 24) -> dict | None:
     """Return cached pitcher profile, or None if missing/expired (TTL 24hr)."""
     conn = get_conn()

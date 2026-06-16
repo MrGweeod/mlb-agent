@@ -29,7 +29,7 @@ from src.engine.enriched_scorer import (
     pitcher_vulnerability,
 )
 from src.engine.parlay_builder import build_hybrid_parlays
-from src.utils.db import get_conn
+from src.utils.db import get_conn, get_enriched_players_used_today
 
 
 def apply_stack_bonuses(scored_legs: list[dict]) -> list[dict]:
@@ -413,9 +413,37 @@ def run_enriched_pipeline(scored_legs: list, production_batch_id: str = "") -> N
     # Post-scoring stack bonus pass (must run after individual scores, before DB write)
     apply_stack_bonuses(enriched_legs)
 
+    # Apply cross-run 2x player cap — mirrors production player_cap logic
+    pool_for_parlays = enriched_legs
+    try:
+        capped_player_ids = get_enriched_players_used_today(today)
+        if capped_player_ids:
+            before = len(pool_for_parlays)
+            pool_for_parlays = [
+                l for l in pool_for_parlays
+                if str(l.get("player_id", "")) not in capped_player_ids
+            ]
+            removed = before - len(pool_for_parlays)
+            print(
+                f"[enriched_player_diversity] Filtered {removed} legs from "
+                f"{len(capped_player_ids)} players already used today: "
+                f"{sorted(capped_player_ids)}"
+            )
+            # Fallback: if cap leaves pool too thin, restore full pool
+            if len(pool_for_parlays) < 20:
+                print(
+                    f"[enriched_player_diversity] Pool too thin after cap "
+                    f"({len(pool_for_parlays)} legs) — restoring full pool"
+                )
+                pool_for_parlays = enriched_legs
+        else:
+            print(f"[enriched_player_diversity] No players at cap yet today — {len(pool_for_parlays)} legs in pool")
+    except Exception as _cap_err:
+        print(f"[enriched_player_diversity] Could not apply player cap (non-fatal): {_cap_err}")
+
     # Build 4-leg +400-+700 shadow parlays from single flat pool
     shadow_parlays = build_hybrid_parlays(
-        enriched_legs,
+        pool_for_parlays,
         [],
         num_games=len(schedule) if schedule else 15,
     )
