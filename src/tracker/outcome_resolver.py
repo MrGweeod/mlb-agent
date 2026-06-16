@@ -675,7 +675,7 @@ def resolve_enriched_parlays(run_date: str, verbose: bool = True) -> dict:
     cur  = conn.cursor()
     cur.execute(
         """
-        SELECT l.id AS leg_id, l.player_name, l.stat, l.parlay_id
+        SELECT l.id AS leg_id, l.player_name, l.stat, l.direction, l.parlay_id
         FROM mlb_parlay_legs_enriched l
         JOIN mlb_parlay_recommendations_enriched r ON r.id = l.parlay_id
         WHERE l.outcome = 'pending'
@@ -707,11 +707,12 @@ def resolve_enriched_parlays(run_date: str, verbose: bool = True) -> dict:
             FROM mlb_scored_legs
             WHERE player_name = %s
               AND stat = %s
+              AND direction = %s
               AND run_date::date = %s::date
               AND result IS NOT NULL
             LIMIT 1
             """,
-            (leg["player_name"], leg["stat"], run_date),
+            (leg["player_name"], leg["stat"], leg["direction"], run_date),
         )
         row = cur.fetchone()
         cur.close()
@@ -745,9 +746,10 @@ def resolve_enriched_parlays(run_date: str, verbose: bool = True) -> dict:
                 SET result = %s, actual_value = %s
                 WHERE player_name = %s
                   AND stat = %s
+                  AND direction = %s
                   AND run_date = %s
                 """,
-                (outcome, result_value, leg["player_name"], leg["stat"], run_date),
+                (outcome, result_value, leg["player_name"], leg["stat"], leg["direction"], run_date),
             )
             conn.commit()
             cur.close()
