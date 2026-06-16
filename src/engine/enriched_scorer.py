@@ -367,56 +367,31 @@ def _calculate_enriched_score(
     enriched["recent_form_rank"] = recent_form_rank
 
     # K/9 rank signal for strikeouts over props
-    # Rank convention: rank 1 = highest K/9 = elite = TOUGH for batter to strike out against
-    # High rank = weak K pitcher = favorable for batter SO over
+    # Rank convention: rank 1 = highest K/9 = elite = batter MORE likely to strikeout = BOOST SO/over
+    # High rank (weak K pitcher) = batter LESS likely to strikeout = PENALIZE SO/over
     if stat == "strikeouts" and direction == "over":
         k9_rank = leg.get("opp_pitcher_k9_rank")
         if k9_rank is not None:
-            # rank 1 → -5 (elite K pitcher, penalize SO over)
-            # rank 15.5 → 0 (neutral)
-            # high rank → +5 capped (weak K pitcher, boost SO over)
-            k9_adj = round((k9_rank - midpoint) / (midpoint - 1) * 5.0, 1)
+            # rank 1 (elite K/9) → +5 boost for SO/over
+            # midpoint → 0
+            # high rank (weak K/9) → -5 penalty for SO/over
+            k9_adj = round((midpoint - k9_rank) / (midpoint - 1) * 5.0, 1)
             k9_adj = max(-5.0, min(5.0, k9_adj))
             score += k9_adj
             enriched["k9_adj"] = k9_adj
 
-    # Combined pitcher signal for hits props — ERA + K/9 + WHIP each capped ±2
-    if stat == "hits":
-        pitcher_adj = 0.0
-
-        era_rank = leg.get("opp_pitcher_era_rank")
-        if era_rank is not None:
-            # High ERA rank = weak pitcher = favorable for hits over
-            era_adj = round((era_rank - midpoint) / (midpoint - 1) * 2.0, 1)
-            era_adj = max(-2.0, min(2.0, era_adj))
-            pitcher_adj += era_adj
-            enriched["era_adj"] = era_adj
-
-        k9_rank = leg.get("opp_pitcher_k9_rank")
-        if k9_rank is not None:
-            # High K/9 rank = weak strikeout pitcher = favorable for hits over
-            k9_adj = round((k9_rank - midpoint) / (midpoint - 1) * 2.0, 1)
-            k9_adj = max(-2.0, min(2.0, k9_adj))
-            pitcher_adj += k9_adj
-            enriched["k9_adj"] = k9_adj
-
-        whip_rank = leg.get("opp_pitcher_whip_rank")
-        if whip_rank is not None:
-            # High WHIP rank = weak pitcher = favorable for hits over
-            whip_adj = round((whip_rank - midpoint) / (midpoint - 1) * 2.0, 1)
-            whip_adj = max(-2.0, min(2.0, whip_adj))
-            pitcher_adj += whip_adj
-            enriched["whip_adj"] = whip_adj
-
-        if direction == "under":
-            pitcher_adj = -pitcher_adj
-            if "era_adj" in enriched:
-                enriched["era_adj"] = -enriched["era_adj"]
-            if "k9_adj" in enriched:
-                enriched["k9_adj"] = -enriched["k9_adj"]
-            if "whip_adj" in enriched:
-                enriched["whip_adj"] = -enriched["whip_adj"]
-        score += pitcher_adj
+    # Pitcher vulnerability signal for hits/over only
+    # Low vulnerability (elite pitcher) → penalize hits/over; hits/under has no pitcher signal
+    if stat == "hits" and direction == "over":
+        max_era_rank  = max((v.get("era_rank")  or 0 for v in pitcher_ranks.values()), default=0)
+        max_k9_rank   = max((v.get("k9_rank")   or 0 for v in pitcher_ranks.values()), default=0)
+        max_whip_rank = max((v.get("whip_rank") or 0 for v in pitcher_ranks.values()), default=0)
+        vuln = pitcher_vulnerability(leg, max_era_rank, max_k9_rank, max_whip_rank)
+        if vuln is not None:
+            if vuln < 0.15:
+                score -= 10
+            elif vuln < 0.25:
+                score -= 6
 
     # WHIP rank signal for totalBases props
     # Low WHIP (rank 1) = elite pitcher = fewer baserunners = boost UNDER, penalize OVER
