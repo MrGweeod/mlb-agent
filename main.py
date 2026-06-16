@@ -1112,10 +1112,13 @@ def run_morning_pipeline(source: str | None = None) -> None:
     # Step 2: Resolve yesterday's scored legs (mlb_scored_legs)
     print(f"\n[2/4] Resolving scored legs for {yesterday}...")
     try:
-        from src.tracker.outcome_resolver import resolve_all_legs, resolve_training_data, resolve_enriched_parlays
+        from src.tracker.outcome_resolver import resolve_all_legs, resolve_training_data, resolve_enriched_parlays, resolve_all_enriched_legs
         leg_stats = resolve_all_legs(yesterday, verbose=True)
         print(f"  Scored legs: {leg_stats['won']} won, "
               f"{leg_stats['lost']} lost, {leg_stats['void']} void")
+        enriched_stats = resolve_all_enriched_legs(yesterday, verbose=True)
+        print(f"  Enriched legs: {enriched_stats['won']} won, "
+              f"{enriched_stats['lost']} lost, {enriched_stats['void']} void")
         resolve_enriched_parlays(yesterday)
     except Exception as _leg_err:
         print(f"  WARNING: Scored-leg resolution failed: {_leg_err}")

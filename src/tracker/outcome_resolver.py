@@ -157,6 +157,27 @@ def _batch_commit(updates: list[tuple]) -> None:
     conn.close()
 
 
+def _batch_commit_enriched(updates: list[tuple]) -> None:
+    """
+    Commit a batch of (result, actual_value, run_date, odd_id) updates to
+    mlb_scored_legs_enriched. Uses (run_date, odd_id) as the natural key
+    because mlb_scored_legs_enriched.id is NULL for all rows.
+    """
+    if not updates:
+        return
+    conn = get_conn()
+    cur  = conn.cursor()
+    for result, actual, run_date, odd_id in updates:
+        cur.execute(
+            "UPDATE mlb_scored_legs_enriched SET result = %s, actual_value = %s "
+            "WHERE run_date = %s AND odd_id = %s",
+            (result, actual, run_date, odd_id),
+        )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
 # ── Box-score resolver (primary path) ────────────────────────────────────────
 
 def resolve_all_legs(run_date: str, verbose: bool = True) -> dict:
@@ -285,6 +306,140 @@ def resolve_all_legs(run_date: str, verbose: bool = True) -> dict:
     if verbose:
         print(
             f"\n[RESOLVER] Complete: "
+            f"{counts['won']} won, {counts['lost']} lost, {counts['void']} void "
+            f"({total} total)"
+        )
+    return {**counts, "total": total}
+
+
+# ── Enriched-leg resolver (box-score path) ───────────────────────────────────
+
+def resolve_all_enriched_legs(run_date: str, verbose: bool = True) -> dict:
+    """
+    Resolve all unresolved mlb_scored_legs_enriched rows for *run_date* using
+    box scores.
+
+    Mirrors resolve_all_legs() but targets mlb_scored_legs_enriched. Updates
+    are keyed on (run_date, odd_id) because mlb_scored_legs_enriched.id is
+    NULL for all rows.
+
+    Args:
+        run_date: 'YYYY-MM-DD' text matching mlb_scored_legs_enriched.run_date.
+        verbose:  Print progress to stdout.
+
+    Returns:
+        {'won': int, 'lost': int, 'void': int, 'total': int}
+    """
+    conn = get_conn()
+    cur  = conn.cursor()
+    cur.execute(
+        "SELECT * FROM mlb_scored_legs_enriched "
+        "WHERE run_date = %s AND result IS NULL AND game_pk IS NOT NULL",
+        (run_date,),
+    )
+    legs = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+
+    if not legs:
+        if verbose:
+            print(f"[ENRICHED RESOLVER] No pending enriched legs for {run_date}.")
+        return {"won": 0, "lost": 0, "void": 0, "total": 0}
+
+    if verbose:
+        print(f"[ENRICHED RESOLVER] {len(legs)} pending enriched legs for {run_date}...")
+
+    # Group by game_pk — one box score fetch covers all players in that game
+    by_game: dict[int, list] = {}
+    no_game: list = []
+    for leg in legs:
+        gp = leg.get("game_pk")
+        if gp:
+            by_game.setdefault(int(gp), []).append(leg)
+        else:
+            no_game.append(leg)
+
+    counts = {"won": 0, "lost": 0, "void": 0}
+    pending: list[tuple] = []  # (result, actual_value, run_date, odd_id)
+    batch_size = 10
+
+    for game_pk, game_legs in sorted(by_game.items()):
+        if verbose:
+            print(f"[ENRICHED RESOLVER] Processing game {game_pk} ({len(game_legs)} legs)...")
+
+        try:
+            box = statsapi.boxscore_data(game_pk)
+        except Exception as exc:
+            print(f"  [ENRICHED RESOLVER] boxscore fetch failed for {game_pk}: {exc} — voiding legs")
+            for leg in game_legs:
+                pending.append(("void", None, run_date, leg["odd_id"]))
+                counts["void"] += 1
+            continue
+
+        player_index = _build_player_stats_index(box)
+
+        for leg in game_legs:
+            player_id_raw = leg.get("player_id")
+            stat          = leg.get("stat", "")
+            line          = float(leg.get("line") or 0)
+            direction     = leg.get("direction", "over")
+            position      = leg.get("position", "")
+            name          = leg.get("player_name", "?")
+            odd_id        = leg.get("odd_id", "")
+
+            try:
+                player_id = int(player_id_raw) if player_id_raw else None
+            except (ValueError, TypeError):
+                player_id = None
+
+            if not player_id:
+                pending.append(("void", None, run_date, odd_id))
+                counts["void"] += 1
+                if verbose:
+                    print(f"  {name}: no player_id → VOID")
+                continue
+
+            p_stats = player_index.get(player_id)
+            if p_stats is None:
+                pending.append(("void", None, run_date, odd_id))
+                counts["void"] += 1
+                if verbose:
+                    print(f"  {name}: not in boxscore → VOID (DNP/scratched)")
+                continue
+
+            actual = extract_stat_from_boxscore(p_stats, stat, position)
+            if actual is None:
+                pending.append(("void", None, run_date, odd_id))
+                counts["void"] += 1
+                if verbose:
+                    print(f"  {name} {stat}: extraction failed → VOID")
+                continue
+
+            result = "won" if (actual > line if direction == "over" else actual < line) else "lost"
+            pending.append((result, actual, run_date, odd_id))
+            counts[result] += 1
+
+            if verbose:
+                dl = "u" if direction == "under" else "o"
+                flag = " [in_parlay]" if leg.get("in_parlay") else ""
+                print(f"  {name} {stat} {dl}{line}: got {actual:.1f} → {result.upper()}{flag}")
+
+            if len(pending) >= batch_size:
+                _batch_commit_enriched(pending)
+                pending.clear()
+
+    # Void legs without a game_pk
+    for leg in no_game:
+        pending.append(("void", None, run_date, leg["odd_id"]))
+        counts["void"] += 1
+
+    # Flush remainder
+    _batch_commit_enriched(pending)
+
+    total = sum(counts.values())
+    if verbose:
+        print(
+            f"\n[ENRICHED RESOLVER] Complete: "
             f"{counts['won']} won, {counts['lost']} lost, {counts['void']} void "
             f"({total} total)"
         )
