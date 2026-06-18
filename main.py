@@ -830,9 +830,13 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
             print(f"[player_cap] {len(capped_players)} player(s) at 2-parlay cap — removed {removed} leg(s): {sorted(capped_players)}")
         else:
             print("[player_cap] No players at cap yet today")
-        # Fallback: if cap leaves pool too thin, restore full pool
-        if len(qualifying_legs) < 20:
-            print(f"[player_cap] Pool too thin after cap ({len(qualifying_legs)} legs) — restoring full pool")
+        # Fallback: if cap leaves pool too thin or overs are insufficient, restore full pool
+        over_legs_remaining = [l for l in qualifying_legs if l.get("direction") == "over"]
+        if len(qualifying_legs) < 20 or len(over_legs_remaining) < 10:
+            print(
+                f"[player_cap] Pool too thin after cap "
+                f"({len(qualifying_legs)} total, {len(over_legs_remaining)} overs) — restoring full pool"
+            )
             qualifying_legs = [l for l in orig_qualifying_legs if l.get("stat") != "totalBases"] if "orig_qualifying_legs" in dir() else qualifying_legs
     except Exception as _cap_err:
         print(f"[player_cap] Could not apply player cap (non-fatal): {_cap_err}")

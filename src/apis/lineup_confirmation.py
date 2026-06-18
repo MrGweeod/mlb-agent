@@ -467,7 +467,10 @@ def run_confirmed_lineup_resolution(run_date_str: str, affected_parlay_ids: list
         leg["best_line"] = leg.get("line")
         eligible_pool.append(leg)
 
-    print(f"[clr] Replacement pool: {len(eligible_pool)} eligible upcoming legs")
+    # Mirror main.py production exclusion — totalBases legs are shadow-only
+    eligible_pool = [l for l in eligible_pool if l.get("stat") != "totalBases"]
+
+    print(f"[clr] Replacement pool: {len(eligible_pool)} eligible upcoming legs (totalBases excluded)")
 
     # Fetch affected parlay details
     conn = get_conn()
@@ -503,6 +506,7 @@ def run_confirmed_lineup_resolution(run_date_str: str, affected_parlay_ids: list
 
     rebuilt = 0
     thin_pool = 0
+    used_replacement_player_ids: set[str] = set()
 
     for parlay in affected_parlays:
         parlay_id = parlay["id"]
@@ -516,10 +520,11 @@ def run_confirmed_lineup_resolution(run_date_str: str, affected_parlay_ids: list
             for l in bad_legs
         )
 
-        # Remove bad players from the replacement pool
+        # Remove bad players and already-used replacement players from the pool
         available_pool = [
             leg for leg in eligible_pool
             if str(leg.get("player_id")) not in bad_player_ids
+            and str(leg.get("player_id")) not in used_replacement_player_ids
         ]
 
         from src.engine.parlay_builder import TOTAL_LEGS
@@ -619,6 +624,9 @@ def run_confirmed_lineup_resolution(run_date_str: str, affected_parlay_ids: list
 
         # Void the superseded parlay
         _void_parlay(parlay_id, batch_id, bad_reasons)
+        used_replacement_player_ids.update(
+            str(l.get("player_id")) for l in replacement_legs
+        )
         rebuilt += 1
         print(
             f"[clr] Parlay {parlay_id} superseded by new parlay {new_parlay_id} "

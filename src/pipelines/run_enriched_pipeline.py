@@ -429,11 +429,12 @@ def run_enriched_pipeline(scored_legs: list, production_batch_id: str = "") -> N
                 f"{len(capped_player_ids)} players already used today: "
                 f"{sorted(capped_player_ids)}"
             )
-            # Fallback: if cap leaves pool too thin, restore full pool
-            if len(pool_for_parlays) < 20:
+            # Fallback: if cap leaves pool too thin or overs are insufficient, restore full pool
+            over_legs_remaining = [l for l in pool_for_parlays if l.get("direction") == "over"]
+            if len(pool_for_parlays) < 20 or len(over_legs_remaining) < 10:
                 print(
                     f"[enriched_player_diversity] Pool too thin after cap "
-                    f"({len(pool_for_parlays)} legs) — restoring full pool"
+                    f"({len(pool_for_parlays)} total, {len(over_legs_remaining)} overs) — restoring full pool"
                 )
                 pool_for_parlays = enriched_legs
         else:
