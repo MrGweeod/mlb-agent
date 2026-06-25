@@ -855,12 +855,19 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
             print(f"[player_cap] {len(capped_players)} player(s) at 2-parlay cap — removed {removed} leg(s): {sorted(capped_players)}")
         else:
             print("[player_cap] No players at cap yet today")
-        # Fallback: if cap leaves pool too thin or overs are insufficient, restore full pool
-        over_legs_remaining = [l for l in qualifying_legs if l.get("direction") == "over"]
-        if len(qualifying_legs) < 20 or len(over_legs_remaining) < 10:
+        # Fallback: if cap leaves production pool too thin, restore full pool.
+        # Must simulate TB exclusion here — TB/under legs are excluded from
+        # production parlays in Step 8, so checking total qualifying_legs is
+        # misleading (they looked healthy at 41 legs but 31 were TB/under).
+        production_eligible = [
+            l for l in qualifying_legs
+            if l.get("stat") != "totalBases"
+        ]
+        production_overs = [l for l in production_eligible if l.get("direction") == "over"]
+        if len(production_eligible) < 12 or len(production_overs) < 6:
             print(
-                f"[player_cap] Pool too thin after cap "
-                f"({len(qualifying_legs)} total, {len(over_legs_remaining)} overs) — restoring full pool"
+                f"[player_cap] Production pool too thin after cap "
+                f"({len(production_eligible)} non-TB legs, {len(production_overs)} overs) — restoring full pool"
             )
             qualifying_legs = [l for l in orig_qualifying_legs if l.get("stat") != "totalBases"]
     except Exception as _cap_err:
