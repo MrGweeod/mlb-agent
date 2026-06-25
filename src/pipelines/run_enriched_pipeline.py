@@ -19,7 +19,7 @@ import datetime
 import statsapi
 
 from src.apis.mlb_stats import get_schedule
-from src.apis.pitcher_stats import get_pitcher_ranks
+from src.apis.pitcher_stats import get_pitcher_ranks, get_starter_ranks_for_today
 from src.engine import enriched_scorer
 from src.engine.enriched_scorer import (
     STACK_BONUS,
@@ -397,6 +397,16 @@ def run_enriched_pipeline(scored_legs: list, production_batch_id: str = "") -> N
     # Fetch pitcher ranks (hits 24h cache populated by production run)
     pitcher_ranks = get_pitcher_ranks(season)
 
+    # Build today-only starter ranks for clean WHIP/K9 signals
+    # (same logic as main.py — eliminates reliever contamination)
+    _today_starter_ids = list({
+        int(leg["opposing_pitcher_id"])
+        for leg in enriched_legs
+        if leg.get("opposing_pitcher_id") is not None
+    })
+    today_starter_ranks = get_starter_ranks_for_today(_today_starter_ids, season)
+    print(f"[ENRICHED PIPELINE] Today's starter ranks: {len(today_starter_ranks)} pitchers")
+
     # Load ballpark factors (hits module-level cache if already loaded)
     ballpark_factors = enriched_scorer._load_ballpark_factors()
 
@@ -408,6 +418,7 @@ def run_enriched_pipeline(scored_legs: list, production_batch_id: str = "") -> N
         ballpark_factors=ballpark_factors,
         abbr_to_team_id=abbr_to_team_id,
         game_pk_to_home_abbr=game_pk_to_home_abbr,
+        today_starter_ranks=today_starter_ranks,   # ← add this
     )
 
     # Post-scoring stack bonus pass (must run after individual scores, before DB write)

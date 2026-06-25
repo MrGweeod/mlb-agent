@@ -18,8 +18,10 @@ from src.utils.db import get_conn
 
 # Prop type → stat key in batter game log (mirrors coverage.py PROP_STAT_MAP)
 _PROP_STAT_MAP = {
-    "hits":       "hits",
-    "strikeouts": "strikeOuts",
+    "hits":        "hits",
+    "strikeouts":  "strikeOuts",
+    "totalBases":  "totalBases",   # added Jun 25, 2026 — enables opponent-specific
+                                   # coverage calculation for TB props
 }
 
 _ballpark_cache: dict | None = None
@@ -299,6 +301,10 @@ def _compute_park_adjustment(
         return float(run_factor), (run_factor - 100) / 100 * 5
     elif stat == "strikeouts":
         return float(run_factor), (100 - run_factor) / 100 * 3
+    elif stat == "totalBases":
+        # Same formula as hits — hitter parks (Coors 115) produce more total bases.
+        # Direction inversion (under vs over) is handled by the caller.
+        return float(run_factor), (run_factor - 100) / 100 * 5
     else:
         return None, None
 
@@ -388,10 +394,20 @@ def _calculate_enriched_score(
         max_whip_rank = max((v.get("whip_rank") or 0 for v in pitcher_ranks.values()), default=0)
         vuln = pitcher_vulnerability(leg, max_era_rank, max_k9_rank, max_whip_rank)
         if vuln is not None:
-            if vuln < 0.15:
-                score -= 10
-            elif vuln < 0.25:
+            # Recalibrated Jun 25, 2026 based on 400 resolved hits/over legs:
+            # Sweet spot is vuln 0.20–0.49 (64–68% win rate).
+            # Penalties are symmetric: elite pitchers suppress hits/over,
+            # AND weak pitchers suppress hits/over (book prices weakness in).
+            # Elite pitcher penalty (<0.15 → -10 removed — only 19 legs,
+            # and 57.9% win rate doesn't justify -10pt penalty).
+            if vuln < 0.20:          # elite pitcher — mild suppression
                 score -= 6
+            elif vuln < 0.30:        # good pitcher — slight suppression
+                score -= 3
+            elif vuln >= 0.65:       # weak pitcher — book prices it in, hurts bets
+                score -= 6
+            elif vuln >= 0.50:       # below-avg pitcher — mild suppression
+                score -= 3
 
     # WHIP rank signal for totalBases props
     # Low WHIP (rank 1) = elite pitcher = fewer baserunners = boost UNDER, penalize OVER
@@ -433,7 +449,13 @@ def _calculate_enriched_score(
     enriched["park_adjustment"] = park_adjustment
 
     if park_adjustment is not None:
-        score += park_adjustment
+        # Invert for under props: a hitter-friendly park (high run_factor)
+        # boosts overs but hurts unders — the raw park_adjustment is always
+        # computed as a positive value for hitter parks, so flip the sign.
+        if direction == "under":
+            score -= park_adjustment
+        else:
+            score += park_adjustment
 
     enriched.setdefault("era_adj", None)
     enriched.setdefault("k9_adj", None)
@@ -451,6 +473,7 @@ def score_legs(
     ballpark_factors: dict | None = None,
     abbr_to_team_id: dict | None = None,
     game_pk_to_home_abbr: dict | None = None,
+    today_starter_ranks: dict | None = None,   # ← add this
 ) -> list[dict]:
     """
     Score all legs using enriched signals. Mutates legs in-place.
@@ -478,6 +501,22 @@ def score_legs(
         abbr_to_team_id = {}
     if game_pk_to_home_abbr is None:
         game_pk_to_home_abbr = {}
+
+    # Override opp_pitcher_*_rank with today's starter-only ranks where available
+    if today_starter_ranks:
+        for leg in legs:
+            opp_id = leg.get("opposing_pitcher_id") or leg.get("pitcher_id")
+            if opp_id:
+                try:
+                    today = today_starter_ranks.get(int(opp_id), {})
+                    if today.get("era_rank") is not None:
+                        leg["opp_pitcher_era_rank"] = today["era_rank"]
+                    if today.get("k9_rank") is not None:
+                        leg["opp_pitcher_k9_rank"] = today["k9_rank"]
+                    if today.get("whip_rank") is not None:
+                        leg["opp_pitcher_whip_rank"] = today["whip_rank"]
+                except (ValueError, TypeError):
+                    pass
 
     for leg in legs:
         opp_abbr = leg.get("opponent", "")

@@ -29,7 +29,7 @@ from src.apis.mlb_stats import (
     get_transactions,
     is_il_placement,
 )
-from src.apis.pitcher_stats import get_pitcher_ranks
+from src.apis.pitcher_stats import get_pitcher_ranks, get_starter_ranks_for_today
 from src.apis.sportsgameodds import get_todays_games, get_player_props
 from src.apis.team_stats import get_team_offensive_ranks
 from src.engine.coverage import calculate_coverage, PROP_STAT_MAP
@@ -358,9 +358,13 @@ def _find_qualifying_legs(
         if direction == "under" and coverage_overall_raw < 40.0:
             continue
 
-        # Gate 2: hits under requires stricter floor within the under gate
+        # Gate 2: hits/under requires same 65% floor as overs.
+        # Data analysis (Jun 25, 2026): 411 hits/under legs at 40% gate averaged
+        # 48.8% coverage and 50.1% win rate vs 56.4% breakeven (−6.3pp edge).
+        # The 14 hits/under legs selected into parlays averaged 66.0% coverage
+        # and won at 57.1% — confirming the gate raise keeps the good legs.
         if stat == "hits" and direction == "under":
-            if coverage_overall_raw < 40.0:
+            if coverage_overall_raw < 65.0:
                 continue
 
         # Single pool check: odds in [-250, +150]
@@ -414,6 +418,7 @@ def _attach_pitcher_rank_signals(
     team_offensive_ranks: dict,
     opponent_map: dict[str, str],
     abbr_to_team_id: dict[str, int],
+    today_starter_ranks: dict | None = None,   # ← add this parameter
 ) -> None:
     """
     Attach pitcher quality and opponent offense rank fields to pitcher legs.
@@ -433,14 +438,27 @@ def _attach_pitcher_rank_signals(
             or stat in {"inningsPitched", "hitsAllowed", "earnedRuns"}
         )
         if not is_pitcher:
-            # Hitter leg — attach OPPOSING pitcher's rank signals
             opp_pitcher_id = leg.get("opposing_pitcher_id") or leg.get("pitcher_id")
             if opp_pitcher_id:
                 try:
-                    opp_ranks = pitcher_ranks.get(int(opp_pitcher_id), {})
-                    leg["opp_pitcher_era_rank"]  = opp_ranks.get("era_rank")
-                    leg["opp_pitcher_k9_rank"]   = opp_ranks.get("k9_rank")
-                    leg["opp_pitcher_whip_rank"] = opp_ranks.get("whip_rank")
+                    pid_int = int(opp_pitcher_id)
+                    opp_ranks = pitcher_ranks.get(pid_int, {})
+                    today_ranks = (today_starter_ranks or {}).get(pid_int, {})
+
+                    # ERA rank: prefer today's starter-only rank, fall back to full pool
+                    leg["opp_pitcher_era_rank"] = (
+                        today_ranks.get("era_rank") or opp_ranks.get("era_rank")
+                    )
+                    # K/9 rank: prefer today's starter-only rank, fall back to full pool
+                    leg["opp_pitcher_k9_rank"] = (
+                        today_ranks.get("k9_rank") or opp_ranks.get("k9_rank")
+                    )
+                    # WHIP rank: prefer today's starter-only rank, fall back to full pool
+                    # Data analysis confirmed full-pool WHIP rank is contaminated by
+                    # relievers — today's starter-only rank is the clean signal
+                    leg["opp_pitcher_whip_rank"] = (
+                        today_ranks.get("whip_rank") or opp_ranks.get("whip_rank")
+                    )
                 except (ValueError, TypeError):
                     pass
             continue
@@ -606,6 +624,12 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
     team_abbr_to_game_pk, pitcher_id_map, opponent_map = _build_team_maps(
         schedule, team_id_to_abbr
     )
+
+    # Build today-only starter ranks — cleaner signal than full-season pool
+    # (eliminates reliever contamination at rank extremes)
+    today_starter_ids = [pid for pid in pitcher_id_map.values() if pid is not None]
+    today_starter_ranks = get_starter_ranks_for_today(today_starter_ids, season)
+    print(f"[main] Today's starter-only ranks built for {len(today_starter_ids)} pitcher(s)")
 
     # ── Step 3: Player Props (SportsGameOdds) ─────────────────────────────────
     print("\n[3/8] Fetching player props from SportsGameOdds...")
@@ -782,6 +806,7 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
         team_offensive_ranks,
         opponent_map,
         abbr_to_team_id,
+        today_starter_ranks=today_starter_ranks,   # ← add this
     )
 
     # ── Simple Scoring (all qualifying legs, before logging and parlay builder) ──

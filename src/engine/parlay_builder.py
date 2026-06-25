@@ -25,7 +25,9 @@ MIN_PARLAY_ODDS   = 400
 MAX_PARLAY_ODDS   = 700
 TOTAL_LEGS        = 4
 MIN_COV_POOL      = 65.0
-MIN_COV_POOL_UNDER = 40.0  # Direction-aware floor for under props
+MIN_COV_POOL_UNDER = 65.0  # hits/under gate raised from 40% to 65% (Jun 25, 2026)
+                            # Data showed 40% gate let in 397 junk legs averaging
+                            # 48.8% coverage at 50.1% win rate vs 56.4% breakeven.
 POOL_MIN_ODDS     = -250
 POOL_MAX_ODDS     = 150
 MAX_LEGS_PER_GAME = 2

@@ -147,6 +147,66 @@ def get_pitcher_ranks(season: int) -> dict:
     return ranks
 
 
+def get_starter_ranks_for_today(
+    today_starter_ids: list[int],
+    season: int,
+) -> dict[int, dict]:
+    """
+    Return ERA, K/9, and WHIP ranks computed only across today's confirmed
+    starting pitchers.
+
+    Ranks 1 (best) to N (worst), where N = number of starters with available
+    stats today. Eliminates reliever contamination from the full-season pool.
+
+    Data analysis (Jun 25, 2026) showed the full-season rank pool mixes
+    starters and relievers, causing rank 161+ to behave anomalously.
+    Restricting to today's starters produces a clean, meaningful rank signal.
+
+    Args:
+        today_starter_ids: List of MLB pitcher IDs starting tonight.
+                           Built from pitcher_id_map in main.py.
+        season: Current season year.
+
+    Returns:
+        {pitcher_id: {"era_rank": int, "k9_rank": int, "whip_rank": int}}
+        Only contains pitchers with available season stats.
+        Returns {} if today_starter_ids is empty or no stats available.
+    """
+    if not today_starter_ids:
+        return {}
+
+    pitcher_data: list[dict] = []
+    for pid in today_starter_ids:
+        stats = get_pitcher_stats(pid, season)
+        if stats is not None:
+            pitcher_data.append({"id": pid, **stats})
+
+    if not pitcher_data:
+        print(f"  [pitcher_stats] get_starter_ranks_for_today: no stats for {len(today_starter_ids)} starter(s)")
+        return {}
+
+    # Rank ERA: lower is better → rank 1 = lowest ERA
+    era_sorted  = sorted(pitcher_data, key=lambda x: x["era"])
+    # Rank K/9: higher is better → rank 1 = highest K/9
+    k9_sorted   = sorted(pitcher_data, key=lambda x: x["k9"], reverse=True)
+    # Rank WHIP: lower is better → rank 1 = lowest WHIP
+    whip_sorted = sorted(pitcher_data, key=lambda x: x["whip"])
+
+    ranks: dict[int, dict] = {}
+    for i, p in enumerate(era_sorted):
+        ranks.setdefault(p["id"], {})["era_rank"] = i + 1
+    for i, p in enumerate(k9_sorted):
+        ranks.setdefault(p["id"], {})["k9_rank"] = i + 1
+    for i, p in enumerate(whip_sorted):
+        ranks.setdefault(p["id"], {})["whip_rank"] = i + 1
+
+    print(
+        f"  [pitcher_stats] Today's starter ranks: {len(ranks)} pitchers | "
+        f"ERA/K9/WHIP ranks 1–{len(ranks)}"
+    )
+    return ranks
+
+
 def normalize_rank(rank: int, inverted: bool = False) -> float:
     """
     Convert a 1–30 rank to [-1.0, 1.0].
