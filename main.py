@@ -862,7 +862,7 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
                 f"[player_cap] Pool too thin after cap "
                 f"({len(qualifying_legs)} total, {len(over_legs_remaining)} overs) — restoring full pool"
             )
-            qualifying_legs = [l for l in orig_qualifying_legs if l.get("stat") != "totalBases"] if "orig_qualifying_legs" in dir() else qualifying_legs
+            qualifying_legs = [l for l in orig_qualifying_legs if l.get("stat") != "totalBases"]
     except Exception as _cap_err:
         print(f"[player_cap] Could not apply player cap (non-fatal): {_cap_err}")
 
