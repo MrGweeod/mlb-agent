@@ -1,207 +1,199 @@
 # MLB Parlay Agent — Session Handoff
-**Last Updated:** June 16, 2026 (Session 13 — CLV Activation, Shadow Resolution Fix, Pitcher Signal Overhaul, Player Cap)
+**Last Updated:** June 18, 2026 (Session 14 — CLR Bug Fix, Coverage Ceiling Analysis, Shadow Performance Review)
 
 ## Current Status
-✅ **OPERATIONAL — SESSION 13 DEPLOYED**
-✅ **clv_tracker.py committed — CLV checks firing for first time tonight**
-✅ **Shadow resolution direction bug fixed — hits/under and TB/under now resolving correctly**
-✅ **resolve_all_enriched_legs() added — full shadow pool resolution daily (not just parlay legs)**
-✅ **June 4–15 shadow legs backfilled — 128 June 15 null legs resolved**
-✅ **Enriched scorer pitcher signal overhaul — SO/over K/9 inverted, hits/over vulnerability penalty, hits/under pitcher signal removed**
-✅ **Cross-run 2x player cap added to shadow pipeline**
-⚠️ **Production player cap pool-thinning bug discovered — 0 parlays built on late manual regen — fix next session**
+✅ **OPERATIONAL — SESSION 14 DEPLOYED**
+✅ **CLR replacement pool now excludes totalBases — TB/under no longer leaking into production via CLR**
+✅ **CLR cross-iteration player tracking added — same player can no longer flood replacement parlays**
+✅ **Player cap fallback now checks over leg composition — 0-parlay bug fixed**
+✅ **All three fixes in commit `8a4a7d7` — pushed to Railway June 18, 4:55 PM ET**
+⚠️ **hits/under gate (40%) flagged as too low — avg coverage 48%, no enriched signal differentiation**
+⚠️ **TB/under park_factor and opp_coverage NULL in shadow — signals not populating for this prop**
+⚠️ **Coverage ceiling confirmed prop-specific — universal 84% ceiling NOT being implemented**
 
 ---
 
-## What Happened on June 16, 2026 (Session 13)
+## What Happened on June 18, 2026 (Session 14)
 
-### Fix 1 — clv_tracker.py Missing Module (Critical)
+### Investigation — Duplicate Players in Production Parlays
 
-**Problem:** Every pipeline run since June 15 was logging:
-```
-[log_slate_start_times] CLV scheduling failed (non-fatal): No module named 'src.apis.clv_tracker'
-```
-`src/apis/clv_tracker.py` existed locally but was never committed. Same class of bug as `lineup_scheduler.py` from Session 12.
+**Trigger:** User noticed parlays generating identical players across batches.
 
-**Fix:** Committed `src/apis/clv_tracker.py` (324 lines). Pushed with all other untracked Session 10–12 files in one cleanup commit — 15 files, 3,263 insertions.
+**Initial hypothesis (incorrect):** Player cap fallback firing and restoring all capped players. Disproved by SQL — repeated players traced almost entirely to `source = 'confirmed_lineup_resolution'`, not scheduled batch sources.
 
-**Also committed in same cleanup push:**
-- `src/apis/lineup_confirmation.py`
-- `src/engine/simple_scorer.py` (modified)
-- `src/tracker/parlay_outcome_resolver.py` (modified)
-- `src/web/server.py` (modified)
-- All `scripts/` backfill scripts
-- All `sql/` migration files
-- `verify_clv.py`, `verify_lineup_layer.py`
-
-**Manual CLV backfill:** 11 CLV rows manually inserted into `mlb_pending_lineup_checks` for tonight's slate (June 16), since `log_slate_start_times()` only runs at 9AM and CLV rows were missing. Will fire T-1 before each game group tonight.
-
-**Commits:** `50cc5a9` — clv_tracker | `d9eb7f1` — all untracked session 10–12 files
+**Evidence:** SQL query showed Jared Triolo in 10 parlays (all CLR), Jackson Chourio in 9 (all CLR), multiple other players in 5-8 CLR parlays each. Scheduled batches had normal distribution.
 
 ---
 
-### Fix 2 — Shadow Resolution Direction Bug
+### Fix 1 — CLR Replacement Pool Excluding totalBases
 
-**Problem:** `mlb_scored_legs_enriched.result` was NULL for all hits/under (48 legs) and totalBases/under (73 legs) from June 15. hits/over and strikeouts/over resolved correctly.
+**File:** `src/apis/lineup_confirmation.py`
 
-**Root cause:** In `resolve_enriched_parlays()`, the SELECT from `mlb_scored_legs` matched on `(player_name, stat, run_date)` but NOT `direction`. For players with both an over and under leg scored on the same day, `LIMIT 1` returned the wrong direction's result or found nothing.
-
-**Fix:** Added `direction` to three places in `resolve_enriched_parlays()`:
-1. Initial `pending_legs` SELECT from `mlb_parlay_legs_enriched` — added `l.direction`
-2. `mlb_scored_legs` lookup — added `AND direction = %s`
-3. `mlb_scored_legs_enriched` mirror UPDATE — added `AND direction = %s`
-
-**Backfill:** June 13–14 under legs synced via direct SQL UPDATE JOIN from `mlb_parlay_legs_enriched`. June 13: 227/227 resolved, June 14: 248/248 resolved.
-
-**Commit:** `(outcome_resolver fix)`
-
----
-
-### Fix 3 — resolve_all_enriched_legs() Added (Full Shadow Pool Resolution)
-
-**Problem:** Shadow resolution only flowed through the parlay leg mirror — meaning only ~20 legs/day that made it into shadow parlays ever got results. The other ~140 legs/day stayed null permanently. This made signal validation queries across the full scored pool useless.
-
-**Fix:** Added `resolve_all_enriched_legs(run_date)` to `outcome_resolver.py`. Mirrors `resolve_all_legs()` exactly, targeting `mlb_scored_legs_enriched`. Uses box score path (one `statsapi.boxscore_data()` call per game). Updates keyed on `(run_date, odd_id)` — never `id` (which is NULL for all rows in this table).
-
-Wired into `main.py` immediately after `resolve_all_legs()` in the daily morning resolution block.
-
-**Backfill:** `scripts/backfill_enriched_scored_legs_resolution.py` run for June 4–15. June 4–14 already resolved (from prior parlay mirror). June 15: 74 won / 50 lost / 4 void (128 legs).
-
-**Commits:** `(resolve_all_enriched_legs + backfill script)`
-
----
-
-### Analysis — Pitcher Vulnerability Signal Validation (June 15 Clean Data)
-
-With full shadow pool resolution now working, ran first meaningful individual-leg signal validation using June 15 data (first clean day with correct pitcher rank normalization).
-
-**hits/over vulnerability gradient (16 legs with pitcher data):**
-| Vulnerability | W-L | Win Rate |
-|---|---|---|
-| ≥0.50 | 6-1 | 86% |
-| 0.25–0.49 | 5-2 | 71% |
-| <0.25 | 0-3 | 0% |
-
-Wheeler (0.190, ERA 2.22) and Burns (0.070, ERA 2.14) accounted for all 3 losses below 0.25. These two pitchers appeared in 6 shadow parlays combined — every one lost.
-
-**SO/over finding:** Burns (K/9 ~14) was actually favorable for SO/over — the batter Marcus Semien struck out. Confirms vulnerability penalty should NOT apply to SO/over.
-
-**TB/under finding:** Wheeler and Burns legs went 3-2 for TB/under — no penalty warranted. WHIP-based scoring remains appropriate.
-
-**Conclusion:** Vulnerability penalty applies exclusively to hits/over. Signal is prop-specific.
-
----
-
-### Fix 4 — Enriched Scorer Pitcher Signal Overhaul
-
-**Changes to `src/engine/enriched_scorer.py`:**
-
-**1. SO/over — K/9 direction inverted**
-Old: `(k9_rank - midpoint) / (midpoint - 1) * 5.0` — rank 1 (elite K pitcher) gave -5 penalty to SO/over. Wrong direction.
-New: `(midpoint - k9_rank) / (midpoint - 1) * 5.0` — rank 1 (elite K pitcher) gives +5 boost to SO/over. Facing an elite strikeout pitcher means a batter is MORE likely to strikeout.
-
-**2. hits/over — Replace ERA+K9+WHIP composite with vulnerability penalty**
-Removed the 37-line ERA + K9 + WHIP composite block (±2 each, ±6 max) for hits props.
-Replaced with:
+**Problem:** `main.py` excludes `totalBases` legs from production parlays via:
 ```python
-if stat == "hits" and direction == "over":
-    vuln = pitcher_vulnerability(leg, max_era_rank, max_k9_rank, max_whip_rank)
-    if vuln is not None:
-        if vuln < 0.15:   score -= 10
-        elif vuln < 0.25: score -= 6
+production_legs = [l for l in qualifying_legs if l.get("stat") != "totalBases"]
 ```
-Note: `pitcher_vulnerability` is computed after `score_legs()` in `run_enriched_pipeline.py`, so it's recomputed inline using `max_ranks` derived from `pitcher_ranks` already in scope.
+But `run_confirmed_lineup_resolution()` built its replacement pool from `mlb_scored_legs` with no equivalent filter. TB/under legs blocked by `main.py` were leaking into every CLR replacement parlay.
 
-**3. hits/under — Pitcher signal removed entirely**
-The inverted ERA+K9+WHIP composite for hits/under is removed. No replacement. Data showed hits/under has no consistent pitcher quality signal.
+**Confirmed in data:** 27 TB/under appearances in production parlays over Jun 16–17, almost entirely from `confirmed_lineup_resolution`. TB/under was shadow-only by design.
 
-**4. TB/over and TB/under — Untouched**
-WHIP rank ±5 with direction inversion remains. Correct per June 15 data.
+**Fix:** Added after `eligible_pool` construction (line 468):
+```python
+eligible_pool = [l for l in eligible_pool if l.get("stat") != "totalBases"]
+```
 
-**Effect observed on June 16 manual regen:** hits/over legs with elite pitchers correctly deprioritized. Wheeler/Burns-class legs no longer anchoring shadow parlays. TB/under and SO/over now dominate pool.
-
-**Commit:** `(enriched_scorer overhaul)`
+**Lesson:** Any production exclusion in `main.py` must be explicitly mirrored in CLR's pool construction. CLR does not inherit `main.py` filters automatically.
 
 ---
 
-### Fix 5 — Cross-Run 2x Player Cap in Shadow Pipeline
+### Fix 2 — CLR Cross-Iteration Player Tracking
 
-**Problem:** Shadow pipeline had no cross-run player cap. The same fix applied to production in Session 12 was never mirrored to shadow. Result: Nolan Arenado, Salvador Perez, Xander Bogaerts, Dansby Swanson, Jo Adell each appeared in all 5 shadow batches on June 16.
+**File:** `src/apis/lineup_confirmation.py`
 
-**Fix:**
-1. Added `get_enriched_players_used_today(run_date)` to `src/utils/db.py` — queries `mlb_parlay_legs_enriched JOIN mlb_parlay_recommendations_enriched`, HAVING COUNT(*) >= 2
-2. Applied cap filter in `run_enriched_pipeline.py` before `build_hybrid_parlays()` call
-3. Fallback: restore full pool if fewer than 20 legs remain
+**Problem:** When CLR rebuilt multiple affected parlays in one event (e.g. 10 parlays all containing the same scratched player), the loop called `build_parlays()` separately for each iteration. `build_parlays()` has an internal `used_players` set but it resets on every call. Nothing prevented the same top-scoring player from being selected as a replacement in every iteration.
 
-**Commit:** `a538fd0`
+**Fix:** Added `used_replacement_player_ids: set[str] = set()` before the loop. Threaded into `available_pool` filter inside the loop. Updated with each rebuild's selected players after each successful iteration.
+
+**Cap applied:** Max 1 per CLR batch (stricter than the cross-run cap of 2), since all replacements happen in a single event.
+
+**Lesson:** Player tracking must span CLR loop iterations explicitly. `build_parlays()` internal diversity only covers a single call — it provides no protection across multiple sequential calls.
 
 ---
 
-### Bug Discovered — Production Player Cap Pool-Thinning (Not Fixed Yet)
+### Fix 3 — Player Cap Fallback Composition Check
 
-**Problem found in 18:58 UTC Railway logs:**
+**Files:** `main.py`, `src/pipelines/run_enriched_pipeline.py`
+
+**Problem:** The cross-run 2x player cap fallback used `if len(qualifying_legs) < 20`. After 5+ pipeline runs, 29 under-only legs remained — passing the threshold but mathematically unable to combine to +400. Builder returned 0 parlays.
+
+**Fix:** Fallback now checks over leg count in addition to total:
+```python
+over_legs_remaining = [l for l in qualifying_legs if l.get("direction") == "over"]
+if len(qualifying_legs) < 20 or len(over_legs_remaining) < 10:
+    # restore full pool
 ```
-[player_cap] 38 player(s) at 2-parlay cap — removed 66 leg(s)
-[filter_legs] Blocked 44 low score + 0 out-of-range odds | Kept 0 overs + 29 unders = 29 total eligible
-[parlay_builder] ⚠  0 parlays built for rank 1 — check odds range (+400–+700)
-```
+Same fix applied to `run_enriched_pipeline.py` for shadow.
 
-After 5+ pipeline runs, 38 players were at the 2x cap, removing 66 legs. The remaining 29 legs were all unders with heavy juice — no combination reached +400.
+**Commit:** `8a4a7d7` — all three fixes, pushed June 18 4:55 PM ET, auto-deployed to Railway.
 
-**Root cause:** The fallback threshold (`< 20 legs`) was met (29 legs remain) but all 29 were unders that can't combine to target odds. The fallback should check whether eligible overs remain, not just total leg count.
+---
 
-**Impact:** Production built 0 parlays on the 18:00 manual regen. The 17:08 batch is the last valid production output for June 16.
+### Analysis — Weekly Parlay Performance
 
-**Fix needed next session:** Update fallback logic in `main.py` to restore full pool if fewer than N over legs remain after cap (not just total legs). Same fix needed in `run_enriched_pipeline.py` for shadow.
+Clean window (scheduled sources only, excluding CLR):
+
+| Period | Avg Odds | Win Rate | Breakeven | Edge |
+|---|---|---|---|---|
+| May 4–18 | +1084–1471 | 6.9–7.6% | ~6–8% | Near breakeven / losing |
+| May 25 | +982 | 8.7% | ~9.3% | Slightly below |
+| Jun 1–7 | +481 | 22.6% | ~17.2% | **+5.4pp** |
+| Jun 8–14 | +443 | 26.5% | ~18.4% | **+8.1pp** |
+| Jun 15–18 | +473 | 16.1% (31 resolved) | ~17.4% | Below — CLR bug contaminating this period |
+
+June 1 restructure (single flat pool, 4-leg, +400–700) is working. Jun 15 dip largely explained by CLR-generated junk parlays now fixed.
+
+---
+
+### Analysis — Coverage Ceiling (prop-specific, not universal)
+
+Coverage bucket query rerun with correct 0–100 scale thresholds. Key findings per prop:
+
+**hits/over:**
+| Coverage | Resolved | Win Rate |
+|---|---|---|
+| 70–75% | 531 | 66.7% |
+| 75–80% | 231 | **71.9%** ← peak |
+| 80–84% | 44 | 61.4% ↓ |
+| 84–90% | 6 | 50.0% ↓ |
+
+Real ceiling is ~80%, not 84%. 44 legs in the 80–84 bucket are enough to act on.
+
+**strikeouts/over:**
+| Coverage | Resolved | Win Rate |
+|---|---|---|
+| 75–80% | 161 | 70.2% |
+| 80–84% | 47 | **78.7%** |
+| 84–90% | 30 | **76.7%** |
+
+Monotonically increasing through 84%+. **No ceiling for SO/over.** A universal 84% gate would cut the best SO/over legs.
+
+**totalBases/under:** Peaks at 70–75% (63.8%), gets noisy above 75% with small samples.
+
+**Decision: Universal 84% coverage ceiling NOT being implemented.** The effect is prop-specific. A prop-specific hits/over ceiling at ~80% is the right approach and is pending implementation.
+
+---
+
+### Analysis — Shadow vs Production Performance (Jun 16–17)
+
+| Date | Pipeline | Resolved | Win Rate | Avg Odds | Voided |
+|---|---|---|---|---|---|
+| Jun 16 | Shadow | 25 | **32.0%** | +430 | 0 |
+| Jun 16 | Production | 10 | 10.0% | +506 | 6 |
+| Jun 17 | Shadow | 20 | **25.0%** | +456 | 0 |
+| Jun 17 | Production | 9 | 22.2% | +427 | 10 |
+
+Shadow outperforming production both days. Production voids are original parlays superseded by (now-fixed) CLR.
+
+**Shadow parlay leg composition:**
+- No hits/under in shadow parlays either day — enriched scorer correctly deprioritizing
+- SO/over: 81.3% / 78.9% in selected parlay legs — most consistent performer
+- TB/under: 88.4% (Jun 16) / 53.7% (Jun 17) — strong but volatile day-to-day
+
+**Signal differentiation (Jun 16–17 combined):**
+- hits/over: vulnerability working (0.386 won vs 0.492 lost) ✅
+- hits/under: no differentiation (0.482 won vs 0.476 lost) ❌
+- TB/under: park_factor and opp_coverage both NULL — signals not being attached to this prop ⚠️
+
+---
+
+### Analysis — hits/under Gate Problem
+
+hits/under average coverage across Jun 16–17 shadow scored legs: **~48%** — barely above the 40% floor. Win rates: 40.8% (Jun 17), 58.5% (Jun 16). No enriched signal differentiation. The 40% gate is letting in low-quality legs with no scoring signal to compensate.
+
+Full coverage bucket data (clean window, Apr 27+): 1,832 hits/under legs below 55% coverage at **39.3% win rate**. That's a large volume of junk passing the gate.
+
+**Decision pending:** Raise hits/under gate from 40% to ~65% to match the overs floor. Needs confirmation before implementing.
+
+---
+
+### Analysis — TB/under Signal Null Problem
+
+Query 4 (signal differentiation) showed `park_factor` and `coverage_vs_opponent` both NULL for all TB/under legs. These enriched signals are not being attached to TB/under in `enriched_scorer.py` or `run_enriched_pipeline.py`. Before promoting TB/under to production, this needs investigation and a fix — the enriched scorer is flying partially blind on this prop.
+
+---
+
+### Project File Cleanup (Discussed, Not Yet Done)
+
+Files identified as safe to retire from Project Knowledge:
+- `SYSTEM_DIAGNOSTIC_REPORT_2026-05-12.md` — describes abandoned ML architecture, none of which exists in current repo
+- `CHAT_HANDOFF_2026-05-28.md` — superseded by SESSION_HANDOFF.md
+- `MLB_Scored_Legs_Table_Schema.csv` — superseded by SUPABASE_SCHEMA_REFERENCE.md
+- `SKILL.md` (in Project Files) — duplicate of the actual skill managed in Skills settings; will diverge now that Rule 3 is being added
+- `README_10.md` — June 12 snapshot, superseded by BUILD_STATUS.md
 
 ---
 
 ## Pending Items — Next Session
 
-### 1. Fix Player Cap Pool-Thinning Fallback (PRIORITY — First Fix Next Session)
+### 1. Investigate TB/under Null Signals (PRIORITY before promotion decision)
 
-**Problem:** Fallback `if len(pool) < 20: restore_full_pool` doesn't account for prop type composition. 29 under-only legs pass the fallback but can't build a +400 parlay.
+`park_factor` and `coverage_vs_opponent` are NULL for all TB/under legs in `mlb_scored_legs_enriched`. Find where these signals are attached in `run_enriched_pipeline.py` and `enriched_scorer.py` and confirm whether TB/under is being routed through the enrichment path correctly.
 
-**Fix needed in `main.py` and `run_enriched_pipeline.py`:**
+### 2. Raise hits/under Coverage Gate
+
+Change hits/under floor from 40% to 65% in `main.py`. Data: 1,832 legs below 55% coverage at 39.3% win rate, no enriched signal differentiation at any coverage level. This is a one-line change with strong data support.
+
+### 3. Add prop-specific Coverage Ceiling for hits/over
+
+Add ~80% ceiling for hits/over only in `main.py`. Do NOT apply universally — SO/over has no ceiling and a universal gate would harm it. Implementation:
 ```python
-# Instead of just checking total leg count:
-over_legs_remaining = [l for l in pool_for_parlays if l.get("direction") == "over"]
-if len(pool_for_parlays) < 20 or len(over_legs_remaining) < 10:
-    print("[player_cap] Pool too thin — restoring full pool")
-    pool_for_parlays = all_legs
-```
-Threshold for over legs (10) is a starting point — calibrate based on typical over pool size.
-
-### 2. Verify CLV Fired Tonight (June 16)
-
-Check Railway logs tomorrow morning for `[clv_tracker]` lines. Then verify:
-```sql
-SELECT check_type, status, result_note, completed_at
-FROM mlb_pending_lineup_checks
-WHERE run_date = '2026-06-16'
-  AND check_type = 'clv'
-ORDER BY trigger_at;
-```
-Expected: 11 rows, status='completed', result_note like "CLV snapshot: X/Y legs captured"
-
-### 3. Verify lineup_scheduler and CLV Auto-Schedule Tomorrow (June 17)
-
-Tomorrow's 9AM pipeline should auto-schedule both lineup and CLV rows without manual backfill. Verify:
-```sql
-SELECT check_type, COUNT(*), MIN(trigger_at), MAX(trigger_at)
-FROM mlb_pending_lineup_checks
-WHERE run_date = '2026-06-17'
-GROUP BY check_type;
+if stat == "hits" and direction == "over" and coverage_overall > 80:
+    continue  # above ceiling — skip
 ```
 
-### 4. 84% Coverage Ceiling (Still Not Implemented)
+### 4. Vulnerability Penalty Calibration (~June 22)
 
-One-line fix in `main.py`. Trap confirmed (hits/over drops from 71.8% to 31.5% above 84%). Quick win. Has been deferred since Session 9.
-
-### 5. Vulnerability Penalty Calibration Review (~June 22)
-
-June 15 is only clean day. Need 5–7 more days before confirming penalty thresholds (<0.15 = -10, <0.25 = -6). Run the full hits/over vulnerability bucket analysis again on June 22+ data.
-
+Jun 15–18 now available. Rerun hits/over vulnerability bucket analysis:
 ```sql
 SELECT
     CASE
@@ -223,24 +215,29 @@ GROUP BY vulnerability_bucket
 ORDER BY vulnerability_bucket;
 ```
 
+### 5. TB/under Production Promotion Decision (After Fixing Null Signals + Late June)
+
+Shadow data: 67.4% win rate (89 legs), 58.5% breakeven at -141 avg odds (+8.9pp edge). Strong case for promotion, but null signals must be fixed first to know if the enriched scorer is capturing full signal quality.
+
 ### 6. Stack Bonus Promotion Evaluation (After June 20)
-Current: 72.7% vs 55.3% (11 legs — small sample). Re-evaluate after June 20.
+
+Current: 72.7% vs 55.3% (11 legs — small sample). Recheck after June 20.
 
 ### 7. CLV First Read (~June 26)
-First meaningful read on SO/over and hits/over closing line value.
+
+First meaningful read on SO/over and hits/over closing line value. Expected: SO/over positive CLV, hits/over near zero.
+
+### 8. Project File Cleanup
+
+Remove 5 stale files from Project Knowledge (listed above). Add updated BUILD_STATUS, SESSION_HANDOFF, ARCHITECTURE_DECISIONS.
 
 ---
 
-## Session 13 Commits
+## Session 14 Commits
 
 | Commit | Message |
 |--------|---------|
-| `50cc5a9` | feat: add clv_tracker module (was untracked) |
-| `d9eb7f1` | feat: commit all untracked session 10–12 files (lineup confirmation, CLV, resolver fixes, scripts, migrations) |
-| `(resolver fix)` | fix: add direction filter to shadow resolution mirror — under legs were resolving null |
-| `(enriched resolver)` | feat: add resolve_all_enriched_legs() — full shadow pool resolution + daily pipeline wire-up + June 4-15 backfill script |
-| `(scorer overhaul)` | feat: overhaul shadow pitcher signals — invert SO/over K9 direction, replace hits ERA+K9+WHIP with vulnerability penalty (<0.25=-6, <0.15=-10), hits/under pitcher signal removed |
-| `a538fd0` | feat: add cross-run 2x player cap to shadow pipeline |
+| `8a4a7d7` | fix: CLR replacement pool — exclude totalBases, add cross-iteration player cap, fix fallback composition check |
 
 ---
 
@@ -248,39 +245,37 @@ First meaningful read on SO/over and hits/over closing line value.
 
 | Bug | File | Impact | Fix |
 |-----|------|--------|-----|
-| clv_tracker.py untracked | `src/apis/clv_tracker.py` | CLV capture rate 0% since June 15 | Committed |
-| 14 other files untracked | various | Session 10–12 work not deployed to Railway | Mass commit |
-| Shadow resolution missing direction filter | `outcome_resolver.py` | hits/under + TB/under result = NULL | Added direction to SELECT + UPDATE |
-| No full shadow pool resolution path | `outcome_resolver.py` + `main.py` | ~140 legs/day unresolved in shadow | resolve_all_enriched_legs() added |
-| SO/over K/9 direction inverted in enriched scorer | `enriched_scorer.py` | SO/over anti-selected against elite K pitchers | Formula inverted |
-| hits/over no pitcher quality penalty | `enriched_scorer.py` | Wheeler/Burns legs anchoring shadow parlays | Vulnerability penalty -6/-10 |
-| Shadow pipeline missing cross-run player cap | `run_enriched_pipeline.py` + `db.py` | Same 5 players in every shadow batch | get_enriched_players_used_today() + filter |
+| CLR pool including TB/under | `src/apis/lineup_confirmation.py` | TB/under leaking into production via CLR (27 appearances Jun 16–17) | Added `stat != "totalBases"` filter after pool construction |
+| CLR no cross-iteration player tracking | `src/apis/lineup_confirmation.py` | Same player flooding all replacement parlays (Triolo 10x, Chourio 9x) | `used_replacement_player_ids` set added across loop |
+| Player cap fallback ignoring over composition | `main.py`, `run_enriched_pipeline.py` | 0 parlays built when all remaining legs are unders | Added `len(over_legs_remaining) < 10` to fallback condition |
 
 ---
 
 ## System Health Indicators
 
 ### Green Lights
-✅ CLV tracking live — clv_tracker.py deployed, 11 rows scheduled for tonight
-✅ Lineup scheduler confirmed firing (verified in yesterday's logs)
-✅ Cross-run player cap live in both production and shadow
-✅ Shadow resolution now covers full scored leg pool (not just parlay legs)
-✅ Enriched scorer pitcher signals corrected — SO/over direction right, hits/over vulnerability penalty active
-✅ Shadow scored legs fully resolved June 4–15
+✅ All three CLR bugs fixed and deployed (commit `8a4a7d7`)
+✅ CLV tracking live and auto-scheduling
+✅ Lineup confirmation firing (T-45 verified)
+✅ Shadow outperforming production (32%/25% vs 10%/22% Jun 16–17)
+✅ Shadow resolution covering full scored leg pool
+✅ Vulnerability signal working for hits/over
+✅ SO/over confirmed edge prop — no coverage ceiling, monotonic improvement through 84%+
 
 ### Yellow Flags
-⚠️ Production player cap pool-thinning bug — 0 parlays on late manual regen June 16 (fix next session)
-⚠️ 84% coverage ceiling still not implemented
-⚠️ Vulnerability penalty thresholds need 5+ more clean days to validate (<0.25=-6, <0.15=-10)
+⚠️ hits/under gate at 40% — avg coverage only 48%, no enriched signal, 1,832 legs below 55% at 39.3% win rate
+⚠️ TB/under park_factor and opp_coverage NULL in shadow — must fix before promotion
+⚠️ Vulnerability penalty thresholds need Jun 15–22 data to validate
 ⚠️ Stack bonus needs more data before promotion (11 legs)
-⚠️ hits/under at 44.1% in shadow — below breakeven, deferred
+⚠️ hits/over prop-specific ceiling (~80%) not yet implemented
+⚠️ Same-game pairs nearly absent from production (3 of 316 parlays in 30 days) — prior correlation finding may not hold at scale
 
 ### Red Flags
 None currently
 
 ---
 
-**Last Review:** June 16, 2026
-**System Status:** ✅ Operational — CLV Active, Shadow Signals Corrected, Player Cap Live
-**Next Review:** June 17, 2026 — Fix player cap fallback + verify CLV fired + 84% ceiling
-**Pending Decisions:** Player cap fallback fix (immediate), 84% ceiling (next session quick win), vulnerability penalty calibration (~June 22), stack bonus promotion (after June 20), TB under promotion (late June)
+**Last Review:** June 18, 2026
+**System Status:** ✅ Operational — CLR Bugs Fixed, Coverage Analysis Complete
+**Next Review:** June 22, 2026 — TB/under null signals, hits/under gate, prop-specific ceiling, vulnerability calibration
+**Pending Decisions:** TB/under null signal fix + production promotion (next session), hits/under gate raise (next session), hits/over ~80% ceiling (next session), vulnerability calibration (~June 22), stack bonus promotion (after June 20)
