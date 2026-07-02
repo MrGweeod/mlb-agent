@@ -107,24 +107,19 @@ def calculate_composite_score(leg):
         score -= 5
 
     # ============================================
-    # 5. BATTING ORDER SLOT: PA-frequency signal
+    # 5. BATTING ORDER SLOT: removed Jul 2, 2026
     # ============================================
-    # Only applied when batting_order is known AND the stat/direction pair has
-    # a defined favorable range.  No penalty when slot is unknown (MISSING) —
-    # absence of data is not evidence of a bad slot.  Hard exclusion of confirmed
-    # unfavorable slots happens only through the lineup-resolution path (§7 spec),
-    # not here — this keeps the 9 AM pool intact before any lineups have posted.
-    batting_order = leg.get("batting_order")
-    if batting_order is not None:
-        try:
-            from main import BATTING_ORDER_FAVORABLE
-            stat      = leg.get("stat", "")
-            direction = (leg.get("direction") or "over").lower()
-            favorable_range = BATTING_ORDER_FAVORABLE.get((stat, direction))
-            if favorable_range is not None and int(batting_order) not in favorable_range:
-                score -= 8  # tunable — sink in pool but do not silently delete
-        except Exception:
-            pass  # never let a missing constant crash the scorer
+    # The -8 slot-gate penalty (hits/over: slots 6-9; SO/over: slots 7-9) was
+    # removed after a 7-day data review (Jun 24–Jul 1, 2026, mlb_scored_legs)
+    # showed the hypothesis is empirically inverted:
+    #   hits/over:         slots 1-5 (protected) = 60.0% WR (n=205)
+    #                      slots 6-9 (penalized)  = 63.3% WR (n=30)
+    #   strikeouts/over:   slots 1-6 (protected)  = 67.8% WR (n=87)
+    #                      slots 7-9 (penalized)   = 73.7% WR (n=19)
+    # Three more weeks of data confirmed the Jun 12 ARCHITECTURE_DECISIONS.md
+    # Lesson 32 contradiction.  Going neutral — no adjustment in either direction.
+    # batting_order and lineup_check_status remain annotated/logged; only the
+    # scoring consequence is removed.
 
     return max(5, min(95, score))
 

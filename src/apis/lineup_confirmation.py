@@ -179,8 +179,8 @@ def run_lineup_check(row: dict) -> str:
 
     if affected_parlay_ids:
         print(
-            f"  [lineup_check] {len(affected_parlay_ids)} parlay(s) contain SCRATCHED/"
-            f"OUT_OF_RANGE legs — triggering resolution"
+            f"  [lineup_check] {len(affected_parlay_ids)} parlay(s) contain SCRATCHED"
+            f" legs — triggering resolution"
         )
         try:
             run_confirmed_lineup_resolution(run_date_str, affected_parlay_ids)
@@ -388,7 +388,7 @@ def _find_affected_parlays(run_date_str: str, game_pks: list[int]) -> list[int]:
           AND pr.outcome = 'pending'
           AND pr.superseded_by_batch_id IS NULL
           AND pl.game_id = ANY(%s)
-          AND pl.lineup_check_status IN ('SCRATCHED', 'BATTING_ORDER_OUT_OF_RANGE')
+          AND pl.lineup_check_status = 'SCRATCHED'
         """,
         (run_date_str, game_pks),
     )
@@ -402,7 +402,11 @@ def _find_affected_parlays(run_date_str: str, game_pks: list[int]) -> list[int]:
 
 def run_confirmed_lineup_resolution(run_date_str: str, affected_parlay_ids: list[int]) -> None:
     """
-    Rebuild parlays whose legs contain a SCRATCHED or OUT_OF_RANGE player.
+    Rebuild parlays whose legs contain a SCRATCHED player.
+
+    BATTING_ORDER_OUT_OF_RANGE is annotation-only as of Jul 2, 2026 — it no
+    longer triggers a rebuild.  Only SCRATCHED (player absent from lineup) is
+    a factual ground for replacement.
 
     1. Build replacement pool: today's UPCOMING scored legs that passed gates
        and are LINEUP_CONFIRMED or MISSING_LINEUP_CONFIRMATION.
@@ -512,7 +516,7 @@ def run_confirmed_lineup_resolution(run_date_str: str, affected_parlay_ids: list
         parlay_id = parlay["id"]
         bad_legs  = [
             l for l in parlay["legs"]
-            if l.get("lineup_check_status") in ("SCRATCHED", "BATTING_ORDER_OUT_OF_RANGE")
+            if l.get("lineup_check_status") == "SCRATCHED"
         ]
         bad_player_ids = {str(l.get("player_id")) for l in bad_legs}
         bad_reasons    = "; ".join(
