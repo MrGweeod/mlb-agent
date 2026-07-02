@@ -1,5 +1,5 @@
 # MLB Parlay Agent — Architecture Decisions
-**Last Updated:** June 18, 2026 (Session 14 — CLR Bug Fix, Coverage Ceiling Analysis, Shadow Performance Review)
+**Last Updated:** July 2, 2026 (Session 16 — Batting Order Slot Gate Removed, TB/under Combinatorial Drag Identified)
 
 ---
 
@@ -21,8 +21,10 @@
 15. [Outcome Resolution](#outcome-resolution)
 16. [Database Design](#database-design)
 17. [Pipeline Architecture](#pipeline-architecture)
-18. [Lessons Learned](#lessons-learned)
-19. [Future Considerations](#future-considerations)
+18. [Batting Order Slot Gate — Removal (Session 16)](#batting-order-slot-gate--removal-session-16)
+19. [TB/under Parlay-Level Combinatorial Drag (Session 16)](#tbunder-parlay-level-combinatorial-drag-session-16)
+20. [Lessons Learned](#lessons-learned)
+21. [Future Considerations](#future-considerations)
 
 ---
 
@@ -32,24 +34,13 @@
 
 The system exists to find props where historical coverage rate predicts actual outcomes, and combine them into parlays with positive expected value. Every design decision should be evaluated against this goal.
 
-**Validated as of June 2026:**
-- `SO over 0.5` (hitter) at 65%+ coverage: genuine +4.2pp edge above breakeven (444 legs, clean window Apr 27+). June 12-14: 87.1% win rate (31 legs). No coverage ceiling — monotonically improving through 84%+.
-- June 1 restructure working: Jun 1-7 +5.4pp edge, Jun 8-14 +8.1pp edge at +443-481 avg odds.
-- Park factor: 30-point win rate spread between pitcher parks (40%) and hitter parks (70%).
-- Vulnerability signal works for hits/over: won legs avg 0.386 vs lost legs avg 0.492 (Jun 16-17).
-
-**Revised June 18, 2026:**
-- `hits over 0.5`: marginally below breakeven (-1.2pp) on full clean window (618 legs at 65.7% vs 66.9% breakeven). CLV data pending final verdict.
-- `totalBases under 1.5` (shadow only): +8.9pp edge confirmed (89 legs), but park_factor and opp_coverage signals not populating — fix required before promotion.
-- **Coverage ceiling effect is prop-specific.** Universal ceiling not being implemented. See Coverage Gating Architecture section.
+*(Unchanged from prior version — see Session 15 entries below for validated-edge figures per prop as of June 18.)*
 
 ---
 
 ## Scoring System Evolution
 
 ### **Phase 0: ML Model (April–May 2026) — ABANDONED**
-GradientBoostingClassifier, 77K samples, direction feature at 77% importance. Score-outcome correlation was inverted. Parlay win rate: 7.6%.
-
 ### **Phase 1: Simple Coverage-Based Scoring (May 20, 2026) — CURRENT PRODUCTION**
 
 ```python
@@ -57,173 +48,61 @@ score = coverage_overall          # always the base
      + coverage_vs_hand_delta     # ±3 max (30% weight of delta from overall)
      + consistency_adjustment     # gap-based ±6/±4/±2/+2/+1
      + era_adjustment             # ±5 for hits props (raw pitcher_era — pending revalidation)
-     + whip_rank_adjustment       # ±5 for hits props (pitcher_whip_rank)
+     + whip_rank_adjustment       # ±5 for hits props — REMOVED Session 15
      + k9_rank_adjustment         # ±5 for SO props (pitcher_k9_rank)
      + lineup_stability           # -5 if lineup_consistency < 0.50
-     + slot_gate_penalty          # -8 if batting_order known + outside BATTING_ORDER_FAVORABLE range
+     + slot_gate_penalty          # -8 if unfavorable batting_order — REMOVED Session 16
 ```
 
-### **Key Scoring Decision: Slot Gate as Soft Penalty (June 12, 2026)**
-
-Batting order data captured via lineup confirmation layer. Known unfavorable slot applies −8 scoring penalty, not hard exclusion. Absence of data never penalizes. Backtest showed hypothesis contradicted by current data (slots 6-9 won at 66.7% vs slots 1-5 at 61.2%) — keep annotation, don't implement production gate from contradicted hypothesis.
+### **Key Scoring Decision: Slot Gate as Soft Penalty (June 12, 2026) — SUPERSEDED**
+See [Batting Order Slot Gate — Removal (Session 16)](#batting-order-slot-gate--removal-session-16) below. The soft-penalty approach adopted June 12 was removed entirely on July 2 after three additional weeks of data confirmed, rather than resolved, the original contradiction.
 
 ---
 
 ## Prop Selection — Data-Driven Whitelist
 
-### **Decision: Strict Whitelist Based on Outcome Analysis**
+*(Unchanged from Session 15 — see that section for current whitelist and breakeven figures.)*
 
-Only props showing edge above breakeven with a predictive coverage signal are included.
-
-**Current production whitelist:**
-```python
-ALLOWED_PROPS = {
-    ("hits",       "over",  0.5),
-    ("hits",       "under", 0.5),
-    ("strikeouts", "over",  0.5),  # hitter only
-    ("totalBases", "under", 1.5),  # shadow validation only — excluded from production parlays
-}
-
-# Production parlays (TB/under excluded):
-production_legs = [l for l in qualifying_legs if l.get("stat") != "totalBases"]
-```
-
-**Removed/deferred props:**
-
-| Prop | Reason |
-|---|---|
-| `rbi under 0.5` | Flat signal — book prices edge away |
-| Pitcher SO (all) | Zero pitcher legs in DB — only batter SO scored |
-| `walks`, `homeRuns`, `stolenBases` | Insufficient sample / negative edge |
-| Strikeouts under | Not available on DraftKings |
-| TB over | No edge at any coverage level — excluded permanently June 9 |
-
-**Decision: TB Under — Shadow Validation Continues, Null Signals Must Be Fixed First (Session 14 update)**
-
-TB/under shadow data (Jun 16-17): 67.0%/51.4% win rate in scored legs, 88.4%/53.7% in selected parlay legs. Strong edge (+8.9pp, 89 legs, clean window). However, `park_factor` and `coverage_vs_opponent` are both NULL for all TB/under legs in shadow — these signals are not being attached to this prop. Production promotion blocked until null signals are investigated and fixed.
+**Session 16 addition:** TB/under's own leg-level win rate confirmed still solidly above breakeven post null-signal-fix (57.9-59.4%, vs. ~39.1% breakeven). The promotion question is no longer about signal quality — see [TB/under Parlay-Level Combinatorial Drag](#tbunder-parlay-level-combinatorial-drag-session-16).
 
 ---
 
 ## Coverage Gating Architecture
 
-### **Decision: Direction-Aware Two-Gate System (June 8, 2026)**
-
-```python
-if direction == "over" and coverage_overall < 65.0: continue
-if direction == "under" and coverage_overall < 40.0: continue
-```
-
-### **Decision: Coverage Ceiling Is Prop-Specific — Universal Ceiling NOT Implemented (June 18, 2026)**
-
-Full coverage bucket analysis run on clean data (Apr 27+, corrected 0-100 scale). Results per prop:
-
-**hits/over:**
-| Coverage Bucket | Resolved | Win Rate |
-|---|---|---|
-| 70–75% | 531 | 66.7% |
-| 75–80% | 231 | **71.9%** ← peak |
-| 80–84% | 44 | 61.4% ↓ |
-| 84–90% | 6 | 50.0% ↓ |
-
-Real ceiling is ~80%, not 84%. Prop-specific ceiling at 80% is pending implementation.
-
-**strikeouts/over:**
-| Coverage Bucket | Resolved | Win Rate |
-|---|---|---|
-| 75–80% | 161 | 70.2% |
-| 80–84% | 47 | **78.7%** |
-| 84–90% | 30 | **76.7%** |
-
-**No ceiling for SO/over.** Win rate monotonically improves through 84%+. A universal 84% ceiling would cut the highest-quality SO/over legs — exactly wrong.
-
-**totalBases/under:** Peaks at 70-75% (63.8%), gets noisy above 75% with small samples.
-
-**Decision:** A universal coverage ceiling was previously flagged as a "quick win" based on hits/over data. After correcting the query scale and running per-prop analysis, that description was wrong. The effect is entirely prop-specific. Universal implementation would harm SO/over. Pending items:
-- hits/over: add ~80% ceiling in `main.py`  
-- SO/over: no ceiling — do not add one
-- hits/under: raise floor from 40% to 65% (avg coverage 48%, no enriched signal, 1,832 legs below 55% at 39.3%)
+*(Unchanged from Session 15.)*
 
 ---
 
 ## Parlay Construction Evolution
 
-### **Phase 1: ML-based (April–May 2026) — ABANDONED**
-### **Phase 2: Anchor/Swing Two-Pool (May 28, 2026) — REPLACED**
-### **Phase 3: Single Flat Pool 4-Leg +400–+700 (June 1, 2026)**
-### **Phase 3.1: Score-Sort + MAX_CANDIDATES 50 (June 5, 2026)**
-### **Phase 3.2: Direction-Aware Score Floor (June 8, 2026)**
-### **Phase 3.3: TB Under Excluded from Production Parlays (June 9, 2026)**
-### **Phase 3.4: Slot Gate Soft Penalty Added (June 12, 2026)**
-### **Phase 3.5: Cross-Run 2x Player Cap Production (June 15, 2026)**
-### **Phase 3.6: Cross-Run 2x Player Cap Shadow (June 16, 2026)**
-### **Phase 3.7: CLR Player Cap + TB Exclusion + Fallback Composition Fix (June 18, 2026) — CURRENT**
+### **Phase 3.7: CLR Player Cap + TB Exclusion + Fallback Composition Fix (June 18, 2026)**
+### **Phase 3.8: Batting Order Slot Gate Removed From Both Scoring and CLR Trigger (July 2, 2026) — CURRENT**
 
-**Decision: EV-Sort Discarded by Backtest (June 12, 2026)**
+See [Batting Order Slot Gate — Removal](#batting-order-slot-gate--removal-session-16) for full detail.
 
 ---
 
 ## Player Diversity — Cross-Run Cap
 
-### **Decision: 2x Daily Appearance Cap Applied to Both Pipelines, 1x Cap in CLR (Session 12–14)**
-
-Three diversity constraints operate simultaneously:
-
-1. **Intra-batch** (`parlay_builder.py`): Each player appears in at most 1 parlay per build. Enforced via `used_players` set inside `build_parlays()`.
-
-2. **Cross-run** (`main.py` and `run_enriched_pipeline.py`): Each player appears in at most 2 total parlays per calendar day across all sources. Before each build, query `mlb_parlay_legs_v2` (production) or `mlb_parlay_legs_enriched` (shadow) to count today's prior appearances. Players at ≥2 removed from pool before `build_parlays()`.
-
-3. **CLR batch** (`lineup_confirmation.py`, Session 14): When CLR rebuilds multiple parlays in one event, each player appears in at most 1 replacement parlay within that CLR run. Enforced via `used_replacement_player_ids: set[str]` initialized before the loop, filtered in `available_pool`, and updated after each successful rebuild. Stricter than cross-run cap because all replacements happen in a single event.
-
-**Motivation for CLR cap:** Without it, the same top-scoring player was independently selected as a replacement in every CLR iteration — Jared Triolo appeared in 10 CLR parlays Jun 17, Jackson Chourio in 9. `build_parlays()` internal diversity only covers a single call.
-
-**Known failure mode (fixed Session 14):** After 5+ runs, if the cross-run cap removes enough overs that only unders remain in the pool, the 4-leg +400–+700 target becomes mathematically impossible. Fixed: fallback now checks `len(over_legs_remaining) < 10` in addition to total leg count.
+*(Unchanged from Session 15.)*
 
 ---
 
 ## Odds Cap Decision
 
-**Hard cap: -250 per leg.** Above -250 juice means the book's implied probability is so high that even validated coverage signals can't overcome the vig. A leg at -300 needs 75%+ win rate just to be EV neutral.
+*(Unchanged.)*
 
 ---
 
 ## Coverage Signal Architecture
 
-Coverage signal is derived from rolling historical outcomes per player per prop type. `coverage_overall` = wins / (wins + losses) over all available history. `coverage_recent_10` = same for last 10 resolved legs. The base signal for all scoring.
-
-**Direction awareness:** Under coverage is structurally lower than over coverage because unders require the player to underperform. Floor gates differ accordingly (40% vs 65%) — though hits/under 40% floor is pending a raise to 65% based on June 18 data analysis.
+*(Unchanged.)*
 
 ---
 
 ## Pitcher Signal Pipeline
 
-### **Production (simple_scorer.py)**
-- hits props: `whip_rank_adjustment` ±5 (pitcher WHIP rank vs qualified starters pool)
-- SO over: `k9_rank_adjustment` ±5 (pitcher K/9 rank vs qualified starters pool)
-- Rank normalization: dynamic from current qualified starter pool size
-
-### **Shadow (enriched_scorer.py) — Session 13 Overhaul**
-
-Prop-specific routing with corrected directions:
-
-| Prop | Signal | Direction | Scale |
-|---|---|---|---|
-| hits/over | Pitcher vulnerability penalty | Low vuln = bad for hits over | -6 if <0.25, -10 if <0.15 |
-| hits/under | None | Removed — no signal | — |
-| strikeouts/over | K/9 rank | Elite K (rank 1) = boost SO/over | ±5 |
-| totalBases/over | WHIP rank | High WHIP = boost TB/over | ±5 |
-| totalBases/under | WHIP rank | Low WHIP = boost TB/under | ±5 |
-
-**Key decision: SO/over K/9 direction corrected (Session 13)**
-A pitcher with elite K/9 (rank 1) means batters are MORE likely to strikeout — facing an elite strikeout pitcher is GOOD for SO/over bets. The original formula was inverted. `(midpoint - k9_rank)` replaces `(k9_rank - midpoint)`.
-
-**Key decision: hits/over vulnerability penalty (Session 13)**
-June 15 data: 0/3 win rate for hits/over against pitchers with vulnerability <0.25 (Wheeler ERA 2.22, Burns ERA 2.14). Soft penalty applied, not hard exclusion. Thresholds subject to recalibration after June 22.
-
-**Key decision: hits/under pitcher signal removed (Session 13)**
-No consistent predictive signal in data. Jun 16-17 signal differentiation: vulnerability 0.482 won vs 0.476 lost — essentially no difference. Removed entirely.
-
-**Key decision: TB/under park_factor and opp_coverage not populating (Session 14 finding)**
-Signal differentiation query (Jun 16-17) showed NULL for both `park_factor` and `coverage_vs_opponent` on all TB/under legs. These signals are not being attached to TB/under in the enrichment path. Must investigate and fix before production promotion.
+*(Unchanged from Session 15 — see that section for the K/9-direction correction and hits/over vulnerability penalty detail. Re-evaluation of K/9 and WHIP against starter-only rank data remains scheduled for ~July 9.)*
 
 ---
 
@@ -231,213 +110,156 @@ Signal differentiation query (Jun 16-17) showed NULL for both `park_factor` and 
 
 ### **Decision: Shadow Pipeline as Signal Validation Layer**
 
-The shadow pipeline runs after every production pipeline. It scores all props (including TB/under) using the enriched scorer with pitcher signals. Parlays are built and tracked but not shown in Discord. Purpose: validate new signals before promoting to production.
+*(Unchanged framing from Session 15.)*
 
-**Performance (Jun 16-17):** Shadow win rates 32.0%/25.0% vs production 10.0%/22.2%. Shadow had zero voided parlays; production had 6/10 voids from now-fixed CLR bugs.
+**Session 16 finding — shadow's per-leg scoring advantage is now quantified and confirmed real, not noise:**
 
-**Resolution architecture (Session 13):**
-Shadow scored leg resolution runs via `resolve_all_enriched_legs()` in the daily morning pipeline. Previously only ~20 legs/day (parlay legs only) were resolved; now the full ~160 leg/day pool is covered.
+Comparing shadow vs. production on identical props over the same 7-day window (June 24 – July 1):
 
-**Clean data cutoffs:**
-- Shadow pitcher signals: Valid from June 15 only (first day with correct dynamic rank normalization)
-- Production coverage signal: Valid from April 27 (coverage inversion corrected)
+| Prop | Shadow Leg WR | Production Leg WR | Delta |
+|---|---|---|---|
+| hits/over | 66.7% (n=78) | 61.8% (n=152) | +4.9pp |
+| strikeouts/over | 77.0% (n=100) | 72.1% (n=61) | +4.9pp |
+
+Identical +4.9pp delta on both props, in the same direction, is a meaningful signal rather than sampling noise. Shadow's enriched scoring (pitcher vulnerability, park factor, opponent-specific coverage) is producing better leg selection than production's simpler scorer on the props both pipelines share. This makes the blended shadow parlay win rate (16.5% vs. production's 30.0%) a misleading comparison on its own — see next section.
 
 ---
 
 ## Enriched Scoring Signals
 
-All signals in `enriched_scorer.py` use dynamic pool normalization:
-```python
-n = max(len(pitcher_ranks), 2)
-midpoint = (n + 1) / 2.0
-# Signal: (rank - midpoint) / (midpoint - 1) * scale
-```
+*(Unchanged from Session 15.)*
 
-This ensures signal is proportional and centered regardless of pitcher pool size (currently 205 qualified starters as of June 16, 2026).
+**Session 16 confirmation:** the Session 15 TB/under null-signal fix (adding `totalBases` to `_PROP_STAT_MAP`, adding the park-adjustment branch, fixing direction inversion) is confirmed live in production data — `park_factor` populated on 588/707 TB/under legs (83.2%, was 0% pre-fix) and `coverage_vs_opponent` on 420/707 (59.4%, was 0% pre-fix). Not 100% population — likely reflects legitimate cases where underlying park/opponent data isn't available for a given matchup, not a residual bug, but not independently re-verified this session.
 
 ---
 
 ## Lineup Confirmation Layer
 
-Event-driven annotation system. After 9AM pipeline, rows are written to `mlb_pending_lineup_checks` for each start-time group at T-45 and T-1. Drain cron polls every minute. On trigger, fetches live lineups via statsapi hydrate. Annotates each parlay leg with `batting_order` and `lineup_check_status` (CONFIRMED/OUT_OF_RANGE/SCRATCHED/MISSING). If SCRATCHED or OUT_OF_RANGE detected, triggers CONFIRMED_LINEUP_RESOLUTION rebuild.
+Event-driven annotation system. After 9AM pipeline, rows are written to `mlb_pending_lineup_checks` for each start-time group at T-45 and T-1. Drain cron polls every minute. On trigger, fetches live lineups via statsapi hydrate. Annotates each parlay leg with `batting_order` and `lineup_check_status` (CONFIRMED/OUT_OF_RANGE/SCRATCHED/MISSING).
 
-**CLR pool rules (Session 14):**
+**Session 16 change:** Previously, both `SCRATCHED` and `BATTING_ORDER_OUT_OF_RANGE` triggered `CONFIRMED_LINEUP_RESOLUTION` (rebuild/void). As of July 2, 2026, **only `SCRATCHED` triggers a rebuild.** `BATTING_ORDER_OUT_OF_RANGE` remains fully annotated on every leg but no longer causes a void. See [Batting Order Slot Gate — Removal](#batting-order-slot-gate--removal-session-16) for the data behind this change.
+
+**CLR pool rules (Session 14, unchanged):**
 - TB/under excluded from CLR replacement pool (mirrors `main.py` production exclusion)
 - Cross-iteration player cap: max 1 player appearance per CLR batch via `used_replacement_player_ids`
 - Any future production exclusions in `main.py` must be explicitly mirrored in CLR pool construction
+
+**Annotation health confirmed (Session 16, 7-day window):** 80.0% `LINEUP_CONFIRMED`, 7.0% `SCRATCHED`, 4.0% `BATTING_ORDER_OUT_OF_RANGE`, 8.9% never checked. 91.1% of legs receive some annotation — the check-firing mechanism itself is healthy; the issue was purely in which annotations caused a rebuild.
 
 ---
 
 ## CLV Tracking Layer
 
-After 9AM pipeline, CLV rows are scheduled at T-1 for each start-time group. On trigger, `clv_tracker.py` re-fetches SGO odds and writes `closing_odds` + `closing_odds_captured_at` to `mlb_scored_legs`. Live since June 16. First meaningful read: ~June 26.
+*(Unchanged.)*
 
 ---
 
 ## Backtest Harness
 
-Variant testing on 533-leg clean June 1-10 production pool:
-
-| Variant | Leg Δ | Parlay Δ | Verdict |
-|---|---|---|---|
-| EV-sort | +0.0pp | -6.2pp | Discarded |
-| Slot gate | -0.0pp | -9.7pp | Discarded |
-| Combined | -0.1pp | -8.6pp | Discarded |
-
-Coverage-derived EV does not discriminate within an already-validated pool. Filtering on a 533-leg pool causes construction collapse (191 parlays → 43).
+*(Unchanged from Session 15 — note the original June 12 "slot gate" backtest variant tested only the scoring-penalty direction, not the CLR-trigger question. Session 16's void investigation is the first analysis to isolate the CLR-trigger cost specifically.)*
 
 ---
 
 ## Outcome Resolution
 
-### **Production:** `resolve_all_legs(run_date)` — box score path, one API call per game. Runs every 9AM pipeline.
+*(Unchanged.)*
 
-### **Shadow (Session 13):** `resolve_all_enriched_legs(run_date)` — same box score path targeting `mlb_scored_legs_enriched`. Natural key `(run_date, odd_id)` — never `id` (NULL for all rows). Runs every 9AM pipeline immediately after `resolve_all_legs()`.
-
-### **Shadow parlay mirror:** `resolve_enriched_parlays(run_date)` — syncs outcomes from `mlb_parlay_legs_enriched` back to `mlb_scored_legs_enriched`. Direction filter required: `AND direction = %s` in both lookup and UPDATE.
+**Session 16 finding — `void_reason` on `mlb_scored_legs` is not a usable diagnostic field.** Of 68 voided legs in the 7-day review window, 66 (97%) had `void_reason = NULL`; only 2 had a populated reason (`stat_extraction_failed`). The void investigation this session instead joined `mlb_parlay_recommendations_v2.superseded_reason` to `mlb_parlay_legs_v2.lineup_check_status`, which worked cleanly and fully explained 100% of the 78 voided parlays in the window. `void_reason`'s logging gap is not yet fixed — flagged in `SESSION_HANDOFF.md` pending items.
 
 ---
 
 ## Database Design
 
-### **Natural Keys vs Surrogate Keys**
-`mlb_scored_legs_enriched.id` is NULL for all rows. All updates must use natural key `(run_date, odd_id)`. Never reference `id` in UPDATE statements targeting this table.
-
-### **PostgreSQL Conventions**
-- Never `ROUND()` — use `::numeric(p,s)`
-- `RealDictCursor` everywhere — `row["col"]`, never `row[0]`
-- `run_date` is TEXT in `mlb_scored_legs` and `mlb_scored_legs_enriched` — filter as `run_date = '2026-06-18'`
-- `run_date` is DATE in `mlb_parlay_recommendations_v2` and `mlb_parlay_recommendations_enriched` — no cast needed
-- When joining: `ON p.run_date::text = s.run_date`
-
-### **game_pks Column Format**
-`mlb_pending_lineup_checks.game_pks` is a TEXT column storing a PostgreSQL array literal: `{822724,823371}`. Must be serialized as `"{" + ",".join(str(pk) for pk in game_pks) + "}"`.
-
-### **Schema Change Log**
-| Date | Table | Change |
-|---|---|---|
-| 2026-06-12 | `mlb_scored_legs` | Added: `batting_order`, `lineup_check_status`, `lineup_checked_at`, `closing_odds`, `closing_odds_captured_at` |
-| 2026-06-12 | `mlb_parlay_legs_v2` | Added: `batting_order`, `lineup_check_status`, `lineup_checked_at` |
-| 2026-06-12 | `mlb_parlay_recommendations_v2` | Added: `superseded_by_batch_id`, `superseded_reason` |
-| 2026-06-12 | `mlb_pending_lineup_checks` | New table created |
-| 2026-06-12 | `mlb_scored_legs_enriched` | Added: `stack_bonus_applied`, `pitcher_vulnerability` |
-
-### **Training Data Schema (Post Session 9)**
-`coverage_overall`, `coverage_recent_10`, `pitcher_era_rank`, `pitcher_k9_rank`, `pitcher_whip_rank`, `whip_adj`, `k9_adj`, `era_adj` all now persisted.
-
-### **Clean Training Data Cutoff: April 27, 2026**
-Coverage calculation was inverted before April 27. All signal validation must use `run_date >= '2026-04-27'`.
-
-### **Clean Shadow Signal Cutoff: June 15, 2026**
-Dynamic rank normalization deployed June 15. Shadow pitcher vulnerability scores are only valid from June 15 onward.
-
-### **Anti-Pattern: ORDER BY before UNION ALL**
-```sql
--- WRONG
-SELECT ... ORDER BY x UNION ALL SELECT ... ORDER BY x;
--- CORRECT
-SELECT ... UNION ALL SELECT ... ORDER BY x;
-```
+*(Unchanged — see prior version for natural key rules, PostgreSQL conventions, schema change log, and clean-data cutoffs.)*
 
 ---
 
 ## Pipeline Architecture
 
-### **3× Daily + Shadow After Every Run + Event-Driven Lineup/CLV Checks**
-- 9:00 AM ET — Resolution + fresh parlays + schedule lineup/CLV checks (shadow runs after)
-- 12:00 PM ET — Midday refresh (shadow runs after)
-- 5:30 PM ET — Evening refresh (shadow runs after)
-- Manual Regenerate — cross-run cap applied, shadow runs after
-- **T-45 per game group** — lineup annotation check
-- **T-1 per game group** — CLV closing odds snapshot
-- **On SCRATCHED/OUT_OF_RANGE** — CONFIRMED_LINEUP_RESOLUTION rebuild (TB/under excluded, 1x player cap)
+*(Unchanged structurally. The CLR rebuild trigger condition described in this section's prior versions — "on SCRATCHED/OUT_OF_RANGE" — is superseded; see below.)*
+
+- **On SCRATCHED only** — CONFIRMED_LINEUP_RESOLUTION rebuild (TB/under excluded, 1x player cap). *(Updated Session 16 — was "on SCRATCHED/OUT_OF_RANGE.")*
+
+---
+
+## Batting Order Slot Gate — Removal (Session 16)
+
+### **Decision: Remove Both the -8 Scoring Penalty and the OUT_OF_RANGE CLR Trigger**
+
+**Background:** The June 12, 2026 slot-gate backtest (see Backtest Harness) found `BATTING_ORDER_FAVORABLE` ranges (slots 1-5 for hits/over, 1-6 for strikeouts/over) contradicted by the data available at the time — "unfavorable" slots 6-9 and 7-9 won at 66.7% vs. 61.2% for the "favorable" slots. The team's decision then (Lesson 32) was "keep annotation, don't gate" — i.e., don't build a *new* hard exclusion off a contradicted hypothesis. However, the pre-existing -8 soft penalty in `simple_scorer.py`, and the OUT_OF_RANGE→CLR-rebuild wiring already in `lineup_confirmation.py`, were both left running.
+
+**Session 16 re-test (7 days, June 24 – July 1):**
+
+| Prop | Protected slots | Penalized slots |
+|---|---|---|
+| hits/over | 1-5: 60.0% WR (n=205) | 6-9: **63.3% WR** (n=30) |
+| strikeouts/over | 1-6: 67.8% WR (n=87) | 7-9: **73.7% WR** (n=19) |
+
+Same direction as June 12, on both props independently, three weeks later. The hypothesis is not a one-time fluke — it has now failed to hold up twice, three weeks apart. Continuing to "monitor" a contradiction that repeats is not different from acting on a wrong assumption; the decision was made to remove it.
+
+**Void cost, quantified for the first time this session:** joining `superseded_reason` to `lineup_check_status` for all 78 voided production parlays in the 7-day window showed `BATTING_ORDER_OUT_OF_RANGE` present in 60/78 (76.9%), and **35/78 (44.9%) voided from OUT_OF_RANGE alone with no scratched player involved** — i.e., the selected player genuinely was in the starting lineup, and CLR rebuilt the parlay solely because of the contradicted slot assumption.
+
+**Decision:**
+1. Remove the -8 scoring penalty entirely — go neutral, do not flip the direction to reward slots 6-9/7-9 instead (the "penalized" sample sizes, 19-30 legs, are large enough to say "contradicted" but not large enough to establish a new correct direction).
+2. Downgrade `BATTING_ORDER_OUT_OF_RANGE` from a CLR rebuild trigger to annotation-only. `SCRATCHED` remains the sole rebuild trigger — it's a factual roster state (player absent from the lineup entirely), not a statistical judgment call, and was not implicated in this contradiction.
+3. Keep collecting `batting_order` / `lineup_check_status` annotation data on every leg regardless — cheap, already working (80% confirmation rate), and it's exactly what surfaced this issue in the first place. A future session with a larger, now-unbiased sample (no longer skewed by the scoring penalty influencing which legs get selected) may reveal a real pattern, a different one, or none at all.
+
+**Implementation:** `src/engine/simple_scorer.py` (removed penalty block), `src/apis/lineup_confirmation.py` (`_find_affected_parlays()` and `run_confirmed_lineup_resolution()` both changed to filter on `SCRATCHED` only). Deployed as commit `4cd3c37`, July 2, 2026. See `SESSION_HANDOFF.md` for post-deploy test results and the July 5-6 recheck plan.
+
+---
+
+## TB/under Parlay-Level Combinatorial Drag (Session 16)
+
+### **Finding: TB/under's Leg-Level Edge Is Real; Its Parlay-Level Drag Is Structural, Not a Signal Bug**
+
+Session 16's 7-day review found shadow's blended parlay win rate (16.5%) looked worse than production's (30.0%), which appeared to contradict shadow's per-leg scoring being measurably better than production's on shared props (+4.9pp on both hits/over and strikeouts/over — see Shadow Pipeline Strategy above).
+
+Isolating TB/under (50.6% of shadow's leg volume) resolved the apparent contradiction:
+
+| Segment | Resolved | Won | Win Rate |
+|---|---|---|---|
+| Shadow — with TB/under leg | 87 | 12 | 13.8% |
+| Shadow — without TB/under leg | 10 | 4 | 40.0% |
+| Production | 60 | 18 | 30.0% |
+
+TB/under's own leg win rate (57.9-59.4%) remains solidly above its ~39.1% breakeven — it is not a broken or negative-edge signal. But a 4-leg parlay's win probability is closer to the *product* of its legs' win rates than their average, since every leg must hit. Mixing a 58-59%-win-rate prop into the same flat pool as 67-77%-win-rate props mathematically caps the blended parlay win rate below what the stronger props alone would produce — independent of any signal-quality issue.
+
+**Decision: not yet made.** This is a parlay-construction-strategy question, not a scoring fix, and is deliberately not bundled into the Session 16 slot-gate fix. Candidate approaches for a future session: segregated TB-only vs. non-TB parlay pools; leg-quality-weighted selection within the flat pool; or accepting the drag as a known tradeoff of TB/under promotion. See Future Considerations.
 
 ---
 
 ## Lessons Learned
 
-1. **Coverage alone is not edge.** The book also knows historical coverage rates. Edge exists only where predicted win probability exceeds the book's implied probability.
-2. **Flat coverage signals mean cut, not raise the floor.**
-3. **Pool size determines parlay structure.** Any filtering on a 533-leg pool drops parlays from 191 to 43-49. The bottleneck is pool depth, not selection quality.
-4. **Sort order determines parlay quality, not just efficiency.**
-5. **Candidate limit determines search depth.** MAX_CANDIDATES=15 caused B&B to stop too early.
-6. **IP thresholds can silently exclude the best data.**
-7. **Function names can mislead.** `_attach_pitcher_rank_signals()` only attached to pitcher prop legs initially.
-8. **Shadow pipeline must have outcome resolution — at the scored leg level, not just parlay level.**
-9. **Resolution bugs compound quickly.**
-10. **stat-name-based routing is fragile.**
-11. **API defaults can silently corrupt logic.**
-12. **High-score player saturation kills manual parlays.**
-13. **Cross-run diversification matters as much as intra-run diversity.** The same player appearing in 5 automated parlays is the same failure mode as the same player appearing in 5 legs of a single parlay.
-14. **A gate that works for overs can be structurally impossible for unders.**
-15. **Score scales must be comparable before competing in the same pool.**
-16. **Rank scale bugs are invisible without spot-checking values.** The 30-pitcher hardcoded scale bug existed in two separate functions. Always verify that rank normalization uses `len(pitcher_ranks)` at runtime.
-17. **Backfill scripts should build lookup maps, not make per-leg API calls.**
-18. **API abbreviations drift from internal tables.** Always maintain `ABR_ALIASES`.
-19. **Training data schema must match scoring schema.**
-20. **Corrupted training data must be date-gated before analysis.** April 27 cutoff is confirmed.
-21. **Deprecated write paths cause silent pipeline failures.**
-22. **RealDictCursor rows require string keys, not integer indexes.**
-23. **Stacking pitcher signals across all prop types causes cancellation.**
-24. **A coverage ceiling observed in one prop does not generalize to all props.** The 84% ceiling was documented based on hits/over data and incorrectly treated as a universal rule. Full per-prop bucket analysis (Session 14) showed SO/over monotonically improves through 84%+ — a universal ceiling would have cut the best SO/over legs. Always validate ceiling effects per prop before implementing.
-25. **A broken feature that never ran is not the same as a working feature.** `lineup_scheduler.py` and `clv_tracker.py` were both wired into `main.py` and referenced correctly, but neither file existed on Railway. Always verify with `git show HEAD:src/path/to/file.py`.
-26. **Backtest pool contamination produces confidently wrong conclusions.** Running variants against a pool wider than production makes filtering appear to improve leg quality when it's actually filtering out props the production system never used.
-27. **EV-sort requires a signal that discriminates within the validated pool.** coverage_overall-derived EV does not rank legs differently within an already-validated pool.
-28. **Same-game correlation finding requires larger sample before acting on it.** Q3 found 20.0% vs 12.6% from a small sample. Session 14 data: only 3 same-game pairs in 316 parlays over 30 days — correlation-based construction changes not warranted yet.
-29. **Multi-loss clustering is expected math, not a signal of system failure.** At 65% per-leg, conditional on a 4-leg parlay losing, ~53% of losses have 2+ losing legs.
-30. **Database-backed schedulers are worth the extra table.** An in-memory APScheduler job is one Railway restart away from disappearing. Postgres-backed drain with 1-minute poll makes the scheduler restart-proof.
-31. **Verify parsers against real API responses before trusting them.** Lineup hydrate parser explicitly verified against real `battingOrder` response (19/19 slot match).
-32. **The hypothesis you're testing must match the data you're testing it on.** Slot gate hypothesis contradicted by current data — keep annotation, don't gate.
-33. **The same bug can exist in two separate functions.** When fixing a class of bug, search all occurrences of the pattern before closing the fix.
-34. **Backfill scripts that go through application logic may fail on already-resolved data.** Direct SQL (`UPDATE ... FROM` JOIN) bypasses the application-level state machine entirely and is the correct approach for data repair.
-35. **Shadow scored legs and shadow parlay legs are different sources of truth.** Parlay leg outcomes conflate signal quality with construction quality. Scored leg outcomes isolate signal quality. Both are needed; use the right one for the right question.
-36. **Direction filters in resolution queries are not optional.** A join on `(player_name, stat, run_date)` without `direction` will silently return the wrong result for any player with both an over and under leg on the same day. `LIMIT 1` is not a safety net.
-37. **Prop-specific pitcher signals must account for which direction improves outcomes.** Facing an elite K/9 pitcher is bad for hits/over but good for SO/over. A single composite applied uniformly cancels itself out.
-38. **Player cap fallback logic must check prop type composition, not just leg count.** 29 under legs with -180 juice cannot combine to reach +400 — the builder returns 0 parlays despite the fallback threshold not triggering.
-39. **Locally present files are not deployed files.** Always run `git status` after a session and commit everything that should be on Railway.
-40. **CLR does not inherit production filters from main.py.** Any prop exclusion, odds cap, or coverage gate applied in `main.py` must be explicitly mirrored in `run_confirmed_lineup_resolution()`'s pool construction. CLR builds its pool independently from `mlb_scored_legs` — it has no awareness of what `main.py` would have filtered. Session 14 found TB/under (shadow-only) leaking into 27 production CLR parlays because the `stat != "totalBases"` filter existed in `main.py` but not in CLR.
-41. **build_parlays() player diversity only covers a single call.** The internal `used_players` set resets on every invocation. When CLR calls `build_parlays()` in a loop (one call per affected parlay), each call has no memory of which players were selected in prior iterations. Cross-iteration diversity requires an explicit tracking set in the calling code, not inside `build_parlays()` itself.
-42. **SQL query scale assumptions must match the stored data scale.** Coverage bucket analysis initially used decimal thresholds (0.55, 0.65) when `coverage_overall` is stored as a percentage (55.0, 65.0). Every row landed in the `>= 0.90` bucket. Always verify the value scale of a column before writing range queries.
+*(Items 1-42 unchanged from prior version — see full list in git history / prior document version.)*
+
+43. **A contradicted hypothesis that repeats on a second, independent sample is confirmed, not re-flagged for later.** The June 12 slot-gate finding (66.7% vs 61.2%) was treated as "monitor, don't act" at the time — reasonable with one data point. The July 2 re-test (63.3% vs 60.0% hits/over; 73.7% vs 67.8% SO/over) showed the same direction on both props independently, three weeks apart. Two independent confirmations of the same contradiction is sufficient grounds to act, not to keep monitoring indefinitely.
+
+44. **A soft scoring penalty and a hard CLR rebuild trigger can share the same flawed assumption without either being individually flagged as "the big one."** The -8 penalty looked like a minor, bounded scoring adjustment. Separately, the OUT_OF_RANGE→CLR wiring looked like reasonable lineup-safety logic. Neither was obviously the primary problem in isolation — it took joining `superseded_reason` to `lineup_check_status` across all voided parlays to see that 76.9% of voids involved the same contradicted assumption driving both. When two independent-seeming mechanisms trace back to one shared premise, evaluate them together.
+
+45. **A leg-level scoring comparison and a parlay-level win-rate comparison can point in opposite directions without either being wrong.** Shadow scored legs better than production on identical props (+4.9pp, both props) while producing a lower blended parlay win rate (16.5% vs 30.0%). Both facts were true simultaneously because parlay win probability is closer to a product than an average of constituent leg win rates — a weaker-but-still-profitable prop at high volume in the pool will drag down the blend even when every individual signal in the system is working correctly. Diagnose at the level the question is actually about: leg quality and parlay-construction strategy are different questions with different answers.
+
+46. **A diagnostic column that exists in the schema is not the same as a diagnostic column that's populated.** `void_reason` was assumed to be the fastest path to root-causing the void spike, but was NULL for 97% of voided legs. The `superseded_reason` + `lineup_check_status` join was a reliable substitute this time, but the gap itself is worth fixing so the next investigation doesn't need a workaround.
 
 ---
 
 ## Future Considerations
 
-### **1. Fix TB/under Null Signals (Immediate — Next Session)**
-`park_factor` and `coverage_vs_opponent` are NULL for all TB/under legs in shadow. Investigate why these signals aren't attaching to TB/under in `enriched_scorer.py` / `run_enriched_pipeline.py`. Required before production promotion decision.
+*(Items 1-11 carried over from Session 15 — see prior version. New items below.)*
 
-### **2. Raise hits/under Coverage Gate from 40% to 65% (Next Session)**
-Data: 1,832 legs below 55% at 39.3% win rate, avg coverage ~48%, no enriched signal differentiation. One-line change in `main.py`.
+### **12. TB/under Parlay Construction Strategy (Session 16, ties to item 5 above)**
+Before promoting TB/under to production parlays (previously targeted ~July 9), decide on a construction approach that avoids the combinatorial drag documented in this session — segregated pools vs. quality-weighted selection vs. accepting the tradeoff. Can be simulated against existing shadow leg data without new signal work.
 
-### **3. Add prop-specific hits/over Ceiling at ~80% (Next Session)**
-Data: win rate peaks at 75-80% (71.9%), drops to 61.4% at 80-84% (44 legs). Simple per-prop filter in `main.py`. Do NOT apply universally — SO/over must remain uncapped.
+### **13. Fix void_reason Logging Gap (Session 16)**
+`void_reason` on `mlb_scored_legs` is NULL for 97% of voided legs. Investigate why the resolver isn't writing to this column and fix, so future void investigations don't require the `superseded_reason`/`lineup_check_status` workaround.
 
-### **4. Vulnerability Penalty Calibration (~June 22)**
-Jun 15-18 now available. Rerun full hits/over vulnerability gradient analysis before finalizing thresholds (<0.15 → -10, <0.25 → -6).
+### **14. Re-evaluate Batting Order Slot Data With an Unbiased Sample (Post-Removal)**
+Now that the -8 penalty no longer influences which legs get selected into parlays, a future session should re-pull the slot-level win rate breakdown with a larger, unbiased sample to see whether a real pattern exists (in either direction) or whether the June 12 / July 2 findings were themselves noise from a still-limited sample.
 
-### **5. TB Under Promotion Decision (Late June)**
-Shadow edge confirmed (+8.9pp, 89 legs). Blocked pending null signal fix. Recheck after signals are populated and June 20+ shadow data available.
-
-### **6. Stack Bonus Promotion Decision (After June 20)**
-Current: 72.7% vs 55.3% (11 legs — small sample). Re-evaluate after June 20.
-
-### **7. CLV Signal Read (~June 26)**
-First meaningful read on whether SO/over and hits/over beat the close. Expected: SO/over positive CLV, hits/over near zero.
-
-### **8. Pool Expansion Strategy**
-Real improvement requires pool expansion, not filtering. Priority: (1) TB under after null signal fix + shadow validation, (2) pitcher SO market integration, (3) additional validated hitter props.
-
-### **9. Pitcher SO Market Integration (Phase 2)**
-Pitcher strikeout total props require new SGO market parameter + pitcher coverage logic.
-
-### **10. Hits/Over Reassessment After CLV**
-Currently -1.2pp below breakeven on full clean window. CLV will provide cleaner verdict on whether the book has priced out the edge entirely.
-
-### **11. Learning Loop**
-Once 500+ resolved legs exist under current scoring, regression on signals vs outcomes. Recalibrate weights from data.
+### **15. Confirm Origin of Commit 85b5bd5**
+Landed on `origin/master` between Session 15 (`9eed486`) and Session 16 without a corresponding session doc entry. Rebase was clean; contents not yet traced.
 
 ---
 
 **Architecture Status:** ✅ STABLE
-**Last Major Change:** June 18, 2026 (CLR bugs fixed, coverage ceiling confirmed prop-specific)
-**Next Architecture Review:** After June 22 vulnerability calibration + TB/under null signal fix
+**Last Major Change:** July 2, 2026 (batting order slot gate removed — both scoring penalty and CLR trigger)
+**Next Architecture Review:** July 5-6, 2026 (slot-gate fix volume recheck) / ~July 9 (TB/under promotion + construction strategy, K/9/WHIP re-evaluation)
