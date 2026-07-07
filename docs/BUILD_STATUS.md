@@ -1,7 +1,7 @@
 # MLB Parlay Agent — Build Status
-**Last Updated:** July 2, 2026 (Session 16 — Batting Order Slot Gate Removed)
+**Last Updated:** July 7, 2026 (Session 17 — CLV Tracking Layer Removed, SportsGameOdds Cost Optimization)
 
-## Overall System Status: ✅ OPERATIONAL — SESSION 16 DEPLOYED
+## Overall System Status: ✅ OPERATIONAL — SESSION 17 DEPLOYED
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────┐
@@ -70,8 +70,24 @@
 │ Slot Gate (soft, -8pts):        ✅ REMOVED (Session 16, see scoring above)   │
 ├────────────────────────────────────────────────────────────────────────────────┤
 │ CLV TRACKING LAYER                                                             │
-│ CLV Capture Live:               ✅ LIVE (started June 16)                    │
-│ Next CLV Read:                  ⏳ ~JULY 5 (larger window)                   │
+│ CLV Capture:                    ❌ REMOVED (Session 17, commit d3a642c)      │
+│                                    No statistically credible relationship     │
+│                                    found between beating close and winning    │
+│                                    (n=2,300, z≈0.72). Reversed direction on   │
+│                                    hits/over and SO/over when split by prop.  │
+│                                    Was 52% of total SGO volume (78% of July). │
+│ clv_tracker.py:                 ✅ INTACT, uncalled — recoverable            │
+│ Historical closing_odds data:   ✅ PRESERVED, no longer written to           │
+├────────────────────────────────────────────────────────────────────────────────┤
+│ SPORTSGAMEODDS API USAGE                                                       │
+│ Prior plan:                     Pro tier, $149/mo (~100K objects/mo)         │
+│ Target plan:                    Amateur/free tier, $0/mo (2,500 objects/mo)  │
+│ Account downgrade status:       🔲 NOT YET CONFIRMED — user action pending   │
+│ Post-removal usage (validated): ~1,080/mo avg, ~1,350/mo worst case          │
+│                                    (18 clean days, excl. Jun 16 catch-up      │
+│                                    burst artifact) — both under 2,500 cap     │
+│ Remaining SGO call path:        ✅ 3 scheduled runs only (9AM/12PM/5:30PM)   │
+│ NBA agent (shared SGO account): ❌ CONFIRMED INACTIVE since April 2026       │
 ├────────────────────────────────────────────────────────────────────────────────┤
 │ SHADOW PIPELINE                                                                │
 │ Shadow Pipeline:                ✅ RUNNING AFTER EVERY PRODUCTION RUN        │
@@ -106,6 +122,49 @@
 ---
 
 ## Recent Deployments
+
+### 🔧 July 7, 2026 (Session 17): CLV Tracking Layer Removal + SGO Cost Optimization
+
+**Investigation.** Usage audit of the previously-undocumented `mlb_sgo_request_log`
+table found MLB's own SGO usage already exceeded the 2,500/month free-tier cap in
+every complete month (Apr 2,545, May 3,365, June 3,794), independent of the shared
+NBA-agent account activity (confirmed inactive since April). An hour-of-day breakdown
+attributed ~75% of daily volume to the CLV tracker's T-1-per-game-group snapshot
+calls. Before cutting CLV calls, tested whether CLV was adding value: joined
+`closing_odds` to `result` for 2,300 resolved legs since June 16. Aggregate win rate
+looked mildly supportive (57.0% beating-close vs. 55.4% not) but not statistically
+significant (z≈0.72); split by prop, hits/over and strikeouts/over both reversed
+direction, and totalBases/under was flat. No prop showed a credible predictive
+relationship.
+
+**Decision:** remove CLV entirely rather than throttle it — it was both the largest
+cost driver and had no demonstrated value.
+
+**Fix (commit d3a642c).**
+- `main.py`: `schedule_clv_checks()` call commented out (not deleted) inside
+  `log_slate_start_times()`, with recovery instructions.
+- `src/apis/lineup_confirmation.py`: `check_type='clv'` drain branch marks
+  already-queued rows `done` with an explanatory note instead of calling SGO.
+- `src/apis/clv_tracker.py` untouched but uncalled.
+- `mlb_scored_legs.closing_odds` historical data preserved, no longer written to.
+- Confirmed via DB join (not estimate) that CLV was 52% of total SGO volume overall,
+  78% of July's volume — higher than the ~75% estimate that scoped the work.
+- Caught a measurement artifact: a June 16 "scheduled-run" spike (150 entities) was
+  actually a backlog of June 12 + June 15 CLV checks firing in a catch-up burst after
+  the drain cron came back online — excluded from the final projection.
+- 10/10 tests passed (`test_clv_removal.py`).
+- Clean push, no rebase conflict.
+
+**Retrospective validation (18 clean 3-run days since June 16):**
+| Metric | Value |
+|---|---|
+| Avg scheduled-only entities/day | 36 |
+| Peak scheduled-only entities/day | 45 (June 30) |
+| 30-day average projection | ~1,080/month |
+| 30-day worst-case projection | 1,350/month |
+
+Both comfortably under the 2,500/month free-tier cap. **SGO Pro subscription
+cancellation itself not yet confirmed — pending manual user action.**
 
 ### 🔧 July 2, 2026 (Session 16): Batting Order Slot Gate Removal
 
@@ -201,11 +260,14 @@ Recheck scheduled ~July 5-6 with real volume behind all three statistical tests.
 
 | Item | File | Priority |
 |---|---|---|
-| Recheck slot-gate fix with real volume | — (verification only) | **High — ~July 5-6** |
+| Cancel SGO Pro subscription (account-level, not code) | — (manual action) | **High — Session 17, not yet confirmed** |
+| Verify live SGO volume post-CLV-removal | — (verification only) | **High — check within days of Jul 7** |
+| Recheck slot-gate fix with real volume | — (verification only) | High — ~July 5-6, overdue from Session 16 |
 | Fix void_reason logging gap | `parlay_outcome_resolver.py` / `outcome_resolver.py` | Medium |
 | TB/under parlay construction strategy | `parlay_builder.py` (or new module) | Medium — before TB/under promotion |
 | Add hits/over coverage ceiling at ~80% | `main.py` | High — data confirmed, carried from Session 15 |
 | Re-evaluate K/9 / WHIP with starter-only data | `enriched_scorer.py` | Medium — ~July 9 |
+| Investigate unexplained April/May SGO traffic | — (investigation only) | Low — Session 17 |
 | Confirm origin of commit 85b5bd5 | — (investigation only) | Low |
 | Fix sklearn version mismatch | model retraining | Low — non-fatal |
 | Project file cleanup (retire stale docs) | Project Knowledge | Low |
@@ -213,5 +275,5 @@ Recheck scheduled ~July 5-6 with real volume behind all three statistical tests.
 ---
 
 **Build Status:** ✅ HEALTHY
-**Last Deployment:** July 2, 2026 — Batting order slot gate removed (commit 4cd3c37)
-**Next Review:** July 5-6, 2026 — slot-gate fix volume recheck
+**Last Deployment:** July 7, 2026 — CLV tracking layer removed, SGO scoped to 3 scheduled runs (commit d3a642c)
+**Next Review:** Post-deploy SGO volume check (within days of Jul 7) + overdue July 5-6 slot-gate recheck

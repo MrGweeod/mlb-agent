@@ -1,5 +1,5 @@
 # MLB Parlay Agent — Architecture Decisions
-**Last Updated:** July 2, 2026 (Session 16 — Batting Order Slot Gate Removed, TB/under Combinatorial Drag Identified)
+**Last Updated:** July 7, 2026 (Session 17 — CLV Tracking Layer Removed, SportsGameOdds Cost Optimization)
 
 ---
 
@@ -23,8 +23,9 @@
 17. [Pipeline Architecture](#pipeline-architecture)
 18. [Batting Order Slot Gate — Removal (Session 16)](#batting-order-slot-gate--removal-session-16)
 19. [TB/under Parlay-Level Combinatorial Drag (Session 16)](#tbunder-parlay-level-combinatorial-drag-session-16)
-20. [Lessons Learned](#lessons-learned)
-21. [Future Considerations](#future-considerations)
+20. [SportsGameOdds Cost Optimization — CLV Layer Removal (Session 17)](#sportsgameodds-cost-optimization--clv-layer-removal-session-17)
+21. [Lessons Learned](#lessons-learned)
+22. [Future Considerations](#future-considerations)
 
 ---
 
@@ -150,7 +151,11 @@ Event-driven annotation system. After 9AM pipeline, rows are written to `mlb_pen
 
 ## CLV Tracking Layer
 
-*(Unchanged.)*
+**REMOVED — Session 17 (July 7, 2026).** See
+[SportsGameOdds Cost Optimization — CLV Layer Removal](#sportsgameodds-cost-optimization--clv-layer-removal-session-17)
+below for full detail. `src/apis/clv_tracker.py` remains in the repo, intact but
+uncalled, and is recoverable. Historical `closing_odds` data in `mlb_scored_legs` is
+preserved for any future post-hoc analysis but is no longer written to.
 
 ---
 
@@ -228,6 +233,68 @@ TB/under's own leg win rate (57.9-59.4%) remains solidly above its ~39.1% breake
 
 ---
 
+## SportsGameOdds Cost Optimization — CLV Layer Removal (Session 17)
+
+### **Decision: Cancel SGO Pro Plan ($149/mo), Remove CLV Tracking Entirely, Keep 3 Scheduled Runs**
+
+**Background:** A cost review found MLB's own SGO usage (`mlb_sgo_request_log`,
+undocumented in the schema reference until this session) already exceeded SGO's
+2,500-object/month free-tier cap in every complete month on record (April 2,545, May
+3,365, June 3,794) — independent of the shared-account NBA agent, which was confirmed
+inactive since April. An hour-of-day breakdown isolated the three scheduled pipeline
+runs (9AM/12PM/~5PM) at ~43.7 entities/day combined, versus ~129.7 entities/day spread
+across the rest of the day — consistent with the CLV tracker's T-1-per-game-group
+snapshot calls being the dominant cost driver.
+
+**Before deciding how to cut CLV calls, tested whether CLV was adding value at all.**
+Joined `mlb_scored_legs.closing_odds` to `result` for all resolved legs since CLV went
+live (June 16 – July 7, n=2,300). The aggregate looked mildly supportive of CLV theory
+(57.0% WR beating the close vs. 55.4% not), but a two-proportion z-test put this at
+z≈0.72 — not statistically significant. Splitting by prop reversed the picture
+entirely: hits/over and strikeouts/over (the two strongest-edge props) both showed
+*higher* win rates when NOT beating the close (64.0% vs. 62.4%, and 70.9% vs. 64.0%
+respectively), while totalBases/under was flat. The aggregate "signal" was a
+composition artifact of mixing props with different base rates, not a real effect
+within any individual prop.
+
+**Decision:** remove CLV tracking entirely rather than throttle it. It was
+simultaneously the largest cost driver (52% of total SGO volume overall, 78% of July's
+volume specifically — accelerating, not flat) and had no demonstrated predictive
+value. Keep the three scheduled pipeline runs unchanged as the sole remaining SGO call
+path.
+
+**Validation methodology worth noting:** the Claude Code investigation independently
+re-derived the CLV/scheduled-run volume split by joining against
+`mlb_pending_lineup_checks.check_type` directly, rather than trusting the hour-bucket
+estimate that scoped the work. This caught a real measurement artifact — a spike
+originally read as "scheduled-run" traffic on June 16 (150 entities) was actually a
+backlog of June 12 + June 15 CLV checks that queued up while the drain cron was down,
+then fired in a single catch-up burst. Excluding that artifact, the final projection
+(18 clean days: avg 36 entities/day, peak 45/day) is materially tighter and more
+trustworthy than the pre-implementation estimate would have supported on its own.
+
+**Implementation:** `main.py` (`schedule_clv_checks()` call commented out, not
+deleted, inside `log_slate_start_times()`), `src/apis/lineup_confirmation.py` (the
+`check_type='clv'` drain branch marks any already-queued rows `done` with an
+explanatory note instead of calling SGO). `src/apis/clv_tracker.py` untouched but
+uncalled. Historical `closing_odds` data preserved. Deployed as commit `d3a642c`, July
+7, 2026.
+
+**Projected post-removal usage:** ~1,080/month average, ~1,350/month worst case — both
+comfortably under the 2,500/month free-tier cap (46% headroom at worst case), enabling
+cancellation of the $149/month Pro subscription. **Note: the account-level
+cancellation itself is a manual action outside the codebase and had not been confirmed
+completed as of this session — the code change alone does not reduce cost until the
+SGO subscription is actually downgraded.**
+
+**Open item, not resolved:** April and May 2026 both show elevated non-scheduled-run
+SGO traffic that predates CLV entirely (CLV didn't exist until June 12). Not
+identified or investigated this session — doesn't threaten the current projection
+since it isn't part of what's still running, but flagged in case elevated volume
+recurs post-removal.
+
+---
+
 ## Lessons Learned
 
 *(Items 1-42 unchanged from prior version — see full list in git history / prior document version.)*
@@ -239,6 +306,12 @@ TB/under's own leg win rate (57.9-59.4%) remains solidly above its ~39.1% breake
 45. **A leg-level scoring comparison and a parlay-level win-rate comparison can point in opposite directions without either being wrong.** Shadow scored legs better than production on identical props (+4.9pp, both props) while producing a lower blended parlay win rate (16.5% vs 30.0%). Both facts were true simultaneously because parlay win probability is closer to a product than an average of constituent leg win rates — a weaker-but-still-profitable prop at high volume in the pool will drag down the blend even when every individual signal in the system is working correctly. Diagnose at the level the question is actually about: leg quality and parlay-construction strategy are different questions with different answers.
 
 46. **A diagnostic column that exists in the schema is not the same as a diagnostic column that's populated.** `void_reason` was assumed to be the fastest path to root-causing the void spike, but was NULL for 97% of voided legs. The `superseded_reason` + `lineup_check_status` join was a reliable substitute this time, but the gap itself is worth fixing so the next investigation doesn't need a workaround.
+
+47. **A cost-cutting decision and a value question should be answered together, not sequentially.** The initial framing of the SGO problem was purely "how do we fit under the free-tier cap" — which would have led to either a once-daily fetch or a scoping fix to CLV's per-call cost. Testing whether CLV was adding predictive value *before* deciding how to cut it changed the decision entirely: rather than optimizing a feature with no demonstrated value, it was removed outright. Cost and value are different questions, and answering only the cost question risks preserving something worth cutting.
+
+48. **An aggregate statistical comparison can look supportive of a hypothesis while every underlying subgroup contradicts or is neutral toward it.** The CLV win-rate comparison (57.0% vs. 55.4% beating-the-close) looked like a positive, if modest, confirmation of CLV theory. Splitting by prop showed two of four props actually reversed the direction, and none were individually significant. This is the same failure mode as Lesson 45 (leg-level vs. parlay-level) in a different form: always check whether an aggregate pattern survives disaggregation before treating it as evidence.
+
+49. **Validating a pre-implementation estimate against live data during implementation caught a real error, not just noise.** The hour-bucket estimate used to scope the CLV removal work (~75% of volume) was directionally right but numerically off — the actual figure (52% overall, 78% of July) differed enough to matter, and was only caught because the implementation step re-derived the split from a proper join rather than trusting the estimate that motivated the work. Estimates that motivate a decision should be re-verified with better data during implementation, not assumed correct because they pointed in the right direction.
 
 ---
 
@@ -258,8 +331,19 @@ Now that the -8 penalty no longer influences which legs get selected into parlay
 ### **15. Confirm Origin of Commit 85b5bd5**
 Landed on `origin/master` between Session 15 (`9eed486`) and Session 16 without a corresponding session doc entry. Rebase was clean; contents not yet traced.
 
+### **16. Investigate Unexplained April/May SGO Traffic (Session 17)**
+Elevated non-scheduled-run SGO volume in April/May 2026 predates the CLV layer (which
+didn't exist until June 12) and was never identified. Not urgent since it isn't part
+of what's still running post-CLV-removal, but worth investigating if SGO volume
+unexpectedly climbs again.
+
+### **17. Add mlb_sgo_request_log and sgo_request_log to SUPABASE_SCHEMA_REFERENCE.md (Session 17)**
+Both tables were discovered mid-session via direct table listing, not via the schema
+doc, which is supposed to be authoritative. Added in this session's schema reference
+update — confirm it stays current if the request-logging schema changes.
+
 ---
 
 **Architecture Status:** ✅ STABLE
-**Last Major Change:** July 2, 2026 (batting order slot gate removed — both scoring penalty and CLR trigger)
-**Next Architecture Review:** July 5-6, 2026 (slot-gate fix volume recheck) / ~July 9 (TB/under promotion + construction strategy, K/9/WHIP re-evaluation)
+**Last Major Change:** July 7, 2026 (CLV tracking layer removed — SGO calls scoped to 3 scheduled runs only)
+**Next Architecture Review:** Post-deploy SGO volume check (within days of Jul 7) / July 5-6, 2026 (carried-over slot-gate fix volume recheck, overdue) / ~July 9 (TB/under promotion + construction strategy, K/9/WHIP re-evaluation)
