@@ -196,13 +196,18 @@ def check_sgo_usage() -> dict | None:
 
 def _sgo_get(path: str, params: dict) -> dict:
     """
-    Make a GET request to the SportsGameOdds API with one 429 retry.
+    Make a GET request to the SportsGameOdds API with retry handling.
 
     Logs every request (success or failure) to mlb_sgo_request_log so quota
-    consumption can be audited per-run and per-day. On a 429 response, waits
-    60 seconds and retries once. If the retry also returns 429, raises
-    RuntimeError so the caller fails loudly rather than silently returning
-    empty data. Raises RuntimeError for any other non-200 status code as well.
+    consumption can be audited per-run and per-day.
+
+    Network-level failures (ReadTimeout, ConnectionError, Timeout) are retried
+    up to 2 times with 3s then 8s backoff. After retries are exhausted a
+    RuntimeError is raised so the caller fails loudly rather than silently
+    returning empty data.
+
+    On a 429 response, waits 60 seconds and retries once. If the retry also
+    returns 429, raises RuntimeError.
 
     Args:
         path: API path relative to BASE_URL (e.g. '/events').
@@ -212,7 +217,23 @@ def _sgo_get(path: str, params: dict) -> dict:
         Parsed JSON response dict.
     """
     url = f'{BASE_URL}{path}'
-    r = requests.get(url, params=params, timeout=15)
+    _network_backoffs = [3, 8]
+    r = None
+    for _attempt, _backoff in enumerate([None] + _network_backoffs):
+        if _backoff is not None:
+            print(f"[SGO] Network error on attempt {_attempt} for {path} — retrying in {_backoff}s...")
+            time.sleep(_backoff)
+        try:
+            r = requests.get(url, params=params, timeout=15)
+            break
+        except (requests.exceptions.ReadTimeout,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as _net_err:
+            log_sgo_request(path, 0, 0, notes=f'network_error_attempt{_attempt}: {type(_net_err).__name__}')
+            if _attempt >= len(_network_backoffs):
+                raise RuntimeError(
+                    f"SportsGameOdds network error after {_attempt + 1} attempts on {path}: {_net_err}"
+                ) from _net_err
 
     if r.status_code == 429:
         log_sgo_request(path, 429, 0, notes='rate_limited')

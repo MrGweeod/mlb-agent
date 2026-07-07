@@ -39,6 +39,17 @@ _parlay_cache: dict = {
     "timestamp": None,
     "lock": threading.Lock(),
 }
+
+# In-memory regenerate job status — single-process deployment (railway.toml:
+# startCommand = "python src/web/server.py"), so a plain dict is safe.
+# status: "idle" | "running" | "success" | "failed"
+_regen_job: dict = {
+    "status": "idle",
+    "error": None,
+    "started_at": None,
+    "finished_at": None,
+    "lock": threading.Lock(),
+}
 _CACHE_TTL_MINUTES = 30
 
 from src.utils.db import (
@@ -720,14 +731,27 @@ async def handle_regenerate_recommendations(request: web.Request) -> web.Respons
 
         print("[regenerate] Triggering full fresh pipeline run (fresh SGO fetch + re-score)")
 
+        with _regen_job["lock"]:
+            _regen_job["status"] = "running"
+            _regen_job["error"] = None
+            _regen_job["started_at"] = datetime.now(timezone.utc).isoformat()
+            _regen_job["finished_at"] = None
+
         def _run():
             try:
                 run_full_refresh_pipeline(source="manual")
                 print("[regenerate] Pipeline completed successfully")
+                with _regen_job["lock"]:
+                    _regen_job["status"] = "success"
+                    _regen_job["finished_at"] = datetime.now(timezone.utc).isoformat()
             except Exception as _e:
                 import traceback
                 print(f"[regenerate] Pipeline error: {_e}")
                 traceback.print_exc()
+                with _regen_job["lock"]:
+                    _regen_job["status"] = "failed"
+                    _regen_job["error"] = str(_e)
+                    _regen_job["finished_at"] = datetime.now(timezone.utc).isoformat()
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -741,11 +765,38 @@ async def handle_regenerate_recommendations(request: web.Request) -> web.Respons
     except Exception as exc:
         import traceback as _tb
         print(f"[regenerate] UNHANDLED ERROR: {exc}\n{_tb.format_exc()}")
+        with _regen_job["lock"]:
+            _regen_job["status"] = "failed"
+            _regen_job["error"] = str(exc)
+            _regen_job["finished_at"] = datetime.now(timezone.utc).isoformat()
         return web.Response(
             text=json.dumps({"error": str(exc)}),
             content_type="application/json",
             status=500,
         )
+
+
+async def handle_regenerate_status(request: web.Request) -> web.Response:
+    """Return the current status of the most recent regenerate pipeline run."""
+    if not _check_auth(request):
+        return web.Response(
+            text=json.dumps({"error": "Unauthorized"}),
+            content_type="application/json",
+            status=401,
+        )
+
+    with _regen_job["lock"]:
+        payload = {
+            "status": _regen_job["status"],
+            "error": _regen_job["error"],
+            "started_at": _regen_job["started_at"],
+            "finished_at": _regen_job["finished_at"],
+        }
+
+    return web.Response(
+        text=json.dumps(payload),
+        content_type="application/json",
+    )
 
 
 async def handle_refresh(request: web.Request) -> web.Response:
@@ -958,6 +1009,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/recommendations", handle_recommendations)
     app.router.add_get("/api/recommendations/history", handle_recommendation_history)
     app.router.add_post("/api/recommendations/regenerate", handle_regenerate_recommendations)
+    app.router.add_get("/api/recommendations/regenerate/status", handle_regenerate_status)
     app.router.add_post("/api/refresh", handle_refresh)
     app.router.add_get("/api/train-model", handle_train_model)
     app.router.add_post("/api/training/retrain", handle_training_retrain)

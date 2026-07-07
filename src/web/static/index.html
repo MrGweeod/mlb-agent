@@ -2282,7 +2282,8 @@ async function regenerateRecommendations() {
     return;
   }
 
-  // Poll /api/recommendations every 2s until generated_at changes (new batch ready)
+  // Poll both /api/recommendations/regenerate/status and /api/recommendations every 2s.
+  // Status endpoint surfaces pipeline failures within seconds; generated_at detects success.
   const POLL_INTERVAL = 2000;
   const TIMEOUT_MS = 60000;
   const startTime = Date.now();
@@ -2299,6 +2300,26 @@ async function regenerateRecommendations() {
     }
 
     try {
+      // Check job status first — surfaces failures immediately without waiting 60s
+      try {
+        const statusRes = await fetch(`/api/recommendations/regenerate/status?password=${encodeURIComponent(password)}`);
+        if (statusRes.ok) {
+          const statusData = await statusRes.json();
+          if (statusData.status === 'failed') {
+            clearInterval(pollTimer);
+            const errMsg = statusData.error || 'Pipeline failed — check Railway logs';
+            showToast('Regeneration failed: ' + errMsg);
+            container.innerHTML =
+              '<div class="center-msg"><div style="color:var(--red)">Regeneration failed: ' + esc(errMsg) + '</div></div>';
+            btn.disabled = false;
+            btn.textContent = 'Regenerate Now';
+            return;
+          }
+        }
+      } catch (_) {
+        // status endpoint hiccup — keep polling
+      }
+
       const res = await fetch(`/api/recommendations?password=${encodeURIComponent(password)}`);
       if (!res.ok) return; // keep polling on transient errors
       const data = await res.json();
