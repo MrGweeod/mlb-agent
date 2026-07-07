@@ -84,8 +84,10 @@ def drain_due_lineup_checks() -> None:
 
         try:
             if row.get("check_type") == "clv":
-                from src.apis.clv_tracker import run_clv_snapshot
-                note = run_clv_snapshot(row)
+                # CLV removed 2026-07-07: no SGO call; mark done with a note.
+                # schedule_clv_checks() no longer inserts these rows, but handle
+                # any that already exist in the queue without calling SGO.
+                note = "clv-disabled: CLV tracking removed (no demonstrated predictive value, ~75% of SGO volume)"
             else:
                 note = run_lineup_check(row)
             _finish_check(row_id, "done", note)

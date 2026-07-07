@@ -1108,17 +1108,26 @@ def log_slate_start_times() -> None:
     )
     print(f"[log_slate_start_times] {n} lineup-check row(s) scheduled.")
 
-    # Schedule CLV snapshot at game_start_time − CLV_OFFSET_MINUTES (T-1)
-    try:
-        from src.apis.clv_tracker import schedule_clv_checks
-        n_clv = schedule_clv_checks(
-            groups=groups,
-            run_date=today_date,
-            offset_minutes=CLV_OFFSET_MINUTES,
-        )
-        print(f"[log_slate_start_times] {n_clv} CLV-check row(s) scheduled.")
-    except Exception as _clv_err:
-        print(f"[log_slate_start_times] CLV scheduling failed (non-fatal): {_clv_err}")
+    # CLV scheduling removed (2026-07-07): no statistically credible relationship
+    # found between beating the closing line and winning (z≈0.72, n=2,300 resolved
+    # legs; hits/over and strikeouts/over both showed *higher* WRs when NOT beating
+    # the close). CLV was also responsible for ~75% of SGO volume, pushing monthly
+    # usage well over the 2,500-object Amateur-tier cap.  clv_tracker.py is kept
+    # intact for reference but is no longer called.  Historical closing_odds data
+    # in mlb_scored_legs is untouched.
+    #
+    # To re-enable: uncomment the block below and redeploy.
+    #
+    # try:
+    #     from src.apis.clv_tracker import schedule_clv_checks
+    #     n_clv = schedule_clv_checks(
+    #         groups=groups,
+    #         run_date=today_date,
+    #         offset_minutes=CLV_OFFSET_MINUTES,
+    #     )
+    #     print(f"[log_slate_start_times] {n_clv} CLV-check row(s) scheduled.")
+    # except Exception as _clv_err:
+    #     print(f"[log_slate_start_times] CLV scheduling failed (non-fatal): {_clv_err}")
 
 
 def run_morning_pipeline(source: str | None = None) -> None:
