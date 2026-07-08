@@ -363,7 +363,8 @@ function tryAuth() {
     if (err === 401) {
       document.getElementById('auth-error').textContent = 'Incorrect password.';
     } else {
-      document.getElementById('auth-error').textContent = 'Authentication failed. Please try again.';
+      document.getElementById('auth-error').textContent =
+        `Server error (${err}) — check the Railway logs.`;
     }
   });
 }

@@ -1035,13 +1035,8 @@ async def handle_manual_legs(request: web.Request) -> web.Response:
         legs = await asyncio.get_event_loop().run_in_executor(
             None, get_manual_legs, run_date
         )
-        # Convert non-serializable types to plain Python
-        for leg in legs:
-            for k, v in list(leg.items()):
-                if hasattr(v, "isoformat"):
-                    leg[k] = v.isoformat()
         return web.Response(
-            text=json.dumps(legs),
+            text=json.dumps(legs, default=str),
             content_type="application/json",
         )
     except Exception as exc:
