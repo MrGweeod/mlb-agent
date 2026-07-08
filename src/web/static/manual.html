@@ -28,7 +28,10 @@
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     font-size: 13px;
     line-height: 1.4;
-    min-height: 100vh;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
   }
 
   header {
@@ -39,8 +42,7 @@
     align-items: center;
     gap: 16px;
     flex-wrap: wrap;
-    position: sticky;
-    top: 0;
+    flex-shrink: 0;
     z-index: 100;
   }
 
@@ -90,8 +92,10 @@
 
   /* ── Table ───────────────────────────────────────────────────── */
   .table-wrap {
+    flex: 1;
     overflow-x: auto;
-    padding-bottom: 160px; /* room for parlay slip */
+    overflow-y: auto;
+    padding-bottom: 160px; /* room for fixed parlay slip */
   }
 
   table {
@@ -106,7 +110,7 @@
     background: var(--surface);
     border-bottom: 2px solid var(--border);
     position: sticky;
-    top: 0; /* overridden by updateStickyTop() after header measures */
+    top: 0;
     z-index: 90;
   }
 
@@ -577,7 +581,6 @@ function renderTable() {
   document.getElementById('status-bar').textContent =
     `Showing ${_filtered.length} of ${_legs.length} legs. ` +
     (_selected.size > 0 ? `${_selected.size} selected.` : '');
-  updateStickyTop();
 }
 
 function statusBadgeClass(s) {
@@ -780,12 +783,6 @@ function slipError(msg) {
 function setStatus(html) {
   document.getElementById('status-bar').innerHTML = html;
 }
-
-function updateStickyTop() {
-  const h = document.querySelector('header').offsetHeight;
-  document.getElementById('thead-row').style.top = h + 'px';
-}
-window.addEventListener('resize', updateStickyTop);
 </script>
 </body>
 </html>
