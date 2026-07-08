@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Manual Parlay Builder</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --border: #2d3148;
+    --accent: #4e7cff;
+    --green: #22c55e;
+    --red: #ef4444;
+    --amber: #f59e0b;
+    --text: #e2e8f0;
+    --muted: #64748b;
+    --heat-green: #166534;
+    --heat-amber: #78350f;
+    --heat-red: #7f1d1d;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    font-size: 12px;
+    line-height: 1.4;
+    min-height: 100vh;
+  }
+
+  header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+
+  header h1 { font-size: 14px; font-weight: 700; color: var(--accent); white-space: nowrap; }
+
+  .controls {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+    flex: 1;
+  }
+
+  input[type="text"], input[type="date"], input[type="number"], input[type="password"], select {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 5px 8px;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 11px;
+    outline: none;
+  }
+  input:focus, select:focus { border-color: var(--accent); }
+
+  button {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    padding: 5px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    transition: opacity 0.15s;
+  }
+  button:hover { opacity: 0.85; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  button.secondary {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+  }
+
+  .label { font-size: 10px; color: var(--muted); white-space: nowrap; }
+
+  /* ── Table ───────────────────────────────────────────────────── */
+  .table-wrap {
+    overflow-x: auto;
+    padding-bottom: 160px; /* room for parlay slip */
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+  }
+
+  colgroup col { /* widths set via JS */ }
+
+  thead tr {
+    background: var(--surface);
+    border-bottom: 2px solid var(--border);
+    position: sticky;
+    top: 53px;
+    z-index: 90;
+  }
+
+  th {
+    padding: 6px 6px;
+    text-align: left;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--muted);
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    user-select: none;
+  }
+  th:hover { color: var(--text); }
+  th.sorted-asc::after  { content: " ▲"; }
+  th.sorted-desc::after { content: " ▼"; }
+
+  td {
+    padding: 4px 6px;
+    border-bottom: 1px solid var(--border);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: middle;
+  }
+
+  tr:hover td { background: rgba(255,255,255,0.03); }
+
+  td.heat { border-radius: 3px; text-align: right; }
+  td.null-val { color: var(--muted); }
+
+  /* checkbox col */
+  td.cb-col, th.cb-col { width: 28px; text-align: center; }
+
+  /* status badge */
+  .badge {
+    display: inline-block;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 9px;
+    font-weight: 700;
+  }
+  .badge-confirmed { background: #14532d; color: #86efac; }
+  .badge-pending   { background: #1e3a5f; color: #93c5fd; }
+  .badge-out       { background: #3f1515; color: #fca5a5; }
+  .badge-unknown   { background: #1f2937; color: #9ca3af; }
+
+  /* ── Parlay slip ─────────────────────────────────────────────── */
+  #slip {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: var(--surface);
+    border-top: 2px solid var(--border);
+    padding: 10px 16px;
+    z-index: 200;
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  #slip-legs {
+    flex: 1;
+    min-width: 240px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .slip-leg {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 3px 8px;
+    font-size: 10px;
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .slip-leg .rm { cursor: pointer; color: var(--red); font-weight: 700; }
+
+  #slip-meta {
+    min-width: 200px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  #slip-odds { font-size: 18px; font-weight: 700; color: var(--green); }
+  #slip-odds.below { color: var(--red); }
+
+  #slip-count { font-size: 10px; color: var(--muted); }
+  #slip-error { font-size: 10px; color: var(--red); min-height: 14px; }
+  #slip-success { font-size: 10px; color: var(--green); min-height: 14px; }
+
+  #slip-submit {
+    background: var(--green);
+    padding: 8px 20px;
+    font-size: 13px;
+    align-self: center;
+  }
+
+  /* ── Auth overlay ────────────────────────────────────────────── */
+  #auth-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.85);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 999;
+  }
+  #auth-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-width: 280px;
+  }
+  #auth-box h2 { font-size: 14px; color: var(--accent); }
+  #auth-error  { color: var(--red); font-size: 11px; min-height: 14px; }
+
+  /* ── Misc ────────────────────────────────────────────────────── */
+  #status-bar {
+    padding: 6px 16px;
+    font-size: 10px;
+    color: var(--muted);
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+  }
+  .spinner { display: inline-block; animation: spin 1s linear infinite; }
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<!-- Auth overlay -->
+<div id="auth-overlay">
+  <div id="auth-box">
+    <h2>Manual Parlay Builder</h2>
+    <div class="label">Password</div>
+    <input type="password" id="auth-pw" placeholder="Enter password" autocomplete="current-password">
+    <div id="auth-error"></div>
+    <button id="auth-btn">Load</button>
+  </div>
+</div>
+
+<!-- Header / controls -->
+<header>
+  <h1>⚾ Manual Parlay Builder</h1>
+  <div class="controls">
+    <span class="label">Date</span>
+    <input type="date" id="ctrl-date">
+    <button id="ctrl-load">Load Legs</button>
+    <span class="label">Search</span>
+    <input type="text" id="ctrl-search" placeholder="player / team / prop…" style="width:160px">
+    <span class="label">Prop</span>
+    <select id="ctrl-prop">
+      <option value="">All props</option>
+    </select>
+    <span class="label">Min cov%</span>
+    <input type="number" id="ctrl-mincov" value="0" min="0" max="100" step="1" style="width:55px">
+    <span class="label">Sort by</span>
+    <select id="ctrl-sort-mode">
+      <option value="composite">Composite score</option>
+      <option value="pitcher_vuln">Pitcher vulnerability</option>
+    </select>
+    <button class="secondary" id="ctrl-clear">Clear slip</button>
+  </div>
+</header>
+
+<div id="status-bar">Ready. Select a date and click Load Legs.</div>
+
+<div class="table-wrap">
+  <table id="main-table">
+    <colgroup id="colgroup"></colgroup>
+    <thead><tr id="thead-row"></tr></thead>
+    <tbody id="tbody"></tbody>
+  </table>
+</div>
+
+<!-- Parlay slip -->
+<div id="slip">
+  <div id="slip-legs"><span style="color:var(--muted);font-size:10px">No legs selected — check up to 6 rows.</span></div>
+  <div id="slip-meta">
+    <div id="slip-odds">—</div>
+    <div id="slip-count">0 legs (need 4–6)</div>
+    <div id="slip-error"></div>
+    <div id="slip-success"></div>
+  </div>
+  <button id="slip-submit" disabled>Submit Parlay</button>
+</div>
+
+<script>
+'use strict';
+
+// ── State ─────────────────────────────────────────────────────────
+let _pw = '';
+let _legs = [];          // raw rows from API
+let _filtered = [];      // after filters
+let _selected = new Map(); // odd_id → leg object
+let _sortCol = null;
+let _sortDir = 1;        // 1 = asc, -1 = desc
+
+// ── Column definitions ────────────────────────────────────────────
+// [key, label, width, heatDir (1=hi-green/lo-red, -1=hi-red/lo-green, 0=none)]
+const COLS = [
+  ['_cb',                   '',                     28,  0],
+  ['player_name',           'Player',               120, 0],
+  ['team',                  'Team',                  50, 0],
+  ['stat',                  'Prop',                  80, 0],
+  ['direction',             'Dir',                   36, 0],
+  ['best_line',             'Line',                  45, 0],
+  ['best_odds',             'Odds',                  52, 0],
+  ['coverage_pct',          'Cov%',                  48, 1],
+  ['coverage_vs_hand',      'CovHnd',                56, 1],
+  ['coverage_recent_10',    'Cov10',                 50, 1],
+  ['coverage_recent_5',     'Cov5',                  46, 1],
+  ['trend_score',           'Trend',                 50, 1],
+  ['composite_score',       'Composite',             68, 1],
+  ['batting_order',         'Order',                 46, 0],
+  ['lineup_check_status',   'Lineup',                60, 0],
+  ['opposing_pitcher_name', 'Pitcher',               90, 0],
+  ['pitcher_hand',          'Hand',                  38, 0],
+  ['pitcher_era',           'ERA',                   44, -1],
+  ['pitcher_k9',            'K/9',                   44, 1],
+  ['pitcher_whip',          'WHIP',                  46, -1],
+  ['pitcher_vulnerability', 'PV',                    44, 1],
+];
+
+const HEAT_COLS = new Set(COLS.filter(c => c[3] !== 0).map(c => c[0]));
+const HEAT_DIR  = Object.fromEntries(COLS.filter(c => c[3] !== 0).map(c => [c[0], c[3]]));
+
+// ── Auth ──────────────────────────────────────────────────────────
+document.getElementById('auth-btn').addEventListener('click', tryAuth);
+document.getElementById('auth-pw').addEventListener('keydown', e => { if (e.key === 'Enter') tryAuth(); });
+
+function tryAuth() {
+  _pw = document.getElementById('auth-pw').value.trim();
+  if (!_pw) { document.getElementById('auth-error').textContent = 'Password required.'; return; }
+  // Quick probe — try loading today's legs as auth check
+  const today = new Date().toISOString().slice(0, 10);
+  document.getElementById('ctrl-date').value = today;
+  fetchLegs(today, () => {
+    document.getElementById('auth-overlay').style.display = 'none';
+  }, err => {
+    if (err === 401) {
+      document.getElementById('auth-error').textContent = 'Incorrect password.';
+    } else {
+      document.getElementById('auth-error').textContent = 'Authentication failed. Please try again.';
+    }
+  });
+}
+
+// ── Controls ──────────────────────────────────────────────────────
+document.getElementById('ctrl-load').addEventListener('click', () => {
+  const d = document.getElementById('ctrl-date').value;
+  if (!d) { setStatus('Pick a date first.'); return; }
+  fetchLegs(d);
+});
+
+document.getElementById('ctrl-search').addEventListener('input', applyFilters);
+document.getElementById('ctrl-prop').addEventListener('change', applyFilters);
+document.getElementById('ctrl-mincov').addEventListener('input', applyFilters);
+document.getElementById('ctrl-sort-mode').addEventListener('change', applyFilters);
+document.getElementById('ctrl-clear').addEventListener('click', clearSlip);
+document.getElementById('slip-submit').addEventListener('click', submitParlay);
+
+// ── Fetch legs ────────────────────────────────────────────────────
+function fetchLegs(date, onSuccess, onError) {
+  setStatus('<span class="spinner">↻</span> Loading…');
+  fetch(`/api/manual/legs?date=${encodeURIComponent(date)}&password=${encodeURIComponent(_pw)}`)
+    .then(r => {
+      if (r.status !== 200) { if (onError) onError(r.status); throw new Error(String(r.status)); }
+      return r.json();
+    })
+    .then(data => {
+      if (data.error) throw new Error(data.error);
+      _legs = data;
+      buildPropFilter();
+      applyFilters();
+      setStatus(`Loaded ${_legs.length} legs for ${date}.`);
+      if (onSuccess) onSuccess();
+    })
+    .catch(err => {
+      const code = parseInt(err.message, 10);
+      if (!isNaN(code)) {
+        // already handled by onError above
+      } else {
+        setStatus('Error: ' + err.message);
+        if (onError) onError(0);
+      }
+    });
+}
+
+function buildPropFilter() {
+  const stats = [...new Set(_legs.map(l => l.stat).filter(Boolean))].sort();
+  const sel = document.getElementById('ctrl-prop');
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">All props</option>';
+  stats.forEach(s => {
+    const o = document.createElement('option');
+    o.value = s; o.textContent = s;
+    if (s === cur) o.selected = true;
+    sel.appendChild(o);
+  });
+}
+
+// ── Filters & sort ────────────────────────────────────────────────
+function applyFilters() {
+  const search  = document.getElementById('ctrl-search').value.trim().toLowerCase();
+  const prop    = document.getElementById('ctrl-prop').value;
+  const minCov  = parseFloat(document.getElementById('ctrl-mincov').value) || 0;
+  const sortMode = document.getElementById('ctrl-sort-mode').value;
+
+  let rows = _legs.filter(l => {
+    if (prop && l.stat !== prop) return false;
+    if (minCov > 0 && (l.coverage_pct == null || l.coverage_pct < minCov)) return false;
+    if (search) {
+      const hay = [l.player_name, l.team, l.stat, l.direction, l.opposing_pitcher_name]
+        .map(x => (x || '').toLowerCase()).join(' ');
+      if (!hay.includes(search)) return false;
+    }
+    return true;
+  });
+
+  // Apply sort mode as default sort when no column sort active
+  if (_sortCol === null) {
+    if (sortMode === 'pitcher_vuln') {
+      rows = rows.slice().sort((a, b) => (b.pitcher_vulnerability ?? -Infinity) - (a.pitcher_vulnerability ?? -Infinity));
+    } else {
+      rows = rows.slice().sort((a, b) => (b.composite_score ?? -Infinity) - (a.composite_score ?? -Infinity));
+    }
+  } else {
+    rows = rows.slice().sort((a, b) => {
+      let va = a[_sortCol], vb = b[_sortCol];
+      if (va == null && vb == null) return 0;
+      if (va == null) return 1;
+      if (vb == null) return -1;
+      if (typeof va === 'string') return va.localeCompare(vb) * _sortDir;
+      return (va - vb) * _sortDir;
+    });
+  }
+
+  _filtered = rows;
+  computeHeatRanges();
+  renderTable();
+}
+
+// ── Heat-map ranges (computed over filtered rows) ─────────────────
+let _heatRanges = {};
+
+function computeHeatRanges() {
+  _heatRanges = {};
+  for (const col of HEAT_COLS) {
+    const vals = _filtered.map(r => r[col]).filter(v => v != null && !isNaN(v));
+    if (vals.length < 2) continue;
+    _heatRanges[col] = { min: Math.min(...vals), max: Math.max(...vals) };
+  }
+}
+
+function heatColor(col, val) {
+  if (val == null || isNaN(val)) return '';
+  const r = _heatRanges[col];
+  if (!r || r.max === r.min) return '';
+  const t = (val - r.min) / (r.max - r.min); // 0..1
+  const dir = HEAT_DIR[col]; // 1 = hi-green, -1 = hi-red
+  const green = dir === 1 ? t : 1 - t;
+  if (green > 0.65) return `background:rgba(34,197,94,${0.1 + green * 0.35})`;
+  if (green < 0.35) return `background:rgba(239,68,68,${0.1 + (1-green) * 0.35})`;
+  return `background:rgba(245,158,11,0.18)`;
+}
+
+// ── Render table ──────────────────────────────────────────────────
+function renderTable() {
+  const thead = document.getElementById('thead-row');
+  const tbody = document.getElementById('tbody');
+  const colgroup = document.getElementById('colgroup');
+
+  // Build header once
+  if (!thead.hasChildNodes()) {
+    colgroup.innerHTML = '';
+    thead.innerHTML = '';
+    COLS.forEach(([key, label, width], ci) => {
+      const col = document.createElement('col');
+      col.style.width = width + 'px';
+      colgroup.appendChild(col);
+
+      const th = document.createElement('th');
+      th.textContent = label;
+      th.dataset.key = key;
+      if (key === '_cb') th.className = 'cb-col';
+      th.addEventListener('click', () => {
+        if (key === '_cb') return;
+        if (_sortCol === key) {
+          _sortDir *= -1;
+        } else {
+          _sortCol = key;
+          _sortDir = -1; // default desc
+        }
+        // update classes
+        document.querySelectorAll('#thead-row th').forEach(t => {
+          t.classList.remove('sorted-asc', 'sorted-desc');
+        });
+        th.classList.add(_sortDir === 1 ? 'sorted-asc' : 'sorted-desc');
+        applyFilters();
+      });
+      thead.appendChild(th);
+    });
+  }
+
+  // Build body
+  const frag = document.createDocumentFragment();
+  _filtered.forEach(leg => {
+    const oddId = String(leg.odd_id ?? '');
+    const checked = _selected.has(oddId);
+    const tr = document.createElement('tr');
+    if (checked) tr.style.background = 'rgba(78,124,255,0.12)';
+
+    COLS.forEach(([key, , , heatDir]) => {
+      const td = document.createElement('td');
+      if (key === '_cb') {
+        td.className = 'cb-col';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = checked;
+        cb.addEventListener('change', () => toggleLeg(leg, cb.checked));
+        td.appendChild(cb);
+      } else if (key === 'lineup_check_status') {
+        const s = leg[key] || '';
+        const span = document.createElement('span');
+        span.className = 'badge ' + statusBadgeClass(s);
+        span.textContent = s || '—';
+        td.appendChild(span);
+      } else {
+        const val = leg[key];
+        if (heatDir !== 0 && val != null) {
+          td.className = 'heat';
+          const style = heatColor(key, val);
+          if (style) td.setAttribute('style', style);
+          td.textContent = formatVal(key, val);
+        } else if (val == null) {
+          td.className = 'null-val';
+          td.textContent = '—';
+        } else {
+          td.textContent = formatVal(key, val);
+        }
+      }
+      tr.appendChild(td);
+    });
+    frag.appendChild(tr);
+  });
+
+  tbody.innerHTML = '';
+  tbody.appendChild(frag);
+
+  document.getElementById('status-bar').textContent =
+    `Showing ${_filtered.length} of ${_legs.length} legs. ` +
+    (_selected.size > 0 ? `${_selected.size} selected.` : '');
+}
+
+function statusBadgeClass(s) {
+  if (!s) return 'badge-unknown';
+  const l = s.toLowerCase();
+  if (l.includes('confirmed') || l.includes('active')) return 'badge-confirmed';
+  if (l.includes('pending') || l.includes('probable')) return 'badge-pending';
+  if (l.includes('out') || l.includes('scratch')) return 'badge-out';
+  return 'badge-unknown';
+}
+
+function formatVal(key, val) {
+  if (val == null) return '—';
+  if (typeof val === 'number') {
+    if (['coverage_pct','coverage_vs_hand','coverage_recent_10','coverage_recent_5','pitcher_vulnerability'].includes(key))
+      return (val * 1).toFixed(1);
+    if (['composite_score','trend_score','ev_per_unit','park_factor','blended_era_rank'].includes(key))
+      return (val * 1).toFixed(2);
+    if (['pitcher_era','pitcher_k9','pitcher_whip'].includes(key))
+      return (val * 1).toFixed(2);
+    if (key === 'best_odds') return val > 0 ? '+' + val : String(val);
+    return val;
+  }
+  return String(val);
+}
+
+// ── Toggle leg in slip ────────────────────────────────────────────
+function toggleLeg(leg, add) {
+  const oddId = String(leg.odd_id ?? '');
+  if (add) {
+    if (_selected.size >= 6) {
+      // uncheck the box
+      event?.target && (event.target.checked = false);
+      slipError('Max 6 legs allowed.');
+      return;
+    }
+    _selected.set(oddId, leg);
+  } else {
+    _selected.delete(oddId);
+  }
+  renderSlip();
+  renderTable(); // refresh highlighting
+}
+
+function clearSlip() {
+  _selected.clear();
+  renderSlip();
+  renderTable();
+}
+
+// ── Render slip ───────────────────────────────────────────────────
+function renderSlip() {
+  const legs = [..._selected.values()];
+  const container = document.getElementById('slip-legs');
+  const oddsEl    = document.getElementById('slip-odds');
+  const countEl   = document.getElementById('slip-count');
+  const submitBtn = document.getElementById('slip-submit');
+
+  container.innerHTML = '';
+  if (legs.length === 0) {
+    container.innerHTML = '<span style="color:var(--muted);font-size:10px">No legs selected — check up to 6 rows.</span>';
+    oddsEl.textContent = '—';
+    oddsEl.className = '';
+    countEl.textContent = '0 legs (need 4–6)';
+    submitBtn.disabled = true;
+    slipError('');
+    return;
+  }
+
+  legs.forEach(leg => {
+    const el = document.createElement('div');
+    el.className = 'slip-leg';
+    el.innerHTML = `<span>${leg.player_name ?? '?'} ${leg.stat ?? ''} ${leg.direction ?? ''} ${leg.best_line ?? ''} (${leg.best_odds > 0 ? '+' : ''}${leg.best_odds ?? '?'})</span><span class="rm" data-id="${String(leg.odd_id)}">✕</span>`;
+    container.appendChild(el);
+  });
+
+  container.querySelectorAll('.rm').forEach(btn => {
+    btn.addEventListener('click', () => {
+      _selected.delete(btn.dataset.id);
+      renderSlip();
+      renderTable();
+    });
+  });
+
+  // Live combined odds
+  let combinedDec = 1.0;
+  let valid = true;
+  for (const leg of legs) {
+    const dec = americanToDecimal(leg.best_odds);
+    if (!dec) { valid = false; break; }
+    combinedDec *= dec;
+  }
+
+  if (!valid) {
+    oddsEl.textContent = '?';
+    oddsEl.className = '';
+  } else {
+    const americanVal = Math.round((combinedDec - 1) * 100);
+    oddsEl.textContent = '+' + americanVal;
+    oddsEl.className = americanVal >= 400 ? '' : 'below';
+  }
+
+  countEl.textContent = `${legs.length} leg${legs.length !== 1 ? 's' : ''} (need 4–6)`;
+
+  // Client-side validation
+  const err = clientValidate(legs);
+  slipError(err);
+  submitBtn.disabled = !!err || legs.length < 4 || legs.length > 6;
+}
+
+function clientValidate(legs) {
+  if (legs.length < 4) return 'Add at least 4 legs.';
+  if (legs.length > 6) return 'Maximum 6 legs.';
+
+  // Validate odds are parseable
+  for (const leg of legs) {
+    const dec = americanToDecimal(leg.best_odds);
+    if (!dec) return 'Invalid odds on one or more legs.';
+  }
+
+  // Duplicate batter check
+  const PITCHER_POS = new Set(['SP','RP','P']);
+  const batterPids = new Map();
+  for (const leg of legs) {
+    const pos = leg.position || '';
+    if (!PITCHER_POS.has(pos)) {
+      const pid = String(leg.player_id ?? leg.player_name ?? '');
+      if (batterPids.has(pid)) return `Duplicate batter: ${leg.player_name}.`;
+      batterPids.set(pid, true);
+    }
+  }
+
+  // Max 2 per game
+  const gameCounts = new Map();
+  for (const leg of legs) {
+    const gk = String(leg.game_pk ?? leg.team ?? '');
+    gameCounts.set(gk, (gameCounts.get(gk) || 0) + 1);
+    if (gameCounts.get(gk) > 2) return `More than 2 legs from same game.`;
+  }
+
+  return '';
+}
+
+// ── Submit ────────────────────────────────────────────────────────
+function submitParlay() {
+  const legs = [..._selected.values()];
+  const err = clientValidate(legs);
+  if (err) { slipError(err); return; }
+
+  const runDate = document.getElementById('ctrl-date').value;
+  if (!runDate) { slipError('No date selected.'); return; }
+
+  const btn = document.getElementById('slip-submit');
+  btn.disabled = true;
+  btn.textContent = 'Submitting…';
+  slipError('');
+  document.getElementById('slip-success').textContent = '';
+
+  fetch('/api/manual/parlay', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + _pw,
+    },
+    body: JSON.stringify({
+      run_date: runDate,
+      odd_ids: legs.map(l => l.odd_id),
+    }),
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.error) throw new Error(data.error);
+    const floorNote = data.meets_floor ? '' : ' (below +400 floor)';
+    document.getElementById('slip-success').textContent =
+      `Logged: ${data.combined_odds}${floorNote} — ${data.num_legs} legs, Batch ${data.batch_id}`;
+    clearSlip();
+  })
+  .catch(err => {
+    slipError('Submit failed: ' + err.message);
+  })
+  .finally(() => {
+    btn.disabled = false;
+    btn.textContent = 'Submit Parlay';
+  });
+}
+
+// ── Helpers ───────────────────────────────────────────────────────
+function americanToDecimal(american) {
+  const n = parseFloat(american);
+  if (isNaN(n)) return null;
+  if (n > 0) return 1 + n / 100;
+  if (n < 0) return 1 + 100 / Math.abs(n);
+  return null;
+}
+
+function slipError(msg) {
+  document.getElementById('slip-error').textContent = msg || '';
+}
+
+function setStatus(html) {
+  document.getElementById('status-bar').innerHTML = html;
+}
+</script>
+</body>
+</html>

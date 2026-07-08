@@ -54,12 +54,14 @@ _CACHE_TTL_MINUTES = 30
 
 from src.utils.db import (
     get_scored_legs,
+    get_manual_legs,
     get_todays_recommendations,
     get_training_analytics_data,
     get_training_dashboard_data,
     get_parlay_dashboard_data,
     get_ml_health_data,
     get_recommendation_history,
+    save_parlay_recommendations_v2,
 )
 
 _PASSWORD = os.getenv("WEB_APP_PASSWORD", "")
@@ -997,6 +999,203 @@ async def handle_run_full_pipeline(request: web.Request) -> web.Response:
         )
 
 
+async def handle_manual(request: web.Request) -> web.Response:
+    """Serve the manual parlay builder HTML without auth (page handles its own password prompt)."""
+    page = _STATIC_DIR / "manual.html"
+    if not page.exists():
+        return web.Response(text="Manual dashboard not found", status=404)
+    return web.Response(
+        body=page.read_bytes(),
+        content_type="text/html",
+        charset="utf-8",
+    )
+
+
+async def handle_manual_legs(request: web.Request) -> web.Response:
+    """
+    GET /api/manual/legs?date=YYYY-MM-DD
+
+    Return all scored legs for the requested date, enriched with pitcher
+    vulnerability data where available. Requires auth.
+    """
+    if not _check_auth(request):
+        return web.Response(
+            text=json.dumps({"error": "Unauthorized"}),
+            content_type="application/json",
+            status=401,
+        )
+    run_date = request.rel_url.query.get("date", "")
+    if not run_date:
+        return web.Response(
+            text=json.dumps({"error": "Missing required query param: date"}),
+            content_type="application/json",
+            status=400,
+        )
+    try:
+        legs = await asyncio.get_event_loop().run_in_executor(
+            None, get_manual_legs, run_date
+        )
+        # Convert non-serializable types to plain Python
+        for leg in legs:
+            for k, v in list(leg.items()):
+                if hasattr(v, "isoformat"):
+                    leg[k] = v.isoformat()
+        return web.Response(
+            text=json.dumps(legs),
+            content_type="application/json",
+        )
+    except Exception as exc:
+        return web.Response(
+            text=json.dumps({"error": str(exc)}),
+            content_type="application/json",
+            status=500,
+        )
+
+
+async def handle_manual_parlay(request: web.Request) -> web.Response:
+    """
+    POST /api/manual/parlay
+
+    Body JSON: {"run_date": "YYYY-MM-DD", "odd_ids": ["id1", ...]}
+
+    Validates legs server-side, computes combined odds, saves via
+    save_parlay_recommendations_v2 with source='manual_pick'.
+    Requires auth.
+    """
+    if not _check_auth(request):
+        return web.Response(
+            text=json.dumps({"error": "Unauthorized"}),
+            content_type="application/json",
+            status=401,
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        return web.Response(
+            text=json.dumps({"error": "Invalid JSON body"}),
+            content_type="application/json",
+            status=400,
+        )
+
+    run_date = body.get("run_date", "")
+    odd_ids  = body.get("odd_ids", [])
+
+    if not run_date:
+        return web.Response(
+            text=json.dumps({"error": "Missing run_date"}),
+            content_type="application/json",
+            status=400,
+        )
+    if not isinstance(odd_ids, list) or len(odd_ids) < 4 or len(odd_ids) > 6:
+        return web.Response(
+            text=json.dumps({"error": "odd_ids must be a list of 4–6 items"}),
+            content_type="application/json",
+            status=400,
+        )
+    if len(odd_ids) != len(set(str(x) for x in odd_ids)):
+        return web.Response(
+            text=json.dumps({"error": "Duplicate odd_ids in submission"}),
+            content_type="application/json",
+            status=400,
+        )
+
+    # Re-fetch leg data server-side to prevent client-side tampering
+    try:
+        all_legs = await asyncio.get_event_loop().run_in_executor(
+            None, get_manual_legs, run_date
+        )
+    except Exception as exc:
+        return web.Response(
+            text=json.dumps({"error": f"DB error fetching legs: {exc}"}),
+            content_type="application/json",
+            status=500,
+        )
+
+    odd_id_set = {str(x) for x in odd_ids}
+    selected = [l for l in all_legs if str(l.get("odd_id", "")) in odd_id_set]
+
+    if len(selected) != len(odd_ids):
+        found = {str(l.get("odd_id", "")) for l in selected}
+        missing = odd_id_set - found
+        return web.Response(
+            text=json.dumps({"error": f"odd_ids not found for date {run_date}: {sorted(missing)}"}),
+            content_type="application/json",
+            status=400,
+        )
+
+    # Validate: no duplicate batter player_id
+    _PITCHER_POS = frozenset({"SP", "RP", "P"})
+    batter_pids: dict = {}
+    for leg in selected:
+        pos = leg.get("position", "")
+        pid = leg.get("player_id") or leg.get("player_name", "")
+        if pos not in _PITCHER_POS:
+            if pid in batter_pids:
+                return web.Response(
+                    text=json.dumps({"error": f"Duplicate batter player in selection: {leg.get('player_name')}"}),
+                    content_type="application/json",
+                    status=400,
+                )
+            batter_pids[pid] = True
+
+    # Validate: max 2 legs per game_pk
+    game_counts: dict = {}
+    for leg in selected:
+        gk = leg.get("game_pk") or leg.get("team", "")
+        game_counts[gk] = game_counts.get(gk, 0) + 1
+        if game_counts[gk] > 2:
+            return web.Response(
+                text=json.dumps({"error": f"More than 2 legs from game {gk}"}),
+                content_type="application/json",
+                status=400,
+            )
+
+    # Compute combined American odds
+    from src.utils.odds_math import american_to_decimal
+    combined_dec = 1.0
+    for leg in selected:
+        odds_raw = leg.get("best_odds") or leg.get("odds")
+        if odds_raw is None:
+            return web.Response(
+                text=json.dumps({"error": f"Missing odds for leg {leg.get('odd_id')}"}),
+                content_type="application/json",
+                status=400,
+            )
+        combined_dec *= american_to_decimal(str(odds_raw))
+
+    combined_odds = int((combined_dec - 1) * 100)
+    meets_floor = combined_odds >= 400
+
+    rec = {
+        "legs":         selected,
+        "combined_odds": combined_odds,
+        "edge_pct":     None,
+    }
+
+    try:
+        batch_id = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: save_parlay_recommendations_v2([rec], run_date, source="manual_pick"),
+        )
+    except Exception as exc:
+        return web.Response(
+            text=json.dumps({"error": f"DB error saving parlay: {exc}"}),
+            content_type="application/json",
+            status=500,
+        )
+
+    return web.Response(
+        text=json.dumps({
+            "status": "saved",
+            "batch_id": batch_id,
+            "combined_odds": f"+{combined_odds}",
+            "num_legs": len(selected),
+            "meets_floor": meets_floor,
+        }),
+        content_type="application/json",
+    )
+
+
 def create_app() -> web.Application:
     """Build and return the aiohttp Application object."""
     app = web.Application()
@@ -1015,6 +1214,9 @@ def create_app() -> web.Application:
     app.router.add_post("/api/training/retrain", handle_training_retrain)
     app.router.add_post("/api/admin/run_pipeline", handle_run_pipeline)
     app.router.add_post("/api/admin/run_full_pipeline", handle_run_full_pipeline)
+    app.router.add_get("/manual", handle_manual)
+    app.router.add_get("/api/manual/legs", handle_manual_legs)
+    app.router.add_post("/api/manual/parlay", handle_manual_parlay)
     return app
 
 

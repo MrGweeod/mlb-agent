@@ -1133,6 +1133,54 @@ def get_scored_legs(run_date: str) -> list[dict]:
     return rows
 
 
+def get_manual_legs(run_date: str) -> list[dict]:
+    """
+    Return the most recently logged leg per player+stat+direction for a given date,
+    enriched with pitcher vulnerability data where available.
+
+    Uses the same dedup logic as get_scored_legs(). LEFT JOINs mlb_scored_legs_enriched
+    for pitcher_vulnerability, park_factor, blended_era_rank — nulls when the shadow
+    pipeline hasn't run yet, which is not an error.
+
+    Results ordered by composite_score DESC for the manual selection UI.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        WITH ranked_legs AS (
+            SELECT *,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY player_name, stat, direction
+                       ORDER BY logged_at DESC NULLS LAST,
+                                ev_per_unit DESC NULLS LAST,
+                                coverage_pct DESC NULLS LAST
+                   ) AS rn
+            FROM mlb_scored_legs
+            WHERE run_date = %s
+        )
+        SELECT
+            l.*,
+            e.pitcher_vulnerability,
+            e.park_factor,
+            e.blended_era_rank
+        FROM ranked_legs l
+        LEFT JOIN mlb_scored_legs_enriched e
+            ON e.odd_id = l.odd_id
+           AND e.run_date = %s
+        WHERE l.rn = 1
+        ORDER BY l.composite_score DESC NULLS LAST
+        """,
+        (run_date, run_date),
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    for row in rows:
+        row.pop("rn", None)
+    return rows
+
+
 def get_dashboard_data() -> dict:
     """
     Return all dashboard analytics sections in a single DB round-trip.
