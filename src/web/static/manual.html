@@ -10,8 +10,8 @@
   :root {
     --bg: #0f1117;
     --surface: #1a1d27;
-    --border: #2d3148;
-    --accent: #4e7cff;
+    --border: #2a2d3a;
+    --accent: #3b82f6;
     --green: #22c55e;
     --red: #ef4444;
     --amber: #f59e0b;
@@ -25,8 +25,8 @@
   body {
     background: var(--bg);
     color: var(--text);
-    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
-    font-size: 12px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 13px;
     line-height: 1.4;
     min-height: 100vh;
   }
@@ -106,14 +106,14 @@
     background: var(--surface);
     border-bottom: 2px solid var(--border);
     position: sticky;
-    top: 53px;
+    top: 0; /* overridden by updateStickyTop() after header measures */
     z-index: 90;
   }
 
   th {
-    padding: 6px 6px;
+    padding: 6px 8px;
     text-align: left;
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 600;
     color: var(--muted);
     cursor: pointer;
@@ -127,7 +127,8 @@
   th.sorted-desc::after { content: " ▼"; }
 
   td {
-    padding: 4px 6px;
+    padding: 8px 8px;
+    font-size: 13px;
     border-bottom: 1px solid var(--border);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -143,18 +144,21 @@
   /* checkbox col */
   td.cb-col, th.cb-col { width: 28px; text-align: center; }
 
-  /* status badge */
+  /* status badge — matches index.html stat-pill style */
   .badge {
     display: inline-block;
-    padding: 1px 5px;
-    border-radius: 3px;
-    font-size: 9px;
-    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 10px;
+    font-size: 10px;
+    background: var(--bg);
+    color: var(--muted);
+    border: 1px solid var(--border);
+    white-space: nowrap;
   }
-  .badge-confirmed { background: #14532d; color: #86efac; }
-  .badge-pending   { background: #1e3a5f; color: #93c5fd; }
-  .badge-out       { background: #3f1515; color: #fca5a5; }
-  .badge-unknown   { background: #1f2937; color: #9ca3af; }
+  .badge-confirmed { color: var(--green); border-color: #166534; }
+  .badge-pending   { color: var(--accent); border-color: #1e3a5f; }
+  .badge-out       { color: var(--red); border-color: #3f1515; }
+  .badge-unknown   { color: var(--muted); }
 
   /* ── Parlay slip ─────────────────────────────────────────────── */
   #slip {
@@ -238,11 +242,12 @@
 
   /* ── Misc ────────────────────────────────────────────────────── */
   #status-bar {
-    padding: 6px 16px;
-    font-size: 10px;
+    flex-basis: 100%;
+    padding: 2px 0;
+    font-size: 11px;
     color: var(--muted);
-    background: var(--surface);
-    border-bottom: 1px solid var(--border);
+    border-top: 1px solid var(--border);
+    margin-top: 4px;
   }
   .spinner { display: inline-block; animation: spin 1s linear infinite; }
   @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
@@ -283,9 +288,8 @@
     </select>
     <button class="secondary" id="ctrl-clear">Clear slip</button>
   </div>
+  <div id="status-bar">Ready. Select a date and click Load Legs.</div>
 </header>
-
-<div id="status-bar">Ready. Select a date and click Load Legs.</div>
 
 <div class="table-wrap">
   <table id="main-table">
@@ -321,27 +325,26 @@ let _sortDir = 1;        // 1 = asc, -1 = desc
 // ── Column definitions ────────────────────────────────────────────
 // [key, label, width, heatDir (1=hi-green/lo-red, -1=hi-red/lo-green, 0=none)]
 const COLS = [
-  ['_cb',                   '',                     28,  0],
-  ['player_name',           'Player',               120, 0],
-  ['team',                  'Team',                  50, 0],
-  ['stat',                  'Prop',                  80, 0],
-  ['direction',             'Dir',                   36, 0],
-  ['best_line',             'Line',                  45, 0],
-  ['best_odds',             'Odds',                  52, 0],
-  ['coverage_pct',          'Cov%',                  48, 1],
-  ['coverage_vs_hand',      'CovHnd',                56, 1],
-  ['coverage_recent_10',    'Cov10',                 50, 1],
-  ['coverage_recent_5',     'Cov5',                  46, 1],
-  ['trend_score',           'Trend',                 50, 1],
-  ['composite_score',       'Composite',             68, 1],
-  ['batting_order',         'Order',                 46, 0],
-  ['lineup_check_status',   'Lineup',                60, 0],
-  ['opposing_pitcher_name', 'Pitcher',               90, 0],
-  ['pitcher_hand',          'Hand',                  38, 0],
-  ['pitcher_era',           'ERA',                   44, -1],
-  ['pitcher_k9',            'K/9',                   44, 1],
-  ['pitcher_whip',          'WHIP',                  46, -1],
-  ['pitcher_vulnerability', 'PV',                    44, 1],
+  ['_cb',                 '',           28,  0],
+  ['player_name',         'Player',    120,  0],
+  ['team',                'Team',       50,  0],
+  ['stat',                'Prop',       80,  0],
+  ['direction',           'Dir',        36,  0],
+  ['line',                'Line',       45,  0],
+  ['odds',                'Odds',       52,  0],
+  ['coverage_pct',        'Cov%',       48,  1],
+  ['coverage_vs_hand',    'CovHnd',     56,  1],
+  ['coverage_recent_10',  'Cov10',      50,  1],
+  ['coverage_recent_5',   'Cov5',       46,  1],
+  ['trend_score',         'Trend',      50,  1],
+  ['composite_score',     'Composite',  68,  1],
+  ['pitcher_name',        'Pitcher',    90,  0],
+  ['pitcher_hand',        'Hand',       38,  0],
+  ['pitcher_era',         'ERA',        44, -1],
+  ['pitcher_k9',          'K/9',        44,  1],
+  ['pitcher_whip',        'WHIP',       46, -1],
+  ['pitcher_vulnerability','PV',        44,  1],
+  ['lineup_check_status', 'Lineup',     60,  0],
 ];
 
 const HEAT_COLS = new Set(COLS.filter(c => c[3] !== 0).map(c => c[0]));
@@ -434,7 +437,7 @@ function applyFilters() {
     if (prop && l.stat !== prop) return false;
     if (minCov > 0 && (l.coverage_pct == null || l.coverage_pct < minCov)) return false;
     if (search) {
-      const hay = [l.player_name, l.team, l.stat, l.direction, l.opposing_pitcher_name]
+      const hay = [l.player_name, l.team, l.stat, l.direction, l.pitcher_name]
         .map(x => (x || '').toLowerCase()).join(' ');
       if (!hay.includes(search)) return false;
     }
@@ -574,6 +577,7 @@ function renderTable() {
   document.getElementById('status-bar').textContent =
     `Showing ${_filtered.length} of ${_legs.length} legs. ` +
     (_selected.size > 0 ? `${_selected.size} selected.` : '');
+  updateStickyTop();
 }
 
 function statusBadgeClass(s) {
@@ -594,7 +598,7 @@ function formatVal(key, val) {
       return (val * 1).toFixed(2);
     if (['pitcher_era','pitcher_k9','pitcher_whip'].includes(key))
       return (val * 1).toFixed(2);
-    if (key === 'best_odds') return val > 0 ? '+' + val : String(val);
+    if (key === 'odds') return val > 0 ? '+' + val : String(val);
     return val;
   }
   return String(val);
@@ -646,7 +650,7 @@ function renderSlip() {
   legs.forEach(leg => {
     const el = document.createElement('div');
     el.className = 'slip-leg';
-    el.innerHTML = `<span>${leg.player_name ?? '?'} ${leg.stat ?? ''} ${leg.direction ?? ''} ${leg.best_line ?? ''} (${leg.best_odds > 0 ? '+' : ''}${leg.best_odds ?? '?'})</span><span class="rm" data-id="${String(leg.odd_id)}">✕</span>`;
+    el.innerHTML = `<span>${leg.player_name ?? '?'} ${leg.stat ?? ''} ${leg.direction ?? ''} ${leg.line ?? ''} (${leg.odds > 0 ? '+' : ''}${leg.odds ?? '?'})</span><span class="rm" data-id="${String(leg.odd_id)}">✕</span>`;
     container.appendChild(el);
   });
 
@@ -662,7 +666,7 @@ function renderSlip() {
   let combinedDec = 1.0;
   let valid = true;
   for (const leg of legs) {
-    const dec = americanToDecimal(leg.best_odds);
+    const dec = americanToDecimal(leg.odds);
     if (!dec) { valid = false; break; }
     combinedDec *= dec;
   }
@@ -690,7 +694,7 @@ function clientValidate(legs) {
 
   // Validate odds are parseable
   for (const leg of legs) {
-    const dec = americanToDecimal(leg.best_odds);
+    const dec = americanToDecimal(leg.odds);
     if (!dec) return 'Invalid odds on one or more legs.';
   }
 
@@ -776,6 +780,12 @@ function slipError(msg) {
 function setStatus(html) {
   document.getElementById('status-bar').innerHTML = html;
 }
+
+function updateStickyTop() {
+  const h = document.querySelector('header').offsetHeight;
+  document.getElementById('thead-row').style.top = h + 'px';
+}
+window.addEventListener('resize', updateStickyTop);
 </script>
 </body>
 </html>
