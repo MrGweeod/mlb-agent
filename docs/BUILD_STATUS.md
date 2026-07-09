@@ -1,7 +1,7 @@
 # MLB Parlay Agent — Build Status
-**Last Updated:** July 7, 2026 (Session 17 — CLV Tracking Layer Removed, SportsGameOdds Cost Optimization)
+**Last Updated:** July 8, 2026 (Session 18 — Parlay Builder Redesign + Manual Parlay Dashboard)
 
-## Overall System Status: ✅ OPERATIONAL — SESSION 17 DEPLOYED
+## Overall System Status: ✅ OPERATIONAL — SESSION 18 DEPLOYED (one open verification item)
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────┐
@@ -9,113 +9,165 @@
 ├────────────────────────────────────────────────────────────────────────────────┤
 │ Prop Whitelist (Production):    ✅ HITS OVER 0.5 + SO OVER 0.5               │
 │ Prop Whitelist (Coverage):      ✅ + HITS UNDER 0.5 + TOTALBASES UNDER 1.5  │
-│ Coverage Gate (Overs):          ✅ 65% FLOOR                                  │
-│ Coverage Gate (Unders):         ✅ 65% FLOOR (raised Session 15)            │
+│ Coverage Gate (Overs):          ✅ 65% FLOOR (composite_score, not raw cov)  │
+│ Coverage Gate (Unders):         ✅ 65% FLOOR — narrow pool, 1-3 players/day │
+│                                    typical (characterized Session 18)        │
 │ Coverage Ceiling (hits/over):   ⚠️  ~80% CEILING PENDING                    │
-│                                    Data: 61.4% win at 80–84%, 50% at 84–90%  │
+│                                    Reconfirmed Session 18 on full history:   │
+│                                    72.0% WR at 75-79.7%, 62.3% at 80-84.6%   │
 │ Coverage Ceiling (SO/over):     ✅ NO CEILING — monotonic through 84%+       │
-│ Builder Score Floor (Overs):    ✅ 65.0 MIN_COV_POOL                         │
-│ Builder Score Floor (Unders):   ✅ 65.0 MIN_COV_POOL_UNDER                   │
-│ Parlay Structure:               ✅ 4-LEG, +400 TO +700 TARGET                │
-│ Parlay Builder Sort:            ✅ COMPOSITE SCORE DESC                      │
-│ MAX_CANDIDATES:                 ✅ 50                                         │
-│ Cross-Run Player Cap (Prod):    ✅ MAX 2 PARLAY APPEARANCES/PLAYER/DAY       │
-│ Cross-Run Player Cap (Shadow):  ✅ MAX 2 PARLAY APPEARANCES/PLAYER/DAY       │
-│ Player Cap Fallback Logic:      ✅ FIXED (Session 15)                        │
-│ Intra-Run Player Diversity:     ✅ MAX 1 PER PLAYER PER PARLAY               │
-│ Odds Cap:                       ✅ -250 HARD CAP PER LEG                    │
-│ Max Legs Per Game:              ✅ 2                                          │
 ├────────────────────────────────────────────────────────────────────────────────┤
-│ SCORING — PRODUCTION (simple_scorer.py)                                        │
+│ PARLAY BUILDER — REDESIGNED (Session 18, commit 5600b2e)                      │
+│ Structure (OLD, superseded):    ❌ FIXED 4-LEG, +400 TO +700 BAND            │
+│ Structure (NEW, current):       ✅ 4-6 LEGS, +400 FLOOR ONLY, NO CEILING     │
+│ Selection method:                ✅ Greedy by composite_score DESC, stops    │
+│                                    as soon as floor cleared at min 4 legs    │
+│ Why changed:                     Old method proven (real data, pre-deploy)   │
+│                                    to force-substitute lower-scored legs for │
+│                                    higher-odds ones purely to fit the band — │
+│                                    top-4-by-score cleared +400 on only 3/21  │
+│                                    days (14%). Top-5 clears naturally on     │
+│                                    17/21 days (81%) with zero odds engineer- │
+│                                    ing. See ARCHITECTURE_DECISIONS.md §21.   │
+│ Validated pre-deploy:             ✅ Old vs new run side-by-side on real     │
+│                                    7/7 pool — proved the exact substitution  │
+│                                    (Abreu dropped for Turner) no longer      │
+│                                    happens                                   │
+│ Max legs per game:               ✅ 2 (unchanged)                            │
+│ Player diversity (intra-parlay): ✅ MAX 1 PER PLAYER (unchanged)             │
+│ Player diversity (cross-parlay): ✅ MAX 2 PARLAY APPEARANCES/PLAYER/DAY      │
+│                                    (unchanged)                               │
+│ Odds cap (per-leg pool):         ✅ -250 TO +150 (unchanged)                 │
+│ Regression test coverage:        ❌ ZERO — 7-case validation script was run  │
+│                                    ad hoc, never committed, no longer exists │
+│                                    HIGH PRIORITY gap — see Pending Changes   │
+│ Live-data performance validation:⚠️  NONE YET — old backtest only confirms  │
+│                                    the new code doesn't crash, not that it   │
+│                                    performs. Pending ~1 week of live data.   │
+├────────────────────────────────────────────────────────────────────────────────┤
+│ SCORING — PRODUCTION (simple_scorer.py) — UNCHANGED THIS SESSION              │
 │ Base Signal:                    ✅ coverage_vs_hand or coverage_overall       │
 │ Consistency Signal:             ✅ GAP-BASED ±6/4/2/1 — strongest predictor  │
 │ ERA Raw Signal (hits):          ✅ ERA>5.0→+5, ERA<3.0→-5                   │
 │ WHIP Rank Signal (hits):        ✅ REMOVED (Session 15)                      │
-│ K/9 Rank Signal (SO/over):      ✅ ACTIVE — re-evaluate ~July 9              │
+│ K/9 Rank Signal (SO/over):      ⚠️  ACTIVE — Session 18 found early signs   │
+│                                    of a possible reversal at rank extremes   │
+│                                    on a small (n=14) sample; re-evaluation   │
+│                                    with starter-only data still pending     │
 │ Lineup Stability:               ✅ -5 if lineup_consistency < 0.50           │
-│ Slot Gate (soft, -8):           ✅ REMOVED (Session 16 — commit 4cd3c37)     │
-│                                    Confirmed backwards on 2 independent      │
-│                                    3-week samples (hits/over + SO/over).     │
-│                                    Annotation retained; scoring impact gone. │
+│ Slot Gate (soft, -8):           ✅ REMOVED (Session 16)                      │
+│ Score differentiation (SO/over):⚠️  WEAKENED post-slot-gate-fix — K/9-rank  │
+│                                    gap between selected/unselected legs      │
+│                                    collapsed from 17.3-vs-43.9 to 15.7-vs-   │
+│                                    18.8 (Session 18 finding). Real shift or  │
+│                                    noise, undetermined — ~1 week of data.    │
 ├────────────────────────────────────────────────────────────────────────────────┤
 │ SCORING — SHADOW (enriched_scorer.py)                                          │
-│ Vulnerability Signal (hits/over):✅ RECALIBRATED (Session 15)                │
-│ K/9 Rank (SO/over):             ✅ ACTIVE — re-evaluate ~July 9              │
-│ WHIP Rank (TB):                 ✅ ACTIVE (starter-only ranks)               │
-│ Park Factor (hits):             ✅ ACTIVE — direction-aware                  │
-│ Park Factor (TB):               ✅ FIXED (Session 15), CONFIRMED LIVE        │
-│                                    (Session 16) — 83.2% population (588/707) │
-│ Opponent Coverage (hits/SO):    ✅ ACTIVE                                    │
-│ Opponent Coverage (TB):         ✅ FIXED (Session 15), CONFIRMED LIVE        │
-│                                    (Session 16) — 59.4% population (420/707) │
-│ Offense Stack Bonus:            ✅ ACTIVE                                    │
+│ Offense Stack Bonus:            ✅ ACTIVE and firing (confirmed Session 18 — │
+│                                    README_10.md's "not yet built" status is  │
+│                                    stale). 64.4% WR when applied (n=101) vs  │
+│                                    58.8% when not (n=2,153) — promising,     │
+│                                    not yet conclusive.                       │
+│ All other shadow signals:        ✅ Unchanged from Session 15/16 — see prior │
+│                                    version for full detail.                  │
 ├────────────────────────────────────────────────────────────────────────────────┤
-│ PITCHER RANK POOL                                                              │
-│ Starter-Only Ranks:             ✅ ACTIVE (Session 15) — re-evaluate ~July 9 │
+│ MANUAL PARLAY DASHBOARD — NEW (Session 18)                                     │
+│ Route:                           ✅ GET /manual (page)                       │
+│ Data API:                        ✅ GET /api/manual/legs (auth required)     │
+│ Submit API:                      ✅ POST /api/manual/parlay (auth required)  │
+│ Auth:                            ✅ Reuses existing WEB_APP_PASSWORD — no    │
+│                                    separate password, no new env var        │
+│ Data source:                     ✅ get_manual_legs() — same base query as   │
+│                                    get_scored_legs(), LEFT JOIN to           │
+│                                    mlb_scored_legs_enriched for              │
+│                                    pitcher_vulnerability/park_factor/        │
+│                                    blended_era_rank                          │
+│ Server-side validation:          ✅ Re-fetches all leg data by odd_id —      │
+│                                    client cannot spoof odds/scores/coverage  │
+│                                    on a submitted pick. 4-6 legs, no dup     │
+│                                    batter, max 2/game enforced server-side.  │
+│ Persistence:                     ✅ save_parlay_recommendations_v2(),        │
+│                                    source='manual_pick' (distinct from the   │
+│                                    pre-existing 'manual' = Regenerate Now)   │
+│ Resolution:                      ✅ CONFIRMED via code read — resolver has   │
+│                                    no source filter, manual picks resolve    │
+│                                    automatically in the existing 9am run     │
+│ +400 floor on manual picks:      ✅ NON-BLOCKING — saves regardless, returns │
+│                                    meets_floor: true/false. Deliberately not │
+│                                    a hard reject — see ARCHITECTURE_         │
+│                                    DECISIONS.md §22 for reasoning.           │
+│ UI — field-name bugs:            ✅ FIXED (commit c920f32) — best_line/      │
+│                                    best_odds/opposing_pitcher_name corrected │
+│                                    to line/odds/pitcher_name (6 call sites)  │
+│ UI — Decimal JSON bug:           ✅ FIXED (commit b4322c1) — NUMERIC columns │
+│                                    (pitcher_era/k9/whip/vulnerability/       │
+│                                    blended_era_rank) were breaking           │
+│                                    json.dumps(), surfacing as a false        │
+│                                    "wrong password" error                   │
+│ UI — sticky header:              ⚠️  FIX SHOWN BUT PUSH NOT CONFIRMED —      │
+│                                    structural flex-column rewrite replaces   │
+│                                    the failed JS-offset approach. Operator   │
+│                                    reported "looks better" after pushing,   │
+│                                    but exact commit hash was never captured  │
+│                                    in-session. VERIFY FIRST, Session 19.     │
+│ UI — column set:                 ✅ batting_order column removed,            │
+│                                    lineup_check_status moved to last column  │
+│                                    (commit c920f32)                          │
+│ End-to-end test (submit→resolve):❌ NEVER ACTUALLY COMPLETED — set up as the │
+│                                    reason for building this and deferred     │
+│                                    repeatedly for bug fixes. HIGH PRIORITY,  │
+│                                    do this first next session.               │
 ├────────────────────────────────────────────────────────────────────────────────┤
-│ LINEUP CONFIRMATION LAYER (CLR)                                                │
-│ Scheduler Table:                ✅ mlb_pending_lineup_checks LIVE             │
-│ Drain Cron (1-min):             ✅ RUNNING IN server.py                      │
-│ T-45 Lineup Checks:             ✅ CONFIRMED FIRING                           │
-│ Four-State Annotation:          ✅ MISSING/CONFIRMED/OUT_OF_RANGE/SCRATCHED  │
-│                                    Health confirmed Session 16: 80.0%        │
-│                                    CONFIRMED, 7.0% SCRATCHED, 4.0%           │
-│                                    OUT_OF_RANGE, 8.9% never checked          │
-│ CLR Rebuild Trigger:             ⚠️  CHANGED (Session 16) — SCRATCHED ONLY   │
-│                                    BATTING_ORDER_OUT_OF_RANGE is now         │
-│                                    annotation-only, does NOT trigger rebuild │
-│                                    Prior state (both trigger) caused 76.9%   │
-│                                    of all 78 weekly voids to involve OOR,    │
-│                                    44.9% from OOR alone with no scratch      │
-│ Slot Gate (soft, -8pts):        ✅ REMOVED (Session 16, see scoring above)   │
+│ LINEUP CONFIRMATION LAYER (CLR) — UNCHANGED THIS SESSION                       │
+│ (See prior version for full detail — Session 16 SCRATCHED-only trigger)       │
 ├────────────────────────────────────────────────────────────────────────────────┤
-│ CLV TRACKING LAYER                                                             │
-│ CLV Capture:                    ❌ REMOVED (Session 17, commit d3a642c)      │
-│                                    No statistically credible relationship     │
-│                                    found between beating close and winning    │
-│                                    (n=2,300, z≈0.72). Reversed direction on   │
-│                                    hits/over and SO/over when split by prop.  │
-│                                    Was 52% of total SGO volume (78% of July). │
-│ clv_tracker.py:                 ✅ INTACT, uncalled — recoverable            │
-│ Historical closing_odds data:   ✅ PRESERVED, no longer written to           │
+│ CLV TRACKING LAYER — UNCHANGED THIS SESSION                                    │
+│ (Removed Session 17 — see prior version)                                      │
 ├────────────────────────────────────────────────────────────────────────────────┤
-│ SPORTSGAMEODDS API USAGE                                                       │
-│ Prior plan:                     Pro tier, $149/mo (~100K objects/mo)         │
-│ Target plan:                    Amateur/free tier, $0/mo (2,500 objects/mo)  │
-│ Account downgrade status:       🔲 NOT YET CONFIRMED — user action pending   │
-│ Post-removal usage (validated): ~1,080/mo avg, ~1,350/mo worst case          │
-│                                    (18 clean days, excl. Jun 16 catch-up      │
-│                                    burst artifact) — both under 2,500 cap     │
-│ Remaining SGO call path:        ✅ 3 scheduled runs only (9AM/12PM/5:30PM)   │
-│ NBA agent (shared SGO account): ❌ CONFIRMED INACTIVE since April 2026       │
+│ SPORTSGAMEODDS API USAGE — UNCHANGED THIS SESSION                              │
+│ Account downgrade status:       🔲 STILL NOT CONFIRMED — carried multiple    │
+│                                    sessions, user action pending             │
 ├────────────────────────────────────────────────────────────────────────────────┤
 │ SHADOW PIPELINE                                                                │
 │ Shadow Pipeline:                ✅ RUNNING AFTER EVERY PRODUCTION RUN        │
-│ Shadow vs Production Leg WR:    ✅ SHADOW OUTPERFORMS on shared props        │
-│                                    (Session 16) — hits/over +4.9pp,          │
-│                                    SO/over +4.9pp, both n>60                  │
-│ Shadow Parlay WR vs Production: ⚠️  Shadow 16.5% vs Prod 30.0% (7-day) —     │
-│                                    explained by TB/under combinatorial drag, │
-│                                    NOT a shadow scoring quality issue.       │
-│                                    TB-free shadow parlays: 40.0% (n=10,      │
-│                                    small sample) — see ARCHITECTURE_         │
-│                                    DECISIONS.md §TB/under Parlay-Level Drag  │
+│ Calls new builder automatically:✅ run_enriched_pipeline.py calls the same   │
+│                                    build_parlays() as production — Session   │
+│                                    18's redesign applies here with no        │
+│                                    separate change needed                    │
+│ TB/under construction question: ⚠️  NUMBERS NOW STALE — the 15.8%/26.7%      │
+│                                    with/without-TB comparison (reconfirmed   │
+│                                    Session 18) was generated under the OLD   │
+│                                    fixed-4-leg builder. Rerun under the new  │
+│                                    4-6-leg logic before any promotion        │
+│                                    decision.                                 │
 ├────────────────────────────────────────────────────────────────────────────────┤
 │ DIAGNOSTIC / LOGGING GAPS                                                       │
-│ void_reason (mlb_scored_legs):  ❌ NOT POPULATING — 97% NULL (66/68 legs,    │
-│                                    Session 16 finding). Use superseded_      │
-│                                    reason + lineup_check_status join instead │
-│                                    until fixed. Not yet fixed.               │
+│ void_reason (mlb_scored_legs):  ❌ STILL NOT POPULATING — carried, no        │
+│                                    action taken Session 17 or 18             │
+│ Row-count inflation:            ⚠️  NEW FINDING (Session 18) — any leg       │
+│                                    surviving multiple pipeline runs or CLR   │
+│                                    rebuilds gets a new row per batch in      │
+│                                    mlb_parlay_legs_v2/_enriched, ~2.4x       │
+│                                    inflation. Documented as a query gotcha   │
+│                                    in SUPABASE_SCHEMA_REFERENCE.md this      │
+│                                    session — dedupe by (run_date,            │
+│                                    player_name, stat, direction) for any     │
+│                                    win-rate query against those tables.      │
 ├────────────────────────────────────────────────────────────────────────────────┤
 │ INFRASTRUCTURE                                                                 │
 │ Database Logging:               ✅ STABLE                                     │
-│ Web UI:                         ✅ FUNCTIONAL                                 │
+│ Web UI:                         ✅ FUNCTIONAL (+ new /manual route)          │
 │ Deployment:                     ✅ LIVE (Railway auto-deploy)                │
-│                                    Latest: commit 4cd3c37 (Jul 2, 2026)       │
-│ sklearn Version Warning:        ⚠️  1.7.2→1.8.0 mismatch (non-fatal)        │
-│ Unconfirmed commit 85b5bd5:     ⚠️  Landed on origin between Session 15 and │
-│                                    16 without a session doc entry. Rebase    │
-│                                    was clean. Origin not yet traced.         │
+│                                    Latest confirmed commit: c920f32 (Jul 8)  │
+│                                    Possible later unconfirmed commit — see   │
+│                                    sticky-header open item above            │
+│ Base commit at session start:    3d7aabc (Jul 7, previously undocumented —  │
+│                                    documented this session; also resolved   │
+│                                    the long-open "unknown commit 85b5bd5"    │
+│                                    mystery — confirmed docs-only, no code)   │
+│ pytest:                          ❌ NOT INSTALLED in venv — blocks building  │
+│                                    the pending parlay_builder.py test suite  │
+│ sklearn Version Warning:        ⚠️  1.7.2→1.8.0 mismatch (non-fatal, carried)│
 └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -123,136 +175,68 @@
 
 ## Recent Deployments
 
+### 🔧 July 8, 2026 (Session 18): Parlay Builder Redesign + Manual Parlay Dashboard
+
+**Investigation.** A deep-dive into production vs. shadow performance (leg pools, in-parlay win rates, parlay-level win rates) surfaced a specific, testable hypothesis: the old builder's fixed 4-leg, +400/+700-banded combinatorial search was forcing substitution of lower-scored legs for higher-odds ones purely to fit the payout band. Tested directly against real data before writing any code: top-4-by-`composite_score` eligible legs cleared +400 on only 3 of 21 days (14%); top-5 cleared +400-700 naturally on 17 of 21 days (81%) with zero odds engineering; top-6 badly overshot on nearly every day.
+
+**Decision:** removed the +700 ceiling, kept a +400 floor, replaced the fixed 4-leg requirement with a 4-6 leg range, left all other constraints (max 2/game, player diversity) unchanged.
+
+**Fix.** `src/engine/parlay_builder.py`'s branch-and-bound search replaced with a greedy selector: sort by `composite_score` descending, walk the pool applying existing constraints, stop as soon as the floor clears at ≥4 legs, cap at 6. Both the shadow pipeline and CLR rebuilds call the same function, so the fix applies everywhere automatically. Validated pre-deployment against a real July 7 pool (old vs. new run side-by-side) — confirmed the exact substitution the redesign targeted (a higher-scored leg dropped for a lower-scored, longer-odds one purely to hit the band) no longer happens.
+
+**Manual Parlay Dashboard (`/manual`), built alongside.** Full-signal batter+pitcher table (reusing the same `get_scored_legs()`-based query the automated pipeline itself uses, enriched with shadow-pipeline vulnerability/park-factor/blended-ERA-rank data), sortable/filterable, with a 4-6 leg selection tray that submits via a new endpoint. Confirmed via direct code read that the outcome resolver has no `source` filter, so manual picks resolve automatically in the existing morning run — no resolver changes needed. Persisted with `source='manual_pick'`, distinct from the pre-existing `'manual'` value (the "Regenerate Now" button).
+
+**Iteration, each round driven by real testing:**
+- Auth hardened proactively (grant access only on exact HTTP 200, not "anything but 401").
+- A resulting false "wrong password" report was root-caused (not guessed) to a `Decimal`/`json.dumps()` serialization bug on NUMERIC pitcher columns — fixed with `json.dumps(legs, default=str)`.
+- Screenshot review surfaced field-name bugs (`best_line`/`best_odds`/`opposing_pitcher_name` vs. the actual `line`/`odds`/`pitcher_name` fields) and layout issues — fixed by reading the live file and cross-checking real DB field names.
+- Sticky-header fix took two attempts — first (JS-measured offset) made the bug visibly worse, correctly triggering a structural rewrite instead of a third pixel guess (flex-column layout, `thead { position: sticky; top: 0 }` correct by construction). Neither Claude Code nor Claude (chat) had rendering tools available to confirm visually in either case — operator verified directly against the live deployed page.
+
+**Commits:** `5600b2e` (builder + dashboard initial), `b4322c1` (Decimal fix), `c920f32` (field names + layout + column set). A further sticky-header structural fix was shown as a diff; push status not explicitly confirmed in-session — **verify first, Session 19.**
+
+**Known gaps, both high priority for Session 19:**
+1. The builder rewrite's 7-case regression test was never committed — zero persisted test coverage on the largest architecture change in the project.
+2. The manual-pick end-to-end flow (submit → resolves correctly next morning) — the entire point of building this — was never actually tested this session.
+
 ### 🔧 July 7, 2026 (Session 17): CLV Tracking Layer Removal + SGO Cost Optimization
-
-**Investigation.** Usage audit of the previously-undocumented `mlb_sgo_request_log`
-table found MLB's own SGO usage already exceeded the 2,500/month free-tier cap in
-every complete month (Apr 2,545, May 3,365, June 3,794), independent of the shared
-NBA-agent account activity (confirmed inactive since April). An hour-of-day breakdown
-attributed ~75% of daily volume to the CLV tracker's T-1-per-game-group snapshot
-calls. Before cutting CLV calls, tested whether CLV was adding value: joined
-`closing_odds` to `result` for 2,300 resolved legs since June 16. Aggregate win rate
-looked mildly supportive (57.0% beating-close vs. 55.4% not) but not statistically
-significant (z≈0.72); split by prop, hits/over and strikeouts/over both reversed
-direction, and totalBases/under was flat. No prop showed a credible predictive
-relationship.
-
-**Decision:** remove CLV entirely rather than throttle it — it was both the largest
-cost driver and had no demonstrated value.
-
-**Fix (commit d3a642c).**
-- `main.py`: `schedule_clv_checks()` call commented out (not deleted) inside
-  `log_slate_start_times()`, with recovery instructions.
-- `src/apis/lineup_confirmation.py`: `check_type='clv'` drain branch marks
-  already-queued rows `done` with an explanatory note instead of calling SGO.
-- `src/apis/clv_tracker.py` untouched but uncalled.
-- `mlb_scored_legs.closing_odds` historical data preserved, no longer written to.
-- Confirmed via DB join (not estimate) that CLV was 52% of total SGO volume overall,
-  78% of July's volume — higher than the ~75% estimate that scoped the work.
-- Caught a measurement artifact: a June 16 "scheduled-run" spike (150 entities) was
-  actually a backlog of June 12 + June 15 CLV checks firing in a catch-up burst after
-  the drain cron came back online — excluded from the final projection.
-- 10/10 tests passed (`test_clv_removal.py`).
-- Clean push, no rebase conflict.
-
-**Retrospective validation (18 clean 3-run days since June 16):**
-| Metric | Value |
-|---|---|
-| Avg scheduled-only entities/day | 36 |
-| Peak scheduled-only entities/day | 45 (June 30) |
-| 30-day average projection | ~1,080/month |
-| 30-day worst-case projection | 1,350/month |
-
-Both comfortably under the 2,500/month free-tier cap. **SGO Pro subscription
-cancellation itself not yet confirmed — pending manual user action.**
+*(Unchanged from prior version — see that document for full detail.)*
 
 ### 🔧 July 2, 2026 (Session 16): Batting Order Slot Gate Removal
-
-**Investigation.** Re-tested the June 12 slot-gate hypothesis against a fresh 7-day window (June 24 – July 1). Both previously-penalized buckets outperformed their "favorable" counterparts a second time, independently:
-- hits/over: slots 6-9 (penalized) 63.3% WR (n=30) vs. slots 1-5 (protected) 60.0% WR (n=205)
-- strikeouts/over: slots 7-9 (penalized) 73.7% WR (n=19) vs. slots 1-6 (protected) 67.8% WR (n=87)
-
-Separately, joined `mlb_parlay_recommendations_v2.superseded_reason` to `mlb_parlay_legs_v2.lineup_check_status` for all 78 voided parlays in the same window: 100% involved a `SCRATCHED` or `BATTING_ORDER_OUT_OF_RANGE` leg (confirms CLR as the sole void mechanism), `BATTING_ORDER_OUT_OF_RANGE` was present in 76.9% of voids, and 44.9% voided from `OUT_OF_RANGE` alone with no scratched player involved.
-
-**Fix (commit 4cd3c37).**
-- `src/engine/simple_scorer.py`: removed the -8 slot-gate scoring penalty entirely (not flipped — went neutral). Annotation of `batting_order`/`lineup_check_status` untouched.
-- `src/apis/lineup_confirmation.py`: `BATTING_ORDER_OUT_OF_RANGE` downgraded from a CLR rebuild trigger to annotation-only in both `_find_affected_parlays()` and `run_confirmed_lineup_resolution()`. `SCRATCHED` remains the sole rebuild trigger, unchanged.
-- Confirmed shadow pipeline unaffected (no batting_order columns on shadow tables).
-- 13/13 tests passed (standalone script, no pytest in environment).
-- Deployed after a clean rebase onto `origin/master` (which had advanced to an untraced commit `85b5bd5` since Session 15).
-
-**Post-deploy verification (same day, small early sample):**
-| Test | Result |
-|---|---|
-| `superseded_reason` OOR-alone check | **0 rows — confirmed pass** |
-| Void rate, post-fix vs pre-fix | 0.0% (n=5) vs 58.3% (n=168) — promising, too small to confirm |
-| Composite score gap, OOR vs CONFIRMED | 69.6 vs 77.8 (n=1 vs n=3) — inconclusive, sample too small |
-
-Recheck scheduled ~July 5-6 with real volume behind all three statistical tests.
+*(Unchanged from prior version.)*
 
 ### 🔧 June 25, 2026 (Session 15): Scoring Overhaul + Player Cap Fix
-*(Unchanged from prior version — WHIP rank removal, hits/under gate raise, starter-only pitcher ranks, TB/under 3-bug fix, vulnerability recalibration, player cap fallback fix. See git history for full Session 15 detail.)*
+*(Unchanged from prior version.)*
 
 ---
 
 ## Component Status
 
-### Production Scoring Logic (simple_scorer.py)
-| Signal | Status | Notes |
-|--------|--------|-------|
-| Coverage (base) | ✅ Active | coverage_vs_hand → coverage_overall fallback |
-| Consistency | ✅ Active | ±6/4/2/1 gap-based — strongest predictor |
-| ERA raw (hits) | ✅ Active | >5.0 → +5, <3.0 → -5 |
-| WHIP rank (hits) | ✅ Removed | Session 15 |
-| K/9 rank (SO) | ✅ Active | Re-evaluate ~July 9 with starter-only data |
-| Lineup stability | ✅ Active | -5 if consistency < 0.50 |
-| Slot gate | ✅ **Removed** | **Session 16 — confirmed backwards on 2 independent samples** |
-
-### Lineup Confirmation Layer (lineup_confirmation.py)
-| Behavior | Status | Notes |
+### Parlay Builder (parlay_builder.py) — REDESIGNED Session 18
+| Component | Status | Notes |
 |---|---|---|
-| T-45 annotation check | ✅ Active | 80.0% CONFIRMED rate, 91.1% get some status |
-| SCRATCHED → CLR rebuild | ✅ Active, unchanged | Factual roster state, not a statistical judgment |
-| OUT_OF_RANGE → CLR rebuild | ❌ **Removed (Session 16)** | **Was 76.9% of all voids; 44.9% from OOR alone** |
-| OUT_OF_RANGE → annotation | ✅ Active | Still written to lineup_check_status, no longer voids |
+| Leg count | ✅ 4-6 (was fixed 4) | Greedy: stops at fewest legs that clear the floor |
+| Combined odds | ✅ +400 floor only (was +400-700 band) | No ceiling |
+| Selection method | ✅ Greedy by composite_score | Was branch-and-bound combinatorial search |
+| Max legs/game | ✅ 2, unchanged | |
+| Player diversity | ✅ Unchanged | Both intra- and cross-parlay caps preserved |
+| Regression tests | ❌ None committed | High priority gap |
+| Live performance data | ⚠️ None yet | Pending ~1 week |
+
+### Manual Parlay Dashboard (manual.html, server.py, db.py) — NEW Session 18
+| Component | Status | Notes |
+|---|---|---|
+| Data display | ✅ Working | Field-name bugs fixed commit c920f32 |
+| Auth | ✅ Working | Hardened + Decimal bug fixed, reuses existing password |
+| Submission | ✅ Working | Server-side re-validation, non-blocking floor |
+| Resolution | ✅ Confirmed via code, ❌ not tested live | No source filter in resolver — should just work |
+| Layout/sticky header | ⚠️ Fix shown, push unconfirmed | Verify Session 19 |
 
 ### Coverage Gates
 | Prop / Direction | Gate | Ceiling | Status |
 |---|---|---|---|
-| hits/over | 65% floor | ~80% ceiling | ⚠️ Ceiling pending |
+| hits/over | 65% floor | ~80% ceiling | ⚠️ Ceiling still pending, reconfirmed Session 18 |
 | SO/over | 65% floor | None | ✅ No ceiling confirmed |
-| hits/under | 65% floor | None | ✅ Raised Session 15 |
-| TB/under (shadow) | 40% floor | ~75% (tentative) | ✅ Shadow only — promotion pending construction-strategy decision (Session 16) |
-
----
-
-## Performance Metrics (June 24 – July 1 Clean Window, Session 16 Review)
-
-### Overall Parlay Win Rate, Production vs Shadow
-| Pipeline | Resolved | Won | Void | Win Rate |
-|---|---|---|---|---|
-| Production | 60 | 18 | 89 | 30.0% |
-| Shadow | 97 | 16 | 0 | 16.5% |
-
-### Same-Prop Leg Win Rate, Production vs Shadow
-| Prop | Shadow | Production | Delta |
-|---|---|---|---|
-| hits/over | 66.7% (n=78) | 61.8% (n=152) | +4.9pp shadow |
-| strikeouts/over | 77.0% (n=100) | 72.1% (n=61) | +4.9pp shadow |
-
-### TB/under Isolation (Shadow Parlays)
-| Segment | Resolved | Won | Win Rate |
-|---|---|---|---|
-| With TB/under leg | 87 | 12 | 13.8% |
-| Without TB/under leg | 10 | 4 | 40.0% |
-
-### Void Attribution (Production, 78 voided parlays)
-| Cause | Parlays | % |
-|---|---|---|
-| OUT_OF_RANGE present | 60 | 76.9% |
-| SCRATCHED present | 39 | 50.0% |
-| OUT_OF_RANGE alone (no scratch) | 35 | 44.9% |
-| Neither flag present | 0 | 0.0% |
+| hits/under | 65% floor | None | ⚠️ Very narrow eligible pool (1-3 players/day) — characterized Session 18, not a gate change |
+| TB/under (shadow) | 40% floor | ~75% (tentative) | ⚠️ Promotion analysis stale — rerun under new builder before deciding |
 
 ---
 
@@ -260,20 +244,22 @@ Recheck scheduled ~July 5-6 with real volume behind all three statistical tests.
 
 | Item | File | Priority |
 |---|---|---|
-| Cancel SGO Pro subscription (account-level, not code) | — (manual action) | **High — Session 17, not yet confirmed** |
-| Verify live SGO volume post-CLV-removal | — (verification only) | **High — check within days of Jul 7** |
-| Recheck slot-gate fix with real volume | — (verification only) | High — ~July 5-6, overdue from Session 16 |
-| Fix void_reason logging gap | `parlay_outcome_resolver.py` / `outcome_resolver.py` | Medium |
-| TB/under parlay construction strategy | `parlay_builder.py` (or new module) | Medium — before TB/under promotion |
-| Add hits/over coverage ceiling at ~80% | `main.py` | High — data confirmed, carried from Session 15 |
-| Re-evaluate K/9 / WHIP with starter-only data | `enriched_scorer.py` | Medium — ~July 9 |
-| Investigate unexplained April/May SGO traffic | — (investigation only) | Low — Session 17 |
-| Confirm origin of commit 85b5bd5 | — (investigation only) | Low |
+| Confirm sticky-header fix commit + push status | — (verification only) | **High — Session 19, first thing** |
+| Complete manual-pick end-to-end test | — (verification only) | **High — Session 19, first thing** |
+| Commit persisted regression tests for the new builder | `tests/test_parlay_builder.py` (new) | **High — Session 19** |
+| Install pytest in venv | — (environment) | High — blocks the above |
+| Live-data performance recheck of new builder | — (verification only) | High — once ~1 week of data exists |
+| Rerun TB/under construction-strategy analysis under new builder | `parlay_builder.py` / analysis only | Medium — before any promotion decision |
+| Recheck SO/over pool-composition softening | — (verification only) | Medium — once more volume accumulates |
+| Cancel SGO Pro subscription (account-level, not code) | — (manual action) | High — carried multiple sessions, not yet confirmed |
+| Add hits/over coverage ceiling at ~80% | `main.py` | High — data reconfirmed Session 18, still not implemented |
+| Re-evaluate K/9 / WHIP with starter-only data | `enriched_scorer.py` | Medium — new small-sample reversal signal adds urgency |
+| Fix void_reason logging gap | `parlay_outcome_resolver.py` / `outcome_resolver.py` | Medium — carried, no action taken |
 | Fix sklearn version mismatch | model retraining | Low — non-fatal |
-| Project file cleanup (retire stale docs) | Project Knowledge | Low |
+| Project file cleanup (retire stale docs) | Project Knowledge | Low — carried |
 
 ---
 
-**Build Status:** ✅ HEALTHY
-**Last Deployment:** July 7, 2026 — CLV tracking layer removed, SGO scoped to 3 scheduled runs (commit d3a642c)
-**Next Review:** Post-deploy SGO volume check (within days of Jul 7) + overdue July 5-6 slot-gate recheck
+**Build Status:** ✅ HEALTHY (one open verification item on the sticky-header commit)
+**Last Deployment:** July 8, 2026 — parlay builder redesigned, manual parlay dashboard shipped (commits `5600b2e`, `b4322c1`, `c920f32`, plus one unconfirmed sticky-header fix)
+**Next Review:** Confirm sticky-header commit hash + complete manual-pick end-to-end test (both Session 19, first priority)

@@ -1,5 +1,5 @@
 # MLB Parlay Agent — Architecture Decisions
-**Last Updated:** July 7, 2026 (Session 17 — CLV Tracking Layer Removed, SportsGameOdds Cost Optimization)
+**Last Updated:** July 8, 2026 (Session 18 — Parlay Builder Redesign: Floor-Only Odds + Flexible Leg Count; Manual Parlay Dashboard)
 
 ---
 
@@ -24,8 +24,10 @@
 18. [Batting Order Slot Gate — Removal (Session 16)](#batting-order-slot-gate--removal-session-16)
 19. [TB/under Parlay-Level Combinatorial Drag (Session 16)](#tbunder-parlay-level-combinatorial-drag-session-16)
 20. [SportsGameOdds Cost Optimization — CLV Layer Removal (Session 17)](#sportsgameodds-cost-optimization--clv-layer-removal-session-17)
-21. [Lessons Learned](#lessons-learned)
-22. [Future Considerations](#future-considerations)
+21. [Parlay Builder Redesign — Floor-Only Odds, Flexible Leg Count (Session 18)](#parlay-builder-redesign--floor-only-odds-flexible-leg-count-session-18)
+22. [Manual Parlay Dashboard (Session 18)](#manual-parlay-dashboard-session-18)
+23. [Lessons Learned](#lessons-learned)
+24. [Future Considerations](#future-considerations)
 
 ---
 
@@ -35,7 +37,7 @@
 
 The system exists to find props where historical coverage rate predicts actual outcomes, and combine them into parlays with positive expected value. Every design decision should be evaluated against this goal.
 
-*(Unchanged from prior version — see Session 15 entries below for validated-edge figures per prop as of June 18.)*
+*(Unchanged from prior version — see Session 15 entries for validated-edge figures per prop as of June 18. Session 18 re-validated the core props' pool-level edge is still real — see `SESSION_HANDOFF.md` Session 18 for current figures.)*
 
 ---
 
@@ -55,8 +57,7 @@ score = coverage_overall          # always the base
      + slot_gate_penalty          # -8 if unfavorable batting_order — REMOVED Session 16
 ```
 
-### **Key Scoring Decision: Slot Gate as Soft Penalty (June 12, 2026) — SUPERSEDED**
-See [Batting Order Slot Gate — Removal (Session 16)](#batting-order-slot-gate--removal-session-16) below. The soft-penalty approach adopted June 12 was removed entirely on July 2 after three additional weeks of data confirmed, rather than resolved, the original contradiction.
+**Unchanged this session** — Session 18 touched leg *selection* (how many legs, what odds target), not leg *scoring* (the composite_score formula above). Composite score remains the sort key the new builder walks. See Session 18's finding that the score's K/9-rank differentiation weakened post-slot-gate-fix — a scoring-quality question, still open, not addressed by the Session 18 selection-logic change.
 
 ---
 
@@ -64,7 +65,7 @@ See [Batting Order Slot Gate — Removal (Session 16)](#batting-order-slot-gate-
 
 *(Unchanged from Session 15 — see that section for current whitelist and breakeven figures.)*
 
-**Session 16 addition:** TB/under's own leg-level win rate confirmed still solidly above breakeven post null-signal-fix (57.9-59.4%, vs. ~39.1% breakeven). The promotion question is no longer about signal quality — see [TB/under Parlay-Level Combinatorial Drag](#tbunder-parlay-level-combinatorial-drag-session-16).
+**Session 18 note:** hits/under's pool-scarcity issue (only 1-3 players/day clear the 65% coverage floor most days) was newly characterized this session — see Lessons Learned #50. Not a whitelist change, a characterization of why that prop behaves noisily in small samples.
 
 ---
 
@@ -77,21 +78,22 @@ See [Batting Order Slot Gate — Removal (Session 16)](#batting-order-slot-gate-
 ## Parlay Construction Evolution
 
 ### **Phase 3.7: CLR Player Cap + TB Exclusion + Fallback Composition Fix (June 18, 2026)**
-### **Phase 3.8: Batting Order Slot Gate Removed From Both Scoring and CLR Trigger (July 2, 2026) — CURRENT**
+### **Phase 3.8: Batting Order Slot Gate Removed From Both Scoring and CLR Trigger (July 2, 2026)**
+### **Phase 4: Floor-Only Odds, Flexible Leg Count (July 8, 2026) — CURRENT**
 
-See [Batting Order Slot Gate — Removal](#batting-order-slot-gate--removal-session-16) for full detail.
+See [Parlay Builder Redesign](#parlay-builder-redesign--floor-only-odds-flexible-leg-count-session-18) below for full detail.
 
 ---
 
 ## Player Diversity — Cross-Run Cap
 
-*(Unchanged from Session 15.)*
+*(Unchanged from Session 15. Session 18 note: the new builder preserves both the max-2-legs-per-game and one-leg-per-player-per-parlay constraints unchanged — only the leg-count and target-odds logic changed.)*
 
 ---
 
 ## Odds Cap Decision
 
-*(Unchanged.)*
+*(Unchanged — the -250/+150 per-leg pool eligibility range was not touched this session. Only the combined-parlay-odds target changed; see Session 18.)*
 
 ---
 
@@ -103,7 +105,7 @@ See [Batting Order Slot Gate — Removal](#batting-order-slot-gate--removal-sess
 
 ## Pitcher Signal Pipeline
 
-*(Unchanged from Session 15 — see that section for the K/9-direction correction and hits/over vulnerability penalty detail. Re-evaluation of K/9 and WHIP against starter-only rank data remains scheduled for ~July 9.)*
+*(Unchanged from Session 15 — see that section for the K/9-direction correction and hits/over vulnerability penalty detail. Session 18 added one new, small-sample data point: a 21-day K/9-rank bucket analysis showed a possible non-monotonic/reversed pattern at the extremes, feeding into the still-pending "re-evaluate K/9 and WHIP with starter-only data" item.)*
 
 ---
 
@@ -111,239 +113,178 @@ See [Batting Order Slot Gate — Removal](#batting-order-slot-gate--removal-sess
 
 ### **Decision: Shadow Pipeline as Signal Validation Layer**
 
-*(Unchanged framing from Session 15.)*
-
-**Session 16 finding — shadow's per-leg scoring advantage is now quantified and confirmed real, not noise:**
-
-Comparing shadow vs. production on identical props over the same 7-day window (June 24 – July 1):
-
-| Prop | Shadow Leg WR | Production Leg WR | Delta |
-|---|---|---|---|
-| hits/over | 66.7% (n=78) | 61.8% (n=152) | +4.9pp |
-| strikeouts/over | 77.0% (n=100) | 72.1% (n=61) | +4.9pp |
-
-Identical +4.9pp delta on both props, in the same direction, is a meaningful signal rather than sampling noise. Shadow's enriched scoring (pitcher vulnerability, park factor, opponent-specific coverage) is producing better leg selection than production's simpler scorer on the props both pipelines share. This makes the blended shadow parlay win rate (16.5% vs. production's 30.0%) a misleading comparison on its own — see next section.
+*(Unchanged framing from Session 15. Session 18 reconfirmed the offense stack bonus is live and firing with a positive early read — 64.4% WR when applied (n=101) vs 58.8% when not (n=2,153) — correcting a stale README status that still listed it as "not yet built.")*
 
 ---
 
 ## Enriched Scoring Signals
 
-*(Unchanged from Session 15.)*
-
-**Session 16 confirmation:** the Session 15 TB/under null-signal fix (adding `totalBases` to `_PROP_STAT_MAP`, adding the park-adjustment branch, fixing direction inversion) is confirmed live in production data — `park_factor` populated on 588/707 TB/under legs (83.2%, was 0% pre-fix) and `coverage_vs_opponent` on 420/707 (59.4%, was 0% pre-fix). Not 100% population — likely reflects legitimate cases where underlying park/opponent data isn't available for a given matchup, not a residual bug, but not independently re-verified this session.
+*(Unchanged from Session 15/16.)*
 
 ---
 
 ## Lineup Confirmation Layer
 
-Event-driven annotation system. After 9AM pipeline, rows are written to `mlb_pending_lineup_checks` for each start-time group at T-45 and T-1. Drain cron polls every minute. On trigger, fetches live lineups via statsapi hydrate. Annotates each parlay leg with `batting_order` and `lineup_check_status` (CONFIRMED/OUT_OF_RANGE/SCRATCHED/MISSING).
-
-**Session 16 change:** Previously, both `SCRATCHED` and `BATTING_ORDER_OUT_OF_RANGE` triggered `CONFIRMED_LINEUP_RESOLUTION` (rebuild/void). As of July 2, 2026, **only `SCRATCHED` triggers a rebuild.** `BATTING_ORDER_OUT_OF_RANGE` remains fully annotated on every leg but no longer causes a void. See [Batting Order Slot Gate — Removal](#batting-order-slot-gate--removal-session-16) for the data behind this change.
-
-**CLR pool rules (Session 14, unchanged):**
-- TB/under excluded from CLR replacement pool (mirrors `main.py` production exclusion)
-- Cross-iteration player cap: max 1 player appearance per CLR batch via `used_replacement_player_ids`
-- Any future production exclusions in `main.py` must be explicitly mirrored in CLR pool construction
-
-**Annotation health confirmed (Session 16, 7-day window):** 80.0% `LINEUP_CONFIRMED`, 7.0% `SCRATCHED`, 4.0% `BATTING_ORDER_OUT_OF_RANGE`, 8.9% never checked. 91.1% of legs receive some annotation — the check-firing mechanism itself is healthy; the issue was purely in which annotations caused a rebuild.
+*(Unchanged from Session 16 — see that section for the SCRATCHED-only rebuild trigger decision.)*
 
 ---
 
 ## CLV Tracking Layer
 
-**REMOVED — Session 17 (July 7, 2026).** See
-[SportsGameOdds Cost Optimization — CLV Layer Removal](#sportsgameodds-cost-optimization--clv-layer-removal-session-17)
-below for full detail. `src/apis/clv_tracker.py` remains in the repo, intact but
-uncalled, and is recoverable. Historical `closing_odds` data in `mlb_scored_legs` is
-preserved for any future post-hoc analysis but is no longer written to.
+**REMOVED — Session 17.** See prior version for full detail.
 
 ---
 
 ## Backtest Harness
 
-*(Unchanged from Session 15 — note the original June 12 "slot gate" backtest variant tested only the scoring-penalty direction, not the CLR-trigger question. Session 16's void investigation is the first analysis to isolate the CLR-trigger cost specifically.)*
+*(Unchanged structurally from Session 15. Session 18 note: `scripts/run_backtest.py`'s existing variants — EV-sort, slot gate — test different questions than the Session 18 builder redesign. Running it against the new builder this session confirmed no crash/regression, but did not validate the new floor-only/4-6-leg logic's actual performance. A proper backtest of that specific change is still pending — see `SESSION_HANDOFF.md` Session 18 Pending Items.)*
 
 ---
 
 ## Outcome Resolution
 
-*(Unchanged.)*
+*(Unchanged. Session 18 explicitly re-confirmed `parlay_outcome_resolver.py` has no `source` filter — it resolves any `outcome='pending'` row for the run_date regardless of source — which is what makes the manual parlay dashboard's auto-resolution work with zero resolver changes. See [Manual Parlay Dashboard](#manual-parlay-dashboard-session-18).)*
 
-**Session 16 finding — `void_reason` on `mlb_scored_legs` is not a usable diagnostic field.** Of 68 voided legs in the 7-day review window, 66 (97%) had `void_reason = NULL`; only 2 had a populated reason (`stat_extraction_failed`). The void investigation this session instead joined `mlb_parlay_recommendations_v2.superseded_reason` to `mlb_parlay_legs_v2.lineup_check_status`, which worked cleanly and fully explained 100% of the 78 voided parlays in the window. `void_reason`'s logging gap is not yet fixed — flagged in `SESSION_HANDOFF.md` pending items.
+**void_reason is still not fixed** (Session 16 finding, carried through Sessions 17 and 18 without action).
 
 ---
 
 ## Database Design
 
-*(Unchanged — see prior version for natural key rules, PostgreSQL conventions, schema change log, and clean-data cutoffs.)*
+*(Unchanged — see prior version for natural key rules, PostgreSQL conventions, schema change log, and clean-data cutoffs. Session 18 note: no schema migrations were applied this session. The manual parlay dashboard reuses the existing `source` free-text column on `mlb_parlay_recommendations_v2` with a new value, `'manual_pick'` — distinct from the pre-existing `'manual'` value, which is the "Regenerate Now" button (still runs the algorithm, just on demand) and predates this session; conflating the two would have made manual-vs-automated comparison meaningless.)*
 
 ---
 
 ## Pipeline Architecture
 
-*(Unchanged structurally. The CLR rebuild trigger condition described in this section's prior versions — "on SCRATCHED/OUT_OF_RANGE" — is superseded; see below.)*
+*(Unchanged structurally. See [Manual Parlay Dashboard](#manual-parlay-dashboard-session-18) for the new `/manual` route additions, which sit alongside the existing pipeline rather than modifying it.)*
 
-- **On SCRATCHED only** — CONFIRMED_LINEUP_RESOLUTION rebuild (TB/under excluded, 1x player cap). *(Updated Session 16 — was "on SCRATCHED/OUT_OF_RANGE.")*
+- **On SCRATCHED only** — CONFIRMED_LINEUP_RESOLUTION rebuild (TB/under excluded, 1x player cap). *(Unchanged since Session 16.)*
 
 ---
 
 ## Batting Order Slot Gate — Removal (Session 16)
 
-### **Decision: Remove Both the -8 Scoring Penalty and the OUT_OF_RANGE CLR Trigger**
-
-**Background:** The June 12, 2026 slot-gate backtest (see Backtest Harness) found `BATTING_ORDER_FAVORABLE` ranges (slots 1-5 for hits/over, 1-6 for strikeouts/over) contradicted by the data available at the time — "unfavorable" slots 6-9 and 7-9 won at 66.7% vs. 61.2% for the "favorable" slots. The team's decision then (Lesson 32) was "keep annotation, don't gate" — i.e., don't build a *new* hard exclusion off a contradicted hypothesis. However, the pre-existing -8 soft penalty in `simple_scorer.py`, and the OUT_OF_RANGE→CLR-rebuild wiring already in `lineup_confirmation.py`, were both left running.
-
-**Session 16 re-test (7 days, June 24 – July 1):**
-
-| Prop | Protected slots | Penalized slots |
-|---|---|---|
-| hits/over | 1-5: 60.0% WR (n=205) | 6-9: **63.3% WR** (n=30) |
-| strikeouts/over | 1-6: 67.8% WR (n=87) | 7-9: **73.7% WR** (n=19) |
-
-Same direction as June 12, on both props independently, three weeks later. The hypothesis is not a one-time fluke — it has now failed to hold up twice, three weeks apart. Continuing to "monitor" a contradiction that repeats is not different from acting on a wrong assumption; the decision was made to remove it.
-
-**Void cost, quantified for the first time this session:** joining `superseded_reason` to `lineup_check_status` for all 78 voided production parlays in the 7-day window showed `BATTING_ORDER_OUT_OF_RANGE` present in 60/78 (76.9%), and **35/78 (44.9%) voided from OUT_OF_RANGE alone with no scratched player involved** — i.e., the selected player genuinely was in the starting lineup, and CLR rebuilt the parlay solely because of the contradicted slot assumption.
-
-**Decision:**
-1. Remove the -8 scoring penalty entirely — go neutral, do not flip the direction to reward slots 6-9/7-9 instead (the "penalized" sample sizes, 19-30 legs, are large enough to say "contradicted" but not large enough to establish a new correct direction).
-2. Downgrade `BATTING_ORDER_OUT_OF_RANGE` from a CLR rebuild trigger to annotation-only. `SCRATCHED` remains the sole rebuild trigger — it's a factual roster state (player absent from the lineup entirely), not a statistical judgment call, and was not implicated in this contradiction.
-3. Keep collecting `batting_order` / `lineup_check_status` annotation data on every leg regardless — cheap, already working (80% confirmation rate), and it's exactly what surfaced this issue in the first place. A future session with a larger, now-unbiased sample (no longer skewed by the scoring penalty influencing which legs get selected) may reveal a real pattern, a different one, or none at all.
-
-**Implementation:** `src/engine/simple_scorer.py` (removed penalty block), `src/apis/lineup_confirmation.py` (`_find_affected_parlays()` and `run_confirmed_lineup_resolution()` both changed to filter on `SCRATCHED` only). Deployed as commit `4cd3c37`, July 2, 2026. See `SESSION_HANDOFF.md` for post-deploy test results and the July 5-6 recheck plan.
+*(Unchanged — see prior version for full detail: the June 12/July 2 contradiction, the void-cost quantification, and the removal decision.)*
 
 ---
 
 ## TB/under Parlay-Level Combinatorial Drag (Session 16)
 
-### **Finding: TB/under's Leg-Level Edge Is Real; Its Parlay-Level Drag Is Structural, Not a Signal Bug**
-
-Session 16's 7-day review found shadow's blended parlay win rate (16.5%) looked worse than production's (30.0%), which appeared to contradict shadow's per-leg scoring being measurably better than production's on shared props (+4.9pp on both hits/over and strikeouts/over — see Shadow Pipeline Strategy above).
-
-Isolating TB/under (50.6% of shadow's leg volume) resolved the apparent contradiction:
-
-| Segment | Resolved | Won | Win Rate |
-|---|---|---|---|
-| Shadow — with TB/under leg | 87 | 12 | 13.8% |
-| Shadow — without TB/under leg | 10 | 4 | 40.0% |
-| Production | 60 | 18 | 30.0% |
-
-TB/under's own leg win rate (57.9-59.4%) remains solidly above its ~39.1% breakeven — it is not a broken or negative-edge signal. But a 4-leg parlay's win probability is closer to the *product* of its legs' win rates than their average, since every leg must hit. Mixing a 58-59%-win-rate prop into the same flat pool as 67-77%-win-rate props mathematically caps the blended parlay win rate below what the stronger props alone would produce — independent of any signal-quality issue.
-
-**Decision: not yet made.** This is a parlay-construction-strategy question, not a scoring fix, and is deliberately not bundled into the Session 16 slot-gate fix. Candidate approaches for a future session: segregated TB-only vs. non-TB parlay pools; leg-quality-weighted selection within the flat pool; or accepting the drag as a known tradeoff of TB/under promotion. See Future Considerations.
+*(Unchanged from Session 16 for the original finding. **Session 18 update:** re-ran the same with/without-TB-leg comparison on fresh 14-day data — 15.8% win rate with a TB/under leg vs. 26.7% without (shadow) — same direction, smaller gap than Session 16's 13.8%/40.0%. Important caveat added this session: these numbers were all generated under the *old* fixed-4-leg builder. With the Session 18 redesign now allowing 4-6 legs, the combinatorial-drag math this finding is based on may not transfer directly — a TB/under leg diluting a fixed 4-leg parlay is a different problem than one diluting a 5-6 leg parlay. Re-run before any promotion decision — see Future Considerations #12 (updated).)*
 
 ---
 
 ## SportsGameOdds Cost Optimization — CLV Layer Removal (Session 17)
 
-### **Decision: Cancel SGO Pro Plan ($149/mo), Remove CLV Tracking Entirely, Keep 3 Scheduled Runs**
+*(Unchanged — see prior version for full detail.)*
 
-**Background:** A cost review found MLB's own SGO usage (`mlb_sgo_request_log`,
-undocumented in the schema reference until this session) already exceeded SGO's
-2,500-object/month free-tier cap in every complete month on record (April 2,545, May
-3,365, June 3,794) — independent of the shared-account NBA agent, which was confirmed
-inactive since April. An hour-of-day breakdown isolated the three scheduled pipeline
-runs (9AM/12PM/~5PM) at ~43.7 entities/day combined, versus ~129.7 entities/day spread
-across the rest of the day — consistent with the CLV tracker's T-1-per-game-group
-snapshot calls being the dominant cost driver.
+---
 
-**Before deciding how to cut CLV calls, tested whether CLV was adding value at all.**
-Joined `mlb_scored_legs.closing_odds` to `result` for all resolved legs since CLV went
-live (June 16 – July 7, n=2,300). The aggregate looked mildly supportive of CLV theory
-(57.0% WR beating the close vs. 55.4% not), but a two-proportion z-test put this at
-z≈0.72 — not statistically significant. Splitting by prop reversed the picture
-entirely: hits/over and strikeouts/over (the two strongest-edge props) both showed
-*higher* win rates when NOT beating the close (64.0% vs. 62.4%, and 70.9% vs. 64.0%
-respectively), while totalBases/under was flat. The aggregate "signal" was a
-composition artifact of mixing props with different base rates, not a real effect
-within any individual prop.
+## Parlay Builder Redesign — Floor-Only Odds, Flexible Leg Count (Session 18)
 
-**Decision:** remove CLV tracking entirely rather than throttle it. It was
-simultaneously the largest cost driver (52% of total SGO volume overall, 78% of July's
-volume specifically — accelerating, not flat) and had no demonstrated predictive
-value. Keep the three scheduled pipeline runs unchanged as the sole remaining SGO call
-path.
+### **Decision: Replace the Fixed 4-Leg, +400/+700-Banded Combinatorial Search With a 4-6 Leg, +400-Floor-Only Greedy Selector**
 
-**Validation methodology worth noting:** the Claude Code investigation independently
-re-derived the CLV/scheduled-run volume split by joining against
-`mlb_pending_lineup_checks.check_type` directly, rather than trusting the hour-bucket
-estimate that scoped the work. This caught a real measurement artifact — a spike
-originally read as "scheduled-run" traffic on June 16 (150 entities) was actually a
-backlog of June 12 + June 15 CLV checks that queued up while the drain cron was down,
-then fired in a single catch-up burst. Excluding that artifact, the final projection
-(18 clean days: avg 36 entities/day, peak 45/day) is materially tighter and more
-trustworthy than the pre-implementation estimate would have supported on its own.
+**Background — the "math problem" hypothesis, tested before acting on it.** The old builder (`src/engine/parlay_builder.py`) sorted the eligible pool by `composite_score` and ran a branch-and-bound search for exactly 4 legs whose combined odds fell inside +400–+700. The concern raised: forcing a specific payout band could regularly require substituting a lower-scored, higher-odds leg for a better-scored, lower-odds one purely to fit the band — sacrificing leg quality for payout shape.
 
-**Implementation:** `main.py` (`schedule_clv_checks()` call commented out, not
-deleted, inside `log_slate_start_times()`), `src/apis/lineup_confirmation.py` (the
-`check_type='clv'` drain branch marks any already-queued rows `done` with an
-explanatory note instead of calling SGO). `src/apis/clv_tracker.py` untouched but
-uncalled. Historical `closing_odds` data preserved. Deployed as commit `d3a642c`, July
-7, 2026.
+**This was tested directly against real data before any code changed, not assumed:**
+- Ranked eligible legs (coverage ≥65%, odds -250/+150) purely by `composite_score` for each of the last 21 days and computed what the top-4's combined odds would be, with zero odds-engineering.
+- **Result: the top-4-by-score combination cleared the old +400 floor on only 3 of 21 days (14%).** The other 18 days, the single best 4-leg combination the pool contained would have priced below +400 — meaning the old builder was structurally guaranteed to reach past its own top picks on the large majority of days.
+- Confirmed the specific mechanism with a live before/after run against the real July 7 pool: the old builder's top parlay used Rafaela/Walker/Gelof/Turner (composite scores 77.9/77/76.2/74.9, +405) — dropping Abreu (composite 75.9, higher than Turner) specifically because including both would have pushed the 4-leg combination past +700 or, with a different 4th leg, left it short of +400. There was no way to include both of the two best remaining legs at exactly 4 legs and land in the band.
 
-**Projected post-removal usage:** ~1,080/month average, ~1,350/month worst case — both
-comfortably under the 2,500/month free-tier cap (46% headroom at worst case), enabling
-cancellation of the $149/month Pro subscription. **Note: the account-level
-cancellation itself is a manual action outside the codebase and had not been confirmed
-completed as of this session — the code change alone does not reduce cost until the
-SGO subscription is actually downgraded.**
+**Leg-count fix tested the same way, not assumed:**
+- Top-4 pure-quality picks cleared +400 on 3/21 days (14%).
+- **Top-5 pure-quality picks cleared +400–+700 naturally on 17/21 days (81%)**, with no odds engineering at all.
+- Top-6 pure-quality picks badly overshot the old +700 ceiling on nearly every day (800–1,500+) — 6 was too many, 4 was too few, 5 was close to a natural sweet spot.
+- Sanity-checked against actual historical outcomes (not just odds math): a pure top-4/top-5 pick would have hit as a full parlay on 4/21 and 3/21 days respectively (19.0%/14.3%) — in the same range as actual production's 17.5% over the identical window. Removing the payout-band constraint did not cost win rate in this sample.
 
-**Open item, not resolved:** April and May 2026 both show elevated non-scheduled-run
-SGO traffic that predates CLV entirely (CLV didn't exist until June 12). Not
-identified or investigated this session — doesn't threaten the current projection
-since it isn't part of what's still running, but flagged in case elevated volume
-recurs post-removal.
+**Decision:** eliminate the +700 ceiling entirely. Keep a +400 floor. Replace the fixed 4-leg requirement with a 4-6 leg range. Leave the max-2-legs-per-game and one-leg-per-player-per-parlay constraints unchanged.
+
+**Implementation.** `src/engine/parlay_builder.py`'s branch-and-bound search (recursive, with `MAX_CANDIDATES`/`TIMEOUT_SECS` bookkeeping, upper/lower bound pruning via suffix-sorted decimal odds, and post-hoc deduplication across candidates — roughly 180 lines) was replaced with a much simpler greedy selector: sort the eligible pool by `composite_score` descending, walk it applying the existing per-game/per-player constraints, and stop as soon as both (a) at least `MIN_LEGS` (4) legs are selected and (b) the running combined odds clears `MIN_PARLAY_ODDS` (+400) — only continuing past 4 legs when the floor isn't cleared yet, capped at `MAX_LEGS` (6). If the best 6 available legs still don't clear +400, that parlay slot produces nothing, matching the old "insufficient pool" behavior. `TOTAL_LEGS` is retained as a backward-compatible alias for `MIN_LEGS`, since `src/apis/lineup_confirmation.py` imports it for a "do we have enough legs to attempt a CLR rebuild" check. Both the shadow pipeline (`run_enriched_pipeline.py`) and CLR rebuilds (`lineup_confirmation.py`) call this same `build_parlays()` function, so the fix applies to all three call sites with no separate changes needed anywhere else.
+
+**Validated against real data before deployment:** re-ran old vs. new builder logic against the identical real July 7 pool (62 eligible legs). New Parlay 1 includes both Abreu and Turner (5 legs, +661) rather than choosing between them — the exact substitution the redesign targeted no longer happens.
+
+**Known gap:** a standalone 7-case regression test (4-6 leg range, floor enforcement, no ceiling, per-game/per-player constraint preservation) validated the rewrite during the build session but was run from an ad hoc `/tmp` script and never committed — it no longer exists. This is the single largest behavioral change in the project's history and currently has zero persisted regression coverage. Flagged as a high-priority Session 19 item.
+
+**Also known gap:** `scripts/run_backtest.py` was run against the new builder post-deployment and confirmed it doesn't crash, but its existing variants (EV-sort, slot gate) don't test leg-count/odds-floor logic specifically. The actual performance case for this redesign rests on the pre-deployment day-level analysis above, not a proper backtest. A live-data performance recheck (the same style as the Session 16 slot-gate recheck) is pending once roughly a week of data exists under the new logic.
+
+---
+
+## Manual Parlay Dashboard (Session 18)
+
+### **Decision: Build a Human-in-the-Loop Parlay Tool on the Same Data, Not a Replacement for Automation**
+
+**Background.** Alongside the builder redesign, the operator raised a broader concern: low confidence that the automated agent alone could reliably select the best legs, and interest in a manual, data-backed selection tool as either a permanent approach or an interim one while the automated system's track record is rebuilt. The recommendation made and adopted: don't choose between automation and manual selection — build both. The builder redesign fixes a scoped, evidenced architectural flaw; the manual dashboard gives immediate visibility and control on the same underlying data, and creates a real comparison point (manual vs. automated win rate over time) that didn't exist before.
+
+**Design principle:** the dashboard is a second, independent view onto data the automated pipeline already produces — it does not introduce a separate query path, a separate scoring path, or any new schema. Everything shown is exactly what `mlb_scored_legs` (and, where available, `mlb_scored_legs_enriched`) already contains.
+
+**Data layer.** `get_manual_legs(run_date)` in `src/utils/db.py` reuses the same dedup logic as the existing `get_scored_legs()` and LEFT JOINs `mlb_scored_legs_enriched` by `odd_id` for `pitcher_vulnerability`, `park_factor`, and `blended_era_rank` — nullable, since the shadow pipeline may not have scored a given leg yet. No new table, no migration.
+
+**Routes.** `src/web/server.py` adds `GET /manual` (the page), `GET /api/manual/legs` (data, auth required), and `POST /api/manual/parlay` (submit, auth required). The submit handler re-fetches all leg data server-side from `mlb_scored_legs` by `odd_id` rather than trusting anything the client sends except *which* `odd_id`s were picked — odds, scores, and coverage used in the saved parlay can't be spoofed from the browser. Validates 4-6 legs, no duplicate batter, max 2 legs per `game_pk` — the same structural constraints as the automated builder.
+
+**Persistence and resolution.** Saves via the existing `save_parlay_recommendations_v2()` helper with a new, distinct `source='manual_pick'` value — separate from the pre-existing `'manual'` source, which is the "Regenerate Now" button (still runs the algorithm, just on demand) and predates this session; conflating the two would have made manual-vs-automated comparison meaningless. Before building this, confirmed by reading `parlay_outcome_resolver.py` directly that resolution has **no `source` filter at all** — it resolves any row with `outcome='pending'` for the given `run_date`. This means manual picks resolve automatically in the existing 9am run with zero resolver changes required — verified by reading the code, not assumed.
+
+**+400 floor applied to manual picks: deliberately non-blocking.** The first implementation hard-rejected manual submissions below +400 combined odds. On review, this was reversed — hard-blocking a human's confident 4-leg pick that happens to price at, say, +320 would reintroduce, for human judgment, the exact problem the builder redesign exists to fix for the algorithm: forcing a payout target to override a genuine quality judgment. The leg-count range (4-6) stays a hard requirement, since that's structural and keeps manual and automated parlays comparable; the odds floor became a non-blocking `meets_floor` boolean surfaced in the UI instead.
+
+**Iteration history — each fix driven by actual review or live testing, not speculation:**
+1. **Auth hardening, done proactively during first build:** the auth probe was tightened to grant access only on an exact HTTP 200, rather than "anything but 401" — the looser version would have let a request through on, e.g., a transient 500.
+2. **Decimal/JSON serialization bug**, surfaced as a false "wrong password" report. Root-caused by directly querying the live database with the exact SQL `get_manual_legs()` uses (confirming the query itself was fine) before concluding the bug was client-side — `pitcher_era`/`pitcher_k9`/`pitcher_whip`/`pitcher_vulnerability`/`blended_era_rank` are Postgres `NUMERIC` columns, returned by psycopg2 as Python `Decimal`, which `json.dumps()` cannot serialize by default. The resulting 500 was — correctly, per the auth hardening above — being displayed as "Authentication failed," masking the real bug. Fixed with `json.dumps(legs, default=str)`, matching the convention already used elsewhere in the file, plus differentiated error messaging so a future non-auth failure won't look like a login problem again.
+3. **Field-name mismatches**, found by reading the live file and cross-checking real DB field names rather than guessing at the fix: the UI referenced `best_line`/`best_odds`/`opposing_pitcher_name`, but `get_manual_legs()` returns raw `mlb_scored_legs` columns named `line`/`odds`/`pitcher_name` (the `best_*`/`opposing_pitcher_name` naming exists elsewhere in the codebase, on in-memory pipeline dicts before persistence and on `mlb_parlay_legs_v2`, but not on the source table this dashboard reads from). Six call sites had the bug, not just the visible table.
+4. **Sticky table header — two attempts.** First attempt used a JS function measuring `header.offsetHeight` at render time and setting the header's `top` accordingly; this made the visual bug *worse* (a partially-clipped row became visible under the header, indicating overlap, not just misalignment), which correctly triggered abandoning the tuning approach rather than trying a third pixel value. The JS-measured-offset method itself was diagnosed as inherently fragile (timing- and content-dependent). Second attempt restructured the page layout entirely: `body` became a `height: 100vh` flex column, `header` took its natural height, and `.table-wrap` became its own bounded, independently-scrolling container (`flex: 1; overflow-y: auto`) — making `thead { position: sticky; top: 0 }` correct by construction, with no measurement or JS involved. Neither Claude Code nor Claude (chat) had a way to render or screenshot this fix in-session to confirm visually; given the low risk of a pure CSS/layout change, the operator was asked to push and verify against the live page directly rather than block on a third guess.
+
+**Open item carried to Session 19:** the final structural sticky-header commit's hash and push status were not explicitly confirmed in-session — the operator's "Looks better" strongly implies it was pushed and checked live, but this needs a `git log` confirmation first thing next session.
 
 ---
 
 ## Lessons Learned
 
-*(Items 1-42 unchanged from prior version — see full list in git history / prior document version.)*
+*(Items 1-49 unchanged from prior version — see full list in git history / prior document version.)*
 
-43. **A contradicted hypothesis that repeats on a second, independent sample is confirmed, not re-flagged for later.** The June 12 slot-gate finding (66.7% vs 61.2%) was treated as "monitor, don't act" at the time — reasonable with one data point. The July 2 re-test (63.3% vs 60.0% hits/over; 73.7% vs 67.8% SO/over) showed the same direction on both props independently, three weeks apart. Two independent confirmations of the same contradiction is sufficient grounds to act, not to keep monitoring indefinitely.
+50. **A concentrated, thin sample can flip its own conclusion with more data, and the concentration itself can be the more useful finding.** hits/under's 14-day dedup read (36.4% WR, n=11, dominated by two repeat players) looked like a real problem. Extending to 35 days reversed it entirely (57.9% WR, n=57). The root cause underneath both reads was the same either way — only 1-3 players/day clear the 65% coverage floor for this prop — which turned out to be the actually durable, actionable finding (pool scarcity), independent of which win-rate read was "right." When a sample is this thin, characterizing *why* it's thin is often more useful than trusting either read of the win rate.
 
-44. **A soft scoring penalty and a hard CLR rebuild trigger can share the same flawed assumption without either being individually flagged as "the big one."** The -8 penalty looked like a minor, bounded scoring adjustment. Separately, the OUT_OF_RANGE→CLR wiring looked like reasonable lineup-safety logic. Neither was obviously the primary problem in isolation — it took joining `superseded_reason` to `lineup_check_status` across all voided parlays to see that 76.9% of voids involved the same contradicted assumption driving both. When two independent-seeming mechanisms trace back to one shared premise, evaluate them together.
+51. **A "verified via code review" claim on a visual bug is not verification.** The sticky-header bug was declared fixed twice via CSS/JS reasoning alone, and was wrong or worse both times — the second attempt's fix produced a *more* broken result (an overlapping, clipped row) than the first. Neither Claude Code nor Claude (chat) had rendering tools available in either case; both correctly said so explicitly on request, rather than asserting confidence they didn't have — but the pattern of reasoning-only "verification" on a rendering bug should have been questioned sooner, ideally by pushing to the real environment after the first failed attempt instead of the second.
 
-45. **A leg-level scoring comparison and a parlay-level win-rate comparison can point in opposite directions without either being wrong.** Shadow scored legs better than production on identical props (+4.9pp, both props) while producing a lower blended parlay win rate (16.5% vs 30.0%). Both facts were true simultaneously because parlay win probability is closer to a product than an average of constituent leg win rates — a weaker-but-still-profitable prop at high volume in the pool will drag down the blend even when every individual signal in the system is working correctly. Diagnose at the level the question is actually about: leg quality and parlay-construction strategy are different questions with different answers.
+52. **Testing a hypothesis against real data before writing any code is cheaper than debugging the alternative afterward.** The entire parlay-builder redesign — a large rewrite touching leg-count logic, odds targeting, and three call sites — was preceded by a single, cheap SQL-and-arithmetic check (top-4-by-score clears +400 on 14% of days) that either would have validated or killed the hypothesis before any code was written. It validated it, and the same technique (test the proposed fix's leg count against real data before building it) found the actual right leg count (5, not the originally-proposed "4-6 as a range with no further guidance") in the same pass.
 
-46. **A diagnostic column that exists in the schema is not the same as a diagnostic column that's populated.** `void_reason` was assumed to be the fastest path to root-causing the void spike, but was NULL for 97% of voided legs. The `superseded_reason` + `lineup_check_status` join was a reliable substitute this time, but the gap itself is worth fixing so the next investigation doesn't need a workaround.
+53. **A fix for one failure mode (a security hole) can create a new failure mode (misleading diagnostics) elsewhere, and both can be correct decisions in isolation.** Tightening the auth check to require an exact 200 was the right fix for a real hole (a 500 previously granted access). But it also meant every future non-auth 500 would display as "wrong password" until the Decimal bug surfaced this directly. Neither decision was wrong; the interaction between them just wasn't visible until it was tested live. Worth deliberately asking "what does this failure mode look like to the user" whenever tightening an error-handling boundary, not just "does this close the hole."
 
-47. **A cost-cutting decision and a value question should be answered together, not sequentially.** The initial framing of the SGO problem was purely "how do we fit under the free-tier cap" — which would have led to either a once-daily fetch or a scoping fix to CLV's per-call cost. Testing whether CLV was adding predictive value *before* deciding how to cut it changed the decision entirely: rather than optimizing a feature with no demonstrated value, it was removed outright. Cost and value are different questions, and answering only the cost question risks preserving something worth cutting.
-
-48. **An aggregate statistical comparison can look supportive of a hypothesis while every underlying subgroup contradicts or is neutral toward it.** The CLV win-rate comparison (57.0% vs. 55.4% beating-the-close) looked like a positive, if modest, confirmation of CLV theory. Splitting by prop showed two of four props actually reversed the direction, and none were individually significant. This is the same failure mode as Lesson 45 (leg-level vs. parlay-level) in a different form: always check whether an aggregate pattern survives disaggregation before treating it as evidence.
-
-49. **Validating a pre-implementation estimate against live data during implementation caught a real error, not just noise.** The hour-bucket estimate used to scope the CLV removal work (~75% of volume) was directionally right but numerically off — the actual figure (52% overall, 78% of July) differed enough to matter, and was only caught because the implementation step re-derived the split from a proper join rather than trusting the estimate that motivated the work. Estimates that motivate a decision should be re-verified with better data during implementation, not assumed correct because they pointed in the right direction.
+54. **Applying the same principle consistently sometimes means reversing your own recent decision.** The entire justification for the builder redesign was "don't force a payout target to override leg quality." Two exchanges later, the manual dashboard's first draft did exactly that to human picks (hard-blocking anything below +400). Recognizing the inconsistency and reversing it (floor becomes advisory, not blocking) took applying the same standard already established minutes earlier, not new analysis.
 
 ---
 
 ## Future Considerations
 
-*(Items 1-11 carried over from Session 15 — see prior version. New items below.)*
+*(Items 1-11 carried over from Session 15 — see prior version. Items 12-17 carried from Session 16/17. Updated/new items below.)*
 
-### **12. TB/under Parlay Construction Strategy (Session 16, ties to item 5 above)**
-Before promoting TB/under to production parlays (previously targeted ~July 9), decide on a construction approach that avoids the combinatorial drag documented in this session — segregated pools vs. quality-weighted selection vs. accepting the tradeoff. Can be simulated against existing shadow leg data without new signal work.
+### **12. TB/under Parlay Construction Strategy — Rerun Required Under New Builder (Session 16, updated Session 18)**
+The original combinatorial-drag numbers (with/without TB leg) were generated entirely under the old fixed-4-leg builder. Rerun this analysis under the new 4-6-leg, floor-only builder before any promotion decision — the tradeoff shape may no longer be the same.
 
-### **13. Fix void_reason Logging Gap (Session 16)**
-`void_reason` on `mlb_scored_legs` is NULL for 97% of voided legs. Investigate why the resolver isn't writing to this column and fix, so future void investigations don't require the `superseded_reason`/`lineup_check_status` workaround.
+### **13. Fix void_reason Logging Gap (Session 16, still not done)**
+Unchanged from prior version.
 
-### **14. Re-evaluate Batting Order Slot Data With an Unbiased Sample (Post-Removal)**
-Now that the -8 penalty no longer influences which legs get selected into parlays, a future session should re-pull the slot-level win rate breakdown with a larger, unbiased sample to see whether a real pattern exists (in either direction) or whether the June 12 / July 2 findings were themselves noise from a still-limited sample.
+### **14. Re-evaluate Batting Order Slot Data With an Unbiased Sample (Post-Removal, still pending)**
+Unchanged from prior version.
 
-### **15. Confirm Origin of Commit 85b5bd5**
-Landed on `origin/master` between Session 15 (`9eed486`) and Session 16 without a corresponding session doc entry. Rebase was clean; contents not yet traced.
+### **15. Confirm Origin of Commit 85b5bd5 — RESOLVED Session 18**
+Confirmed via direct inspection: docs-only commit (`Update SESSION_HANDOFF.md`), no code content. No further action needed. Removed from active pending items.
 
-### **16. Investigate Unexplained April/May SGO Traffic (Session 17)**
-Elevated non-scheduled-run SGO volume in April/May 2026 predates the CLV layer (which
-didn't exist until June 12) and was never identified. Not urgent since it isn't part
-of what's still running post-CLV-removal, but worth investigating if SGO volume
-unexpectedly climbs again.
+### **16. Investigate Unexplained April/May SGO Traffic (Session 17, still not investigated)**
+Unchanged from prior version.
 
-### **17. Add mlb_sgo_request_log and sgo_request_log to SUPABASE_SCHEMA_REFERENCE.md (Session 17)**
-Both tables were discovered mid-session via direct table listing, not via the schema
-doc, which is supposed to be authoritative. Added in this session's schema reference
-update — confirm it stays current if the request-logging schema changes.
+### **17. Add mlb_sgo_request_log and sgo_request_log to SUPABASE_SCHEMA_REFERENCE.md — DONE (Session 17)**
+Confirmed present in the current schema reference doc.
+
+### **18. Commit a Persisted Regression Test Suite for parlay_builder.py (New, Session 18, High Priority)**
+The greedy selector rewrite's 7-case validation was run ad hoc and never committed. Build `tests/test_parlay_builder.py` covering: 4-6 leg range enforcement, floor clearance without a ceiling, per-game cap, per-player cap, and the "insufficient pool" no-op case. `pytest` is not currently installed in the venv.
+
+### **19. Live-Data Performance Recheck of the New Builder (New, Session 18, High Priority)**
+Once roughly a week of production data exists under the floor-only/4-6-leg logic, run the same style of pre/post comparison used for the Session 16 slot-gate recheck — parlay win rate, leg-count distribution, void rate — against the old builder's equivalent window.
+
+### **20. SO/over Pool-Composition Softening (New, Session 18, Medium Priority)**
+The composite score's K/9-rank differentiation between selected and non-selected SO/over legs nearly vanished coincident with the July 2 slot-gate fix. Unclear if this is a real pool-composition shift or noise from ~1 week of data. Recheck with more volume.
 
 ---
 
-**Architecture Status:** ✅ STABLE
-**Last Major Change:** July 7, 2026 (CLV tracking layer removed — SGO calls scoped to 3 scheduled runs only)
-**Next Architecture Review:** Post-deploy SGO volume check (within days of Jul 7) / July 5-6, 2026 (carried-over slot-gate fix volume recheck, overdue) / ~July 9 (TB/under promotion + construction strategy, K/9/WHIP re-evaluation)
+**Architecture Status:** ✅ STABLE (one open verification item — see Session 18 Manual Parlay Dashboard section)
+**Last Major Change:** July 8, 2026 — parlay builder redesigned from fixed-4-leg/banded-odds to 4-6-leg/floor-only; manual parlay dashboard shipped
+**Next Architecture Review:** Confirm sticky-header fix commit + complete manual-pick end-to-end test (both Session 19, first priority) / live-data performance recheck of the new builder (~1 week out) / TB/under construction-strategy rerun under the new builder (before any promotion decision)
