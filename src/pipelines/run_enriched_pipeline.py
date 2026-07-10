@@ -154,9 +154,12 @@ def _log_enriched_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> 
     """
     Upsert enriched scored legs to mlb_scored_legs_enriched.
 
-    Mirrors the schema of mlb_scored_legs plus the 6 enriched columns:
+    Mirrors the schema of mlb_scored_legs plus enriched columns:
       coverage_vs_opponent, games_vs_opponent, park_factor,
-      park_adjustment, blended_era_rank, recent_form_rank.
+      park_adjustment, blended_era_rank, recent_form_rank,
+      stack_bonus_applied, pitcher_vulnerability,
+      matchup_adj, matchup_era_adj, matchup_whip_adj,
+      matchup_k9_adj, matchup_batter_adj.
     """
     if not legs:
         return 0
@@ -205,6 +208,12 @@ def _log_enriched_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> 
             # Stack bonus columns
             leg.get("stack_bonus_applied", False),
             leg.get("pitcher_vulnerability"),
+            # Matchup adjustment debug columns (Session 19 follow-up)
+            leg.get("matchup_adj"),
+            leg.get("matchup_era_adj"),
+            leg.get("matchup_whip_adj"),
+            leg.get("matchup_k9_adj"),
+            leg.get("matchup_batter_adj"),
         ))
 
     if not rows:
@@ -226,7 +235,8 @@ def _log_enriched_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> 
              pitcher_era_rank, pitcher_k9_rank, pitcher_whip_rank,
              coverage_vs_opponent, games_vs_opponent, park_factor, park_adjustment,
              blended_era_rank, recent_form_rank,
-             stack_bonus_applied, pitcher_vulnerability)
+             stack_bonus_applied, pitcher_vulnerability,
+             matchup_adj, matchup_era_adj, matchup_whip_adj, matchup_k9_adj, matchup_batter_adj)
         VALUES %s
         ON CONFLICT (run_date, odd_id) DO UPDATE
             SET composite_score        = EXCLUDED.composite_score,
@@ -238,7 +248,12 @@ def _log_enriched_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> 
                 recent_form_rank       = EXCLUDED.recent_form_rank,
                 in_parlay              = EXCLUDED.in_parlay,
                 stack_bonus_applied    = EXCLUDED.stack_bonus_applied,
-                pitcher_vulnerability  = EXCLUDED.pitcher_vulnerability
+                pitcher_vulnerability  = EXCLUDED.pitcher_vulnerability,
+                matchup_adj            = EXCLUDED.matchup_adj,
+                matchup_era_adj        = EXCLUDED.matchup_era_adj,
+                matchup_whip_adj       = EXCLUDED.matchup_whip_adj,
+                matchup_k9_adj         = EXCLUDED.matchup_k9_adj,
+                matchup_batter_adj     = EXCLUDED.matchup_batter_adj
         """,
         rows,
     )

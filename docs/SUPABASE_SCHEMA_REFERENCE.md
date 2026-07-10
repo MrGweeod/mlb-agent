@@ -1,5 +1,5 @@
 # Supabase Schema Reference — MLB Parlay Agent
-**Last Updated:** 2026-07-10 (Session 19 — no schema/column changes; added notes on Decimal coercion in enriched scorer and the batter stat fields consumed from MLB-StatsAPI gameLog)
+**Last Updated:** 2026-07-10 (Session 19 follow-up — added 5 matchup debug columns to `mlb_scored_legs_enriched`: `matchup_adj`, `matchup_era_adj`, `matchup_whip_adj`, `matchup_k9_adj`, `matchup_batter_adj`)
 **Source:** Exported from Supabase information_schema + verified against migration logs
 
 This file is the authoritative schema reference. Always read this before writing SQL queries.
@@ -216,6 +216,13 @@ Shadow pipeline scored legs — mirrors `mlb_scored_legs` base columns plus enri
 | recent_form_rank | numeric | |
 | stack_bonus_applied | boolean | default false. True if leg received offense stack bonus (Session 11). Confirmed live and firing Session 18: 64.4% WR when true (n=101) vs 58.8% when false (n=2,153) |
 | pitcher_vulnerability | numeric | ⚠️ Decimal via psycopg2. 0.0–1.0 composite score. 1.0 = weakest pitcher. Rank convention: rank 1 = best across ERA/K9/WHIP (Session 11) |
+| matchup_adj | numeric | Net matchup adjustment applied to `composite_score` (sum of applicable factor adjustments, after per-prop cap). NULL when no matchup formula applies to this prop type. Added Session 19 follow-up. |
+| matchup_era_adj | numeric | ERA component of matchup adjustment. Non-NULL for hits/over, hits/under, totalBases/under only. Formula: `((pitcher_era − 4.00) / 1.50) × max_era_weight`, clamped. NULL for strikeouts/over and all other props. |
+| matchup_whip_adj | numeric | WHIP component of matchup adjustment. Non-NULL for hits/over, hits/under, totalBases/under only. Formula: `((pitcher_whip − 1.25) / 0.25) × max_whip_weight`, clamped. NULL for strikeouts/over and all other props. |
+| matchup_k9_adj | numeric | K/9 component of matchup adjustment. Non-NULL for strikeouts/over and totalBases/under only. Formula: `((pitcher_k9 − 8.25) / 2.75) × max_k9_weight`, clamped. NULL for hits/over, hits/under, and all other props. |
+| matchup_batter_adj | numeric | Batter-stat component of matchup adjustment. Non-NULL for totalBases/under only (requires ≥ 50 PA via MLB-StatsAPI gameLog). NULL for all other props. |
+
+**⚠️ NULL semantics for matchup columns:** NULL means "this factor does not apply to this prop type," not "computed as zero." A `matchup_era_adj` of NULL on a strikeouts/over row is correct. A value of 0.0 would mean the ERA was exactly at midpoint. These are different things — do not treat NULL as zero in analysis.
 
 ---
 
@@ -528,12 +535,13 @@ ORDER BY legs DESC;
 | 2026-06-12 | `mlb_scored_legs_enriched` | Added: `stack_bonus_applied`, `pitcher_vulnerability` |
 | 2026-07-08 | *(none — no migrations this session)* | Session 18 added a new **value** (`'manual_pick'`) to the existing `mlb_parlay_recommendations_v2.source` free-text column — not a schema change, no migration needed. `num_legs` on both `_v2` and `_enriched` recommendation tables now legitimately ranges 4-6 (was always 4) — also not a schema change, that column was always a plain integer. |
 | 2026-07-10 | *(none — no migrations this session)* | Session 19 changes are application-layer only: scratch handler rewrite (logic changes in `lineup_confirmation.py` only, no new DB columns), shadow scorer rebuild (enriched scorer reads existing `pitcher_era`/`pitcher_whip`/`pitcher_k9` raw values from `mlb_scored_legs` — confirmed present since May 12 with 11k+ rows — and adds in-memory batter stats from the MLB-StatsAPI gameLog; no new DB columns). |
+| 2026-07-10 | `mlb_scored_legs_enriched` | Added 5 matchup debug columns: `matchup_adj`, `matchup_era_adj`, `matchup_whip_adj`, `matchup_k9_adj`, `matchup_batter_adj` (all NUMERIC). Migration: `sql/matchup_debug_columns_migration.sql`. Session 19 follow-up — these were computed in-memory since Session 19 but silently dropped before the INSERT (column list never updated). Now persisted to enable per-factor attribution analysis. |
 
 ---
 
 ## Schema Last Verified
 - `mlb_scored_legs`: 2026-07-10 (Session 19 — no changes; confirmed `pitcher_era`/`pitcher_whip`/`pitcher_k9` raw NUMERIC columns populated since May 12; MLB-StatsAPI gameLog batter field names confirmed: `atBats`, `hits`, `baseOnBalls`, `strikeOuts`, `plateAppearances`, `hitByPitch` — these are transient/in-memory, not stored in DB)
-- `mlb_scored_legs_enriched`: 2026-07-10 (Session 19 — no schema changes; enriched scorer now writes `matchup_adj`, `matchup_era_adj`, `matchup_whip_adj`, `matchup_k9_adj`, `matchup_batter_adj` fields into the enriched row's JSONB/column set — confirm actual column availability; Decimal coercion note: `float(value)` applied inside `_linear_adj()` to handle psycopg2 returning NUMERIC columns as Python `Decimal`)
+- `mlb_scored_legs_enriched`: 2026-07-10 (Session 19 follow-up — 5 matchup debug columns added and confirmed present: `matchup_adj`, `matchup_era_adj`, `matchup_whip_adj`, `matchup_k9_adj`, `matchup_batter_adj` — all NUMERIC, written by `_log_enriched_legs()`, NULL when not applicable to the prop type. Decimal coercion note: `float(value)` applied inside `_linear_adj()` to handle psycopg2 returning NUMERIC columns as Python `Decimal`.)
 - `mlb_parlay_recommendations_v2`: 2026-07-08 (Session 18 — `source` values documented including `'manual_pick'`; `num_legs`/`total_odds` behavior note added)
 - `mlb_parlay_legs_v2`: 2026-07-10 (Session 19 — `outcome='void'` now applied to individual scratched legs when the reduce-path is taken; they remain as rows, not deleted, so `num_legs`/`total_odds` can be recalculated off survivors)
 - `mlb_parlay_recommendations_enriched`: 2026-07-08 (Session 18 — `num_legs` behavior note added)

@@ -271,3 +271,78 @@ class TestFinalClamp:
         result = enriched_scorer._calculate_enriched_score(leg, 2026, {}, {}, None, None)
         assert result is not None
         assert result["composite_score"] >= 5.0
+
+    def test_matchup_debug_fields_present_in_result(self, monkeypatch):
+        """All five matchup debug fields must be present in _calculate_enriched_score output."""
+        from src.engine import enriched_scorer
+        monkeypatch.setattr(enriched_scorer, "_compute_blended_era_rank", lambda *a, **kw: (None, None))
+        monkeypatch.setattr(enriched_scorer, "get_batter_game_log", lambda *a, **kw: [])
+        leg = self._make_leg(75.0, "hits", "over")
+        result = enriched_scorer._calculate_enriched_score(leg, 2026, {}, {}, None, None)
+        assert result is not None
+        for field in ("matchup_adj", "matchup_era_adj", "matchup_whip_adj",
+                      "matchup_k9_adj", "matchup_batter_adj"):
+            assert field in result, f"Missing field: {field}"
+
+    def test_matchup_debug_nulls_for_inapplicable_props(self, monkeypatch):
+        """Fields not applicable to a prop type must be None, not zero."""
+        from src.engine import enriched_scorer
+        monkeypatch.setattr(enriched_scorer, "_compute_blended_era_rank", lambda *a, **kw: (None, None))
+        monkeypatch.setattr(enriched_scorer, "get_batter_game_log", lambda *a, **kw: [])
+        # hits/over: only ERA and WHIP apply; k9_adj and batter_adj should be None
+        leg = self._make_leg(75.0, "hits", "over")
+        result = enriched_scorer._calculate_enriched_score(leg, 2026, {}, {}, None, None)
+        assert result["matchup_k9_adj"]    is None, "k9_adj should be None for hits/over"
+        assert result["matchup_batter_adj"] is None, "batter_adj should be None for hits/over"
+        assert result["matchup_era_adj"]   is not None
+        assert result["matchup_whip_adj"]  is not None
+
+    def test_matchup_debug_so_over_k9_only(self, monkeypatch):
+        """strikeouts/over: only k9_adj should be non-None; ERA/WHIP/batter fields None."""
+        from src.engine import enriched_scorer
+        monkeypatch.setattr(enriched_scorer, "_compute_blended_era_rank", lambda *a, **kw: (None, None))
+        monkeypatch.setattr(enriched_scorer, "get_batter_game_log", lambda *a, **kw: [])
+        leg = self._make_leg(75.0, "strikeouts", "over")
+        result = enriched_scorer._calculate_enriched_score(leg, 2026, {}, {}, None, None)
+        assert result["matchup_k9_adj"]    is not None
+        assert result["matchup_era_adj"]   is None, "ERA adj should be None for strikeouts/over"
+        assert result["matchup_whip_adj"]  is None, "WHIP adj should be None for strikeouts/over"
+        assert result["matchup_batter_adj"] is None
+
+
+# ── INSERT/tuple column-count sync check ─────────────────────────────────────
+
+class TestInsertTupleSync:
+    """
+    Guard against silent positional mismatches in _log_enriched_legs().
+    Parses the INSERT column list and the rows.append tuple from the source
+    and asserts they contain the same number of entries.
+    """
+
+    def test_matchup_columns_in_insert_and_tuple(self):
+        """
+        Each of the 5 matchup debug columns must appear in both:
+          1. the INSERT INTO mlb_scored_legs_enriched column list, and
+          2. the rows.append((...)) value block.
+        A column missing from either location means silent data loss or a DB error.
+        """
+        import pathlib
+        src = pathlib.Path("src/pipelines/run_enriched_pipeline.py").read_text()
+
+        matchup_fields = [
+            "matchup_adj",
+            "matchup_era_adj",
+            "matchup_whip_adj",
+            "matchup_k9_adj",
+            "matchup_batter_adj",
+        ]
+
+        # Both the INSERT column name and the leg.get("...") call must be present
+        for field in matchup_fields:
+            assert field in src, (
+                f'"{field}" not found anywhere in run_enriched_pipeline.py'
+            )
+            assert f'leg.get("{field}")' in src, (
+                f'leg.get("{field}") not in rows.append tuple — '
+                f"column will be silently dropped before the INSERT"
+            )
