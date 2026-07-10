@@ -15,7 +15,7 @@ Batting order format (confirmed against live statsapi responses 2026-06-11):
 from __future__ import annotations
 
 import traceback
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import statsapi
@@ -179,20 +179,22 @@ def run_lineup_check(row: dict) -> str:
     scratched_count, oor_count = _count_bad_states(run_date_str, game_pks)
     affected_parlay_ids = _find_affected_parlays(run_date_str, game_pks)
 
+    clr_result: dict = {}
     if affected_parlay_ids:
         print(
             f"  [lineup_check] {len(affected_parlay_ids)} parlay(s) contain SCRATCHED"
             f" legs — triggering resolution"
         )
         try:
-            run_confirmed_lineup_resolution(run_date_str, affected_parlay_ids)
+            clr_result = run_confirmed_lineup_resolution(run_date_str, affected_parlay_ids)
         except Exception as _res_err:
             print(f"  [lineup_check] resolution failed (non-fatal): {_res_err}")
 
+    resolved_count = clr_result.get("rebuilt", 0) + clr_result.get("kept", 0)
     note = (
         f"{len(game_pks)} games, {legs_annotated} legs annotated, "
         f"{scratched_count} scratched, {oor_count} out_of_range, "
-        f"{len(affected_parlay_ids)} parlay(s) resolved"
+        f"{resolved_count} parlay(s) resolved"
     )
     print(f"  [lineup_check] {note}")
     return note
@@ -402,28 +404,31 @@ def _find_affected_parlays(run_date_str: str, game_pks: list[int]) -> list[int]:
 
 # ── Resolution run type ───────────────────────────────────────────────────────
 
-def run_confirmed_lineup_resolution(run_date_str: str, affected_parlay_ids: list[int]) -> None:
+def run_confirmed_lineup_resolution(run_date_str: str, affected_parlay_ids: list[int]) -> dict:
     """
-    Rebuild parlays whose legs contain a SCRATCHED player.
+    Resolve parlays whose legs contain SCRATCHED player(s).
 
-    BATTING_ORDER_OUT_OF_RANGE is annotation-only as of Jul 2, 2026 — it no
-    longer triggers a rebuild.  Only SCRATCHED (player absent from lineup) is
-    a factual ground for replacement.
+    BATTING_ORDER_OUT_OF_RANGE is annotation-only (Jul 2, 2026) — only SCRATCHED
+    triggers resolution.
 
-    1. Build replacement pool: today's UPCOMING scored legs that passed gates
-       and are LINEUP_CONFIRMED or MISSING_LINEUP_CONFIRMATION.
-    2. For each affected parlay: remove bad leg(s), rebuild via build_parlays().
-    3. Persist new parlays as source='confirmed_lineup_resolution'.
-    4. Mark superseded parlays void with superseded_by_batch_id + reason.
-    5. Log "pool too thin" and skip rather than ship a short parlay.
+    Scratch logic (Session 19):
+      • All remaining legs' games are >1 hr out  → rebuild replacement parlay.
+      • Any remaining leg's game is ≤1 hr out or started → reduce path:
+          – Drop scratched leg(s): mark them void in mlb_parlay_legs_v2.
+          – ≥3 survivors: update num_legs/total_odds, parlay stays pending.
+          – <3 survivors: void the whole parlay (SCRATCHED_NO_REBUILD).
+      • Second scratch on already-reduced parlay → same rule re-applied.
+      • superseded_by_batch_id is set ONLY when a replacement parlay was actually inserted.
+        Thin-pool and no-rebuild paths leave it NULL and use a distinct superseded_reason.
+
+    Returns dict: {rebuilt, kept, thin_pool, voided_no_rebuild}
     """
     from main import (
         POOL_MIN_COVERAGE,
         POOL_MIN_ODDS,
         POOL_MAX_ODDS,
-        generate_recommendations,
     )
-    from src.engine.parlay_builder import build_parlays
+    from src.engine.parlay_builder import build_parlays, TOTAL_LEGS
     from src.utils.sorting import sort_legs_by_game_time
     import pytz
 
@@ -435,8 +440,6 @@ def run_confirmed_lineup_resolution(run_date_str: str, affected_parlay_ids: list
     # ── Step 1: Build replacement pool from upcoming scored legs ─────────────
     conn = get_conn()
     cur  = conn.cursor()
-
-    # Upcoming = game has not started
     cur.execute(
         """
         SELECT *
@@ -454,12 +457,11 @@ def run_confirmed_lineup_resolution(run_date_str: str, affected_parlay_ids: list
     cur.close()
     conn.close()
 
-    # Apply production eligibility gates (coverage floor, odds cap)
     eligible_pool = []
     for leg in pool_rows:
-        direction   = (leg.get("direction") or "over").lower()
-        cov_floor   = 40.0 if direction == "under" else POOL_MIN_COVERAGE
-        comp        = leg.get("composite_score") or 0
+        direction = (leg.get("direction") or "over").lower()
+        cov_floor = 40.0 if direction == "under" else POOL_MIN_COVERAGE
+        comp      = leg.get("composite_score") or 0
         if comp < cov_floor:
             continue
         try:
@@ -468,29 +470,50 @@ def run_confirmed_lineup_resolution(run_date_str: str, affected_parlay_ids: list
             continue
         if not (POOL_MIN_ODDS <= odds_val <= POOL_MAX_ODDS):
             continue
-        # Bridge field names for build_parlays
         leg["best_odds"] = leg.get("odds")
         leg["best_line"] = leg.get("line")
         eligible_pool.append(leg)
 
-    # Mirror main.py production exclusion — totalBases legs are shadow-only
     eligible_pool = [l for l in eligible_pool if l.get("stat") != "totalBases"]
-
     print(f"[clr] Replacement pool: {len(eligible_pool)} eligible upcoming legs (totalBases excluded)")
 
-    # Fetch affected parlay details
+    # ── Step 2: Seconds until start for each game (DB-level, avoids TZ parsing) ─
+    conn = get_conn()
+    cur  = conn.cursor()
+    cur.execute(
+        """
+        SELECT DISTINCT game_pk,
+               EXTRACT(EPOCH FROM (game_start_time::timestamptz - now())) AS seconds_until_start
+        FROM mlb_scored_legs
+        WHERE run_date = %s
+          AND game_pk IS NOT NULL
+          AND game_start_time IS NOT NULL
+        """,
+        (run_date_str,),
+    )
+    game_seconds: dict[int, float] = {
+        int(r["game_pk"]): float(r["seconds_until_start"] or 0)
+        for r in cur.fetchall()
+    }
+    cur.close()
+    conn.close()
+
+    # ── Step 3: Fetch affected parlay details (include game_id/odds/outcome) ──
     conn = get_conn()
     cur  = conn.cursor()
     cur.execute(
         """
         SELECT pr.id, pr.rank, pr.batch_id,
                array_agg(json_build_object(
-                   'leg_id', pl.id,
-                   'player_id', pl.player_id,
-                   'player_name', pl.player_name,
+                   'leg_id',              pl.id,
+                   'player_id',           pl.player_id,
+                   'player_name',         pl.player_name,
                    'lineup_check_status', pl.lineup_check_status,
-                   'stat', pl.stat,
-                   'direction', pl.direction
+                   'stat',                pl.stat,
+                   'direction',           pl.direction,
+                   'game_id',             pl.game_id,
+                   'odds',                pl.odds,
+                   'outcome',             pl.outcome
                )) AS legs
         FROM mlb_parlay_recommendations_v2 pr
         JOIN mlb_parlay_legs_v2 pl ON pl.parlay_id = pr.id
@@ -505,59 +528,102 @@ def run_confirmed_lineup_resolution(run_date_str: str, affected_parlay_ids: list
 
     if not affected_parlays:
         print("[clr] No affected parlays found — nothing to resolve")
-        return
+        return {"rebuilt": 0, "kept": 0, "thin_pool": 0, "voided_no_rebuild": 0}
 
-    # New batch_id for this resolution run
     batch_id = f"clr_{run_date_str}_{now_et.strftime('%H%M')}"
 
-    rebuilt = 0
-    thin_pool = 0
+    rebuilt           = 0
+    kept              = 0
+    thin_pool         = 0
+    voided_no_rebuild = 0
+    ONE_HOUR_SECONDS  = 3600.0
     used_replacement_player_ids: set[str] = set()
 
     for parlay in affected_parlays:
         parlay_id = parlay["id"]
-        bad_legs  = [
-            l for l in parlay["legs"]
+        all_legs  = parlay["legs"]
+
+        # Newly scratched legs (exclude ones already voided by a prior scratch on this parlay)
+        bad_legs = [
+            l for l in all_legs
             if l.get("lineup_check_status") == "SCRATCHED"
+            and l.get("outcome") != "void"
         ]
-        bad_player_ids = {str(l.get("player_id")) for l in bad_legs}
+        # Legs currently alive (not voided, not newly scratched)
+        surviving_legs = [
+            l for l in all_legs
+            if l.get("outcome") != "void"
+            and l.get("lineup_check_status") != "SCRATCHED"
+        ]
+
+        if not bad_legs:
+            print(f"[clr] Parlay {parlay_id}: no new scratches — skipping")
+            continue
+
+        bad_leg_ids    = [l["leg_id"] for l in bad_legs]
+        bad_player_ids = {str(l["player_id"]) for l in bad_legs}
         bad_reasons    = "; ".join(
-            f"{l['player_name']} {l['lineup_check_status']}"
-            for l in bad_legs
+            f"{l['player_name']} {l['lineup_check_status']}" for l in bad_legs
         )
 
-        # Remove bad players and already-used replacement players from the pool
+        # Check whether any surviving leg's game is ≤1 hour from now / already started.
+        # Unknown start time → treat as close (conservative: don't rebuild).
+        any_game_close = False
+        for leg in surviving_legs:
+            gid     = leg.get("game_id")
+            seconds = game_seconds.get(gid) if gid is not None else None
+            if seconds is None or seconds <= ONE_HOUR_SECONDS:
+                any_game_close = True
+                break
+
+        if any_game_close:
+            # ── REDUCE PATH ──────────────────────────────────────────────────
+            # Drop the scratched leg(s) only; keep parlay alive if ≥3 survive.
+            _void_legs(bad_leg_ids)
+
+            if len(surviving_legs) >= 3:
+                _reduce_parlay(parlay_id, surviving_legs)
+                kept += 1
+                print(
+                    f"[clr] Parlay {parlay_id}: dropped {len(bad_legs)} scratch(es), "
+                    f"{len(surviving_legs)} survivors — parlay kept (SCRATCHED_NO_REBUILD)"
+                )
+            else:
+                _void_parlay(parlay_id, f"SCRATCHED_NO_REBUILD: {bad_reasons}")
+                voided_no_rebuild += 1
+                print(
+                    f"[clr] Parlay {parlay_id}: only {len(surviving_legs)} survivor(s) "
+                    f"after scratch — voided (SCRATCHED_NO_REBUILD)"
+                )
+            continue
+
+        # ── REBUILD PATH ─────────────────────────────────────────────────────
+        # All remaining legs' games are >1 hr out — try a full replacement.
         available_pool = [
             leg for leg in eligible_pool
             if str(leg.get("player_id")) not in bad_player_ids
             and str(leg.get("player_id")) not in used_replacement_player_ids
         ]
 
-        from src.engine.parlay_builder import TOTAL_LEGS
         if len(available_pool) < TOTAL_LEGS:
             print(
                 f"[clr] Pool too thin for parlay {parlay_id} "
-                f"({len(available_pool)} legs < {TOTAL_LEGS} required) "
-                f"— leaving superseded, no replacement"
+                f"({len(available_pool)} legs < {TOTAL_LEGS} required) — voiding"
             )
             thin_pool += 1
-            # Still mark the original void so it's not tracked as a live bet
-            _void_parlay(parlay_id, batch_id, bad_reasons)
+            _void_parlay(parlay_id, f"THIN_POOL_NO_REBUILD: {bad_reasons}")
             continue
 
-        # Rebuild via the production builder
         candidates = build_parlays(available_pool, top_n=10, num_games=15)
         if not candidates:
-            print(f"[clr] Builder produced no candidates for parlay {parlay_id} — skipping")
+            print(f"[clr] Builder produced no candidates for parlay {parlay_id} — voiding")
             thin_pool += 1
-            _void_parlay(parlay_id, batch_id, bad_reasons)
+            _void_parlay(parlay_id, f"THIN_POOL_NO_REBUILD: {bad_reasons}")
             continue
 
-        # Take the highest-scoring candidate
-        best = candidates[0]
+        best             = candidates[0]
         replacement_legs = best["legs"]
 
-        # Persist the replacement parlay
         conn = get_conn()
         cur  = conn.cursor()
 
@@ -628,8 +694,8 @@ def run_confirmed_lineup_resolution(run_date_str: str, affected_parlay_ids: list
         cur.close()
         conn.close()
 
-        # Void the superseded parlay
-        _void_parlay(parlay_id, batch_id, bad_reasons)
+        # Only now set superseded_by_batch_id — a real replacement was inserted.
+        _void_parlay(parlay_id, f"lineup_resolution: {bad_reasons}", batch_id=batch_id)
         used_replacement_player_ids.update(
             str(l.get("player_id")) for l in replacement_legs
         )
@@ -640,13 +706,26 @@ def run_confirmed_lineup_resolution(run_date_str: str, affected_parlay_ids: list
         )
 
     print(
-        f"[clr] Done: {rebuilt} rebuilt, {thin_pool} too-thin/skipped "
-        f"(batch={batch_id})"
+        f"[clr] Done: {rebuilt} rebuilt, {kept} kept-reduced, {thin_pool} thin-pool, "
+        f"{voided_no_rebuild} voided-no-rebuild (batch={batch_id})"
     )
+    return {
+        "rebuilt":           rebuilt,
+        "kept":              kept,
+        "thin_pool":         thin_pool,
+        "voided_no_rebuild": voided_no_rebuild,
+    }
 
 
-def _void_parlay(parlay_id: int, new_batch_id: str, reason: str) -> None:
-    """Mark a parlay void + set superseded_by_batch_id and superseded_reason."""
+def _void_parlay(parlay_id: int, reason: str, *, batch_id: str | None = None) -> None:
+    """
+    Mark a parlay and all its legs void.
+
+    batch_id: when provided, sets superseded_by_batch_id — use ONLY when a
+              replacement parlay was actually inserted under that batch_id.
+              When None (thin pool, no-rebuild, reduce-path), leaves
+              superseded_by_batch_id NULL.
+    """
     conn = get_conn()
     cur  = conn.cursor()
     cur.execute(
@@ -657,12 +736,62 @@ def _void_parlay(parlay_id: int, new_batch_id: str, reason: str) -> None:
                superseded_reason      = %s
          WHERE id = %s
         """,
-        (new_batch_id, f"lineup_resolution: {reason}", parlay_id),
+        (batch_id, reason, parlay_id),
     )
-    # Void individual legs too so they never resolve as real bets
     cur.execute(
         "UPDATE mlb_parlay_legs_v2 SET outcome = 'void' WHERE parlay_id = %s",
         (parlay_id,),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def _void_legs(leg_ids: list[int]) -> None:
+    """
+    Mark specific parlay legs void without touching the parent parlay record.
+    Used in the reduce path to drop only the scratched leg(s).
+    """
+    if not leg_ids:
+        return
+    conn = get_conn()
+    cur  = conn.cursor()
+    cur.execute(
+        "UPDATE mlb_parlay_legs_v2 SET outcome = 'void' WHERE id = ANY(%s)",
+        (leg_ids,),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def _reduce_parlay(parlay_id: int, surviving_legs: list[dict]) -> None:
+    """
+    Recalculate num_legs and total_odds on a parlay from its surviving legs.
+    The parlay outcome remains 'pending' — only structural counts are updated.
+    """
+    from src.utils.odds_math import american_to_decimal
+
+    num_legs: int       = len(surviving_legs)
+    total_odds: int | None = None
+    try:
+        dec_product = 1.0
+        for leg in surviving_legs:
+            dec_product *= american_to_decimal(str(leg["odds"]))
+        total_odds = int((dec_product - 1) * 100)
+    except Exception:
+        pass
+
+    conn = get_conn()
+    cur  = conn.cursor()
+    cur.execute(
+        """
+        UPDATE mlb_parlay_recommendations_v2
+           SET num_legs   = %s,
+               total_odds = %s
+         WHERE id = %s
+        """,
+        (num_legs, total_odds, parlay_id),
     )
     conn.commit()
     cur.close()
