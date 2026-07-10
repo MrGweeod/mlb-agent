@@ -1,5 +1,5 @@
 # Supabase Schema Reference — MLB Parlay Agent
-**Last Updated:** 2026-07-08 (Session 18 — documented row-count inflation gotcha on parlay-leg tables and the new `source='manual_pick'` value; no schema/column changes this session)
+**Last Updated:** 2026-07-10 (Session 19 — no schema/column changes; added notes on Decimal coercion in enriched scorer and the batter stat fields consumed from MLB-StatsAPI gameLog)
 **Source:** Exported from Supabase information_schema + verified against migration logs
 
 This file is the authoritative schema reference. Always read this before writing SQL queries.
@@ -527,16 +527,17 @@ ORDER BY legs DESC;
 | 2026-06-12 | `mlb_pending_lineup_checks` | New table created. `check_type` column + index added for CLV dispatch. |
 | 2026-06-12 | `mlb_scored_legs_enriched` | Added: `stack_bonus_applied`, `pitcher_vulnerability` |
 | 2026-07-08 | *(none — no migrations this session)* | Session 18 added a new **value** (`'manual_pick'`) to the existing `mlb_parlay_recommendations_v2.source` free-text column — not a schema change, no migration needed. `num_legs` on both `_v2` and `_enriched` recommendation tables now legitimately ranges 4-6 (was always 4) — also not a schema change, that column was always a plain integer. |
+| 2026-07-10 | *(none — no migrations this session)* | Session 19 changes are application-layer only: scratch handler rewrite (logic changes in `lineup_confirmation.py` only, no new DB columns), shadow scorer rebuild (enriched scorer reads existing `pitcher_era`/`pitcher_whip`/`pitcher_k9` raw values from `mlb_scored_legs` — confirmed present since May 12 with 11k+ rows — and adds in-memory batter stats from the MLB-StatsAPI gameLog; no new DB columns). |
 
 ---
 
 ## Schema Last Verified
-- `mlb_scored_legs`: 2026-07-08 (this update — `composite_score` clarified as the actual pool-eligibility gate field; `pitcher_name` field-name note added)
-- `mlb_scored_legs_enriched`: 2026-07-08 (this update — Decimal/JSON serialization gotcha added on all NUMERIC columns)
-- `mlb_parlay_recommendations_v2`: 2026-07-08 (this update — `source` values documented including new `'manual_pick'`; `num_legs`/`total_odds` behavior note added for Session 18 builder redesign)
-- `mlb_parlay_legs_v2`: 2026-07-08 (this update — row-count inflation gotcha added; `opposing_pitcher_name` population gap noted)
-- `mlb_parlay_recommendations_enriched`: 2026-07-08 (this update — `num_legs` behavior note added)
-- `mlb_parlay_legs_enriched`: 2026-07-08 (this update — row-count inflation gotcha cross-referenced)
-- `mlb_pending_lineup_checks`: 2026-06-13
+- `mlb_scored_legs`: 2026-07-10 (Session 19 — no changes; confirmed `pitcher_era`/`pitcher_whip`/`pitcher_k9` raw NUMERIC columns populated since May 12; MLB-StatsAPI gameLog batter field names confirmed: `atBats`, `hits`, `baseOnBalls`, `strikeOuts`, `plateAppearances`, `hitByPitch` — these are transient/in-memory, not stored in DB)
+- `mlb_scored_legs_enriched`: 2026-07-10 (Session 19 — no schema changes; enriched scorer now writes `matchup_adj`, `matchup_era_adj`, `matchup_whip_adj`, `matchup_k9_adj`, `matchup_batter_adj` fields into the enriched row's JSONB/column set — confirm actual column availability; Decimal coercion note: `float(value)` applied inside `_linear_adj()` to handle psycopg2 returning NUMERIC columns as Python `Decimal`)
+- `mlb_parlay_recommendations_v2`: 2026-07-08 (Session 18 — `source` values documented including `'manual_pick'`; `num_legs`/`total_odds` behavior note added)
+- `mlb_parlay_legs_v2`: 2026-07-10 (Session 19 — `outcome='void'` now applied to individual scratched legs when the reduce-path is taken; they remain as rows, not deleted, so `num_legs`/`total_odds` can be recalculated off survivors)
+- `mlb_parlay_recommendations_enriched`: 2026-07-08 (Session 18 — `num_legs` behavior note added)
+- `mlb_parlay_legs_enriched`: 2026-07-08 (Session 18 — row-count inflation gotcha cross-referenced)
+- `mlb_pending_lineup_checks`: 2026-07-10 (Session 19 — `result_note` field: now only counts parlays actually rebuilt or reduced-and-kept, not voided-with-nothing; `superseded_by_batch_id` stays NULL on no-rebuild paths, `superseded_reason` set to `'SCRATCHED_NO_REBUILD'` or `'THIN_POOL_NO_REBUILD'`)
 - `ballpark_factors`: 2026-06-13
 - `mlb_sgo_request_log` / `sgo_request_log`: 2026-07-07

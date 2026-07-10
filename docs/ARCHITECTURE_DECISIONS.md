@@ -1,5 +1,5 @@
 # MLB Parlay Agent — Architecture Decisions
-**Last Updated:** July 8, 2026 (Session 18 — Parlay Builder Redesign: Floor-Only Odds + Flexible Leg Count; Manual Parlay Dashboard)
+**Last Updated:** July 10, 2026 (Session 19 — Scratch Rewrite + Dead-Link Fix; Shadow Scoring Rebuild; Manual Dashboard Coverage Column)
 
 ---
 
@@ -26,8 +26,10 @@
 20. [SportsGameOdds Cost Optimization — CLV Layer Removal (Session 17)](#sportsgameodds-cost-optimization--clv-layer-removal-session-17)
 21. [Parlay Builder Redesign — Floor-Only Odds, Flexible Leg Count (Session 18)](#parlay-builder-redesign--floor-only-odds-flexible-leg-count-session-18)
 22. [Manual Parlay Dashboard (Session 18)](#manual-parlay-dashboard-session-18)
-23. [Lessons Learned](#lessons-learned)
-24. [Future Considerations](#future-considerations)
+23. [Scratch Handling Rewrite — Time-Gated Reduce-Path (Session 19)](#scratch-handling-rewrite--time-gated-reduce-path-session-19)
+24. [Shadow Scoring Rebuild — Linear-Scale Matchup Signals (Session 19)](#shadow-scoring-rebuild--linear-scale-matchup-signals-session-19)
+25. [Lessons Learned](#lessons-learned)
+26. [Future Considerations](#future-considerations)
 
 ---
 
@@ -119,13 +121,13 @@ See [Parlay Builder Redesign](#parlay-builder-redesign--floor-only-odds-flexible
 
 ## Enriched Scoring Signals
 
-*(Unchanged from Session 15/16.)*
+**Session 19 full rebuild — see [Shadow Scoring Rebuild](#shadow-scoring-rebuild--linear-scale-matchup-signals-session-19) below.** The rank-based K/9, WHIP, and pitcher-vulnerability scoring blocks in `_calculate_enriched_score` were replaced with a continuous linear-scale matchup adjustment. Coverage floors and the final 5–95 composite clamp are unchanged.
 
 ---
 
 ## Lineup Confirmation Layer
 
-*(Unchanged from Session 16 — see that section for the SCRATCHED-only rebuild trigger decision.)*
+**Session 19 rewrite — see [Scratch Handling Rewrite](#scratch-handling-rewrite--time-gated-reduce-path-session-19) below for full detail.** The prior SCRATCHED-only rebuild logic was replaced with a time-gated reduce-path. The dead-link `superseded_by_batch_id` bug was fixed in the same pass.
 
 ---
 
@@ -236,9 +238,68 @@ See [Parlay Builder Redesign](#parlay-builder-redesign--floor-only-odds-flexible
 
 ---
 
+## Scratch Handling Rewrite — Time-Gated Reduce-Path (Session 19)
+
+### **Decision: Replace Unconditional Void-and-Rebuild With a Time-Gated Reduce Path**
+
+**Background.** The old scratch handler (`src/apis/lineup_confirmation.py`) voided the whole parlay and attempted a full rebuild from a fresh player pool on any SCRATCHED leg. This created two problems: (1) rebuilding a parlay when some surviving legs' games were already minutes from first pitch was functionally pointless — the replacement legs would be from the same nearly-locked lineup environment, and there was often no viable pool anyway; (2) even when the pool was too thin to rebuild, `superseded_by_batch_id` was set to the attempted batch's ID, creating a dangling reference (confirmed via live query: 7+ historical batch_ids referenced in `superseded_by_batch_id` don't exist in `mlb_parlay_recommendations_v2`).
+
+**New logic:**
+1. Check game start times for all *surviving* (non-scratched) legs.
+2. If **all** surviving games are >1 hour out: rebuild (old behavior — unchanged).
+3. If **any** surviving game is ≤1 hour out or already started: reduce-path — drop only the scratched leg(s), keep the parlay alive if ≥3 legs remain, void if <3 remain.
+4. Voided/dropped individual legs remain as rows in `mlb_parlay_legs_v2` with `outcome='void'` — not deleted — so `num_legs`/`total_odds` can be recalculated off survivors and the resolver correctly skips the void leg when grading.
+5. If a second scratch hits an already-reduced parlay: the same rule is applied again against whatever legs currently remain — no special-cased "second scratch" logic.
+6. Applied going forward only — no backfill of historical void parlays.
+
+**Dead-link fix:** `superseded_by_batch_id` is now only set when a replacement parlay was actually inserted. On no-rebuild paths (time-gate or thin pool), it stays NULL and `superseded_reason` is set to `'SCRATCHED_NO_REBUILD'` or `'THIN_POOL_NO_REBUILD'` instead. `result_note` on `mlb_pending_lineup_checks` only counts parlays actually rebuilt or reduced-and-kept, not voided-with-nothing-to-show-for-it.
+
+**Tests:** `tests/test_lineup_confirmation.py` — 9 tests covering all branches.
+
+---
+
+## Shadow Scoring Rebuild — Linear-Scale Matchup Signals (Session 19)
+
+### **Decision: Replace Rank Buckets With a Continuous Linear Scale for Pitcher/Batter Signals**
+
+**Background.** The shadow scorer (`src/engine/enriched_scorer.py`) previously used `pitcher_era_rank`, `pitcher_k9_rank`, and `pitcher_whip_rank` — ordinal rank fields (1=best, N=worst among starters that day) — to compute matchup adjustments. These ranks have two structural problems: (a) a pitcher ranked 3rd of 10 starters gets the same signal as a pitcher ranked 3rd of 30, even though those represent very different absolute quality levels; (b) the rank-based buckets produce stepwise adjustments rather than a smooth signal proportional to how extreme the matchup actually is.
+
+Session 18's K/9-rank bucket analysis showed a possibly non-monotonic/reversed pattern (the worst-matchup bucket had the highest win rate) — one more data point suggesting the rank-based signal was unreliable.
+
+**New formula shape:**
+```
+adjustment = ((value − midpoint) / half_range) × max_weight
+             clamped to [−max_weight, +max_weight]
+```
+For hits/over and hits/under: ERA and WHIP raw contributions are both computed, then proportionally scaled together (not hard-clipped individually) when their sum exceeds the ±7 combined cap — to avoid arbitrarily penalizing one factor relative to the other.
+
+**Ranges (derived from actual `mlb_scored_legs` data, p5/p95, 11,080 legs May–Jul 2026):**
+- ERA: midpoint 4.25, half-range 2.75 (1.50–7.00)
+- WHIP: midpoint 1.20, half-range 0.50 (0.70–1.70)
+- K/9: midpoint 8.25, half-range 2.75 (5.50–11.00) — user-confirmed 2026-07-10; originally proposed range 5.5–11.5 was flagged and confirmed before use per session prompt requirement
+- Batter OBP/BA/K%/BB%: league-average estimates — validate after first shadow runs
+
+**Per-prop weight and cap table:**
+| Prop | Factors | Cap |
+|---|---|---|
+| hits/over | ERA ±5, WHIP ±3 (weak pitcher → positive) | ±7 |
+| hits/under | ERA ±5, WHIP ±3 (elite pitcher → positive) | ±7 |
+| strikeouts/over | K/9 ±5 (high K/9 → positive) | ±5 |
+| totalBases/under | ERA ±4, WHIP ±2, K/9 ±1, OBP ±2, K% ±1.5, BB% ±1, BA ±0.5 (elite pitcher / high K%, low OBP/BA/BB% → positive) | ±12 |
+
+**Batter stats:** accumulated from `get_batter_game_log()` season splits. Field names confirmed live: `atBats`, `hits`, `baseOnBalls`, `strikeOuts`, `plateAppearances`, `hitByPitch`. Minimum 50 PA required. Only called for `totalBases/under` legs — not on other prop types — to avoid unnecessary API calls.
+
+**Scope:** shadow pipeline only (`enriched_scorer.py`, `run_enriched_pipeline.py`). Production scoring (`simple_scorer.py`) untouched. Coverage floors unchanged — still the sole gating/qualification criteria.
+
+**Evaluation plan:** no backtest (historical window too thin and was actively misleading in analysis this session). Instead: run shadow for a few weeks, then compare shadow vs. production win rate and edge (win rate vs. odds-implied probability) using the existing comparison queries in `SUPABASE_SCHEMA_REFERENCE.md`. Batter ranges to be validated and updated from real data after the first shadow runs.
+
+**Tests:** `tests/test_enriched_scorer.py` — 37 tests covering all four prop types, cap enforcement, direction signs, and the final 5–95 clamp.
+
+---
+
 ## Lessons Learned
 
-*(Items 1-49 unchanged from prior version — see full list in git history / prior document version.)*
+*(Items 1-54 unchanged from prior version — see full list in git history / prior document version.)*
 
 50. **A concentrated, thin sample can flip its own conclusion with more data, and the concentration itself can be the more useful finding.** hits/under's 14-day dedup read (36.4% WR, n=11, dominated by two repeat players) looked like a real problem. Extending to 35 days reversed it entirely (57.9% WR, n=57). The root cause underneath both reads was the same either way — only 1-3 players/day clear the 65% coverage floor for this prop — which turned out to be the actually durable, actionable finding (pool scarcity), independent of which win-rate read was "right." When a sample is this thin, characterizing *why* it's thin is often more useful than trusting either read of the win rate.
 
@@ -283,8 +344,14 @@ Once roughly a week of production data exists under the floor-only/4-6-leg logic
 ### **20. SO/over Pool-Composition Softening (New, Session 18, Medium Priority)**
 The composite score's K/9-rank differentiation between selected and non-selected SO/over legs nearly vanished coincident with the July 2 slot-gate fix. Unclear if this is a real pool-composition shift or noise from ~1 week of data. Recheck with more volume.
 
+### **21. Validate Batter Stat Ranges for Shadow Scorer (New, Session 19, High Priority)**
+The OBP/BA/K%/BB% midpoints and half-ranges in `enriched_scorer.py` use league-average estimates (`_OBP_MID=0.350, _OBP_HALF=0.070` etc.). After the first few shadow runs, pull actual p5/p95 from the computed batter stats in the shadow run logs and update these constants to match the real range of this leg pool — the same methodology used to derive ERA/WHIP/K9 ranges from `mlb_scored_legs` data.
+
+### **22. Shadow vs. Production Win Rate Comparison (New, Session 19, Medium Priority)**
+No backtest — historical window too thin and was actively misleading in analysis during Session 19. Instead: run shadow for 3-4 weeks, then compare shadow vs. production win rate and edge (WR vs. odds-implied probability) using existing comparison queries in `SUPABASE_SCHEMA_REFERENCE.md`.
+
 ---
 
-**Architecture Status:** ✅ STABLE (one open verification item — see Session 18 Manual Parlay Dashboard section)
-**Last Major Change:** July 8, 2026 — parlay builder redesigned from fixed-4-leg/banded-odds to 4-6-leg/floor-only; manual parlay dashboard shipped
-**Next Architecture Review:** Confirm sticky-header fix commit + complete manual-pick end-to-end test (both Session 19, first priority) / live-data performance recheck of the new builder (~1 week out) / TB/under construction-strategy rerun under the new builder (before any promotion decision)
+**Architecture Status:** ✅ STABLE
+**Last Major Change:** July 10, 2026 — scratch handler rewritten with time-gated reduce path; shadow scorer rebuilt with linear-scale matchup signals; manual dashboard added coverage_overall column
+**Next Architecture Review:** Validate batter stat ranges after first shadow runs / shadow vs. production comparison after ~3-4 weeks / TB/under construction-strategy rerun under new builder (before any promotion decision)
