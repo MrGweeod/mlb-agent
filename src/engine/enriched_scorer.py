@@ -534,6 +534,7 @@ def _calculate_enriched_score(
     matchup_adj, matchup_debug = _compute_matchup_adjustment(
         stat, direction, raw_era, raw_whip, raw_k9, batter_stats
     )
+
     score += matchup_adj
     enriched.update(matchup_debug)
     enriched["matchup_adj"] = round(matchup_adj, 2)

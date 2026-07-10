@@ -1,5 +1,5 @@
 # MLB Parlay Agent — Architecture Decisions
-**Last Updated:** July 10, 2026 (Session 19 — Scratch Rewrite + Dead-Link Fix; Shadow Scoring Rebuild; Manual Dashboard Coverage Column)
+**Last Updated:** July 10, 2026 (Session 20 — game_start_time UTC/ET contamination remediated; Brandon Lowe / hits-over matchup_adj NULL investigation)
 
 ---
 
@@ -28,8 +28,9 @@
 22. [Manual Parlay Dashboard (Session 18)](#manual-parlay-dashboard-session-18)
 23. [Scratch Handling Rewrite — Time-Gated Reduce-Path (Session 19)](#scratch-handling-rewrite--time-gated-reduce-path-session-19)
 24. [Shadow Scoring Rebuild — Linear-Scale Matchup Signals (Session 19)](#shadow-scoring-rebuild--linear-scale-matchup-signals-session-19)
-25. [Lessons Learned](#lessons-learned)
-26. [Future Considerations](#future-considerations)
+25. [game_start_time UTC/ET Contamination — Remediation (Session 20)](#game_start_time-utcet-contamination--remediation-session-20)
+26. [Lessons Learned](#lessons-learned)
+27. [Future Considerations](#future-considerations)
 
 ---
 
@@ -297,6 +298,22 @@ For hits/over and hits/under: ERA and WHIP raw contributions are both computed, 
 
 ---
 
+## game_start_time UTC/ET Contamination — Remediation (Session 20)
+
+### **Decision: Re-fetch Authoritative UTC from MLB StatsAPI Rather Than Trying to Guess Which Stored Value Is Correct**
+
+**Background.** `scripts/backfill_game_start_time.py` (now retired) stored `game_start_time` in Eastern Time (naive string, no tzinfo) using `.astimezone(ET_TZ)` + `.strftime(...)`, while `src/pipelines/enrich_legs.py` stores raw UTC ISO strings using `utc_time.isoformat()`. Both formats look identical in the database (e.g. `2026-05-15 19:10:00` vs `2026-05-15 23:10:00`) — there is no column-level flag, no offset suffix, no way to distinguish them by value inspection alone. 15 `game_pk`s had two conflicting `game_start_time` values across their legs as a result.
+
+**Why "pick the later one" or "pick the one matching the API" was rejected as a heuristic:** some of the 5 non-4-hour-offset game_pks had values where one happened to match the StatsAPI UTC — but only coincidentally (rescheduled game with new time). Going back to the source (StatsAPI) for every affected `game_pk` is the only approach that doesn't require reasoning about which convention a specific value was written with.
+
+**Implementation:** `scripts/fix_game_start_time_contamination.py` — one-time cleanup script. Loops over all affected `game_pk`s, calls `statsapi.get('game', {'gamePk': game_pk})`, extracts `gameData.datetime.dateTime`, and overwrites every leg for that `game_pk` in both `mlb_scored_legs` and `mlb_scored_legs_enriched`. Supports `--dry-run`. Now retired as a reference artifact — the contamination source (backfill script) is gone and the tables are clean.
+
+**Regression prevention:** a periodic health-check query is documented in `SUPABASE_SCHEMA_REFERENCE.md` under "Data Health Checks." Zero rows is the expected healthy result; any rows indicate a re-introduction of the bug pattern (a new write-path storing ET values into a UTC column).
+
+**Write-path convention going forward:** `game_start_time` is UTC ISO — use `utc_time.isoformat()` as `enrich_legs.py` does. Never convert to local time before storing.
+
+---
+
 ## Lessons Learned
 
 *(Items 1-54 unchanged from prior version — see full list in git history / prior document version.)*
@@ -310,6 +327,10 @@ For hits/over and hits/under: ERA and WHIP raw contributions are both computed, 
 53. **A fix for one failure mode (a security hole) can create a new failure mode (misleading diagnostics) elsewhere, and both can be correct decisions in isolation.** Tightening the auth check to require an exact 200 was the right fix for a real hole (a 500 previously granted access). But it also meant every future non-auth 500 would display as "wrong password" until the Decimal bug surfaced this directly. Neither decision was wrong; the interaction between them just wasn't visible until it was tested live. Worth deliberately asking "what does this failure mode look like to the user" whenever tightening an error-handling boundary, not just "does this close the hole."
 
 54. **Applying the same principle consistently sometimes means reversing your own recent decision.** The entire justification for the builder redesign was "don't force a payout target to override leg quality." Two exchanges later, the manual dashboard's first draft did exactly that to human picks (hard-blocking anything below +400). Recognizing the inconsistency and reversing it (floor becomes advisory, not blocking) took applying the same standard already established minutes earlier, not new analysis.
+
+55. **Two different write paths to the same column, using different conventions, with identical-looking values, are a latent time bomb.** `game_start_time` stored UTC in one path and Eastern Time in another — same naive timestamp string format, no distinguishable suffix. Didn't blow up immediately; blew up silently (503 affected rows, 15 game_pks with split values) after weeks of accumulated data. Defense: enforce a single canonical write function for any column with a non-obvious convention (timezone, unit, encoding), imported from one place, rather than independently reimplementing the write in each script that touches the column.
+
+56. **"Root cause confirmed" and "root cause reconstructed" are different claims — be precise about which one you're making.** The Brandon Lowe `matchup_adj = NULL` issue appeared resolved after `6bdd86b` deployed, with a coherent explanation: the pytz crash at line 510 prevented `_log_enriched_legs` from running, so `matchup_adj` was computed but never persisted. This explanation is consistent with the code structure, the commit timing, and the live DB result — but it was never confirmed by a log line showing the exception. The actual debug run captured all three checkpoints behaving correctly because it ran after the fix. Railway logs for the broken timeframe were not retrieved. The explanation should be held as "most likely, reconstructed from code analysis" rather than "confirmed." When a fix works and the failure mode was never directly observed, say so explicitly instead of retrofitting certainty.
 
 ---
 
@@ -353,5 +374,6 @@ No backtest — historical window too thin and was actively misleading in analys
 ---
 
 **Architecture Status:** ✅ STABLE
-**Last Major Change:** July 10, 2026 — scratch handler rewritten with time-gated reduce path; shadow scorer rebuilt with linear-scale matchup signals; manual dashboard added coverage_overall column
+**Last Major Change:** July 10, 2026 (Session 20) — game_start_time UTC/ET contamination remediated (503 rows, 15 game_pks, both tables clean); backfill script retired; regression check query documented in schema reference
+**Prior Major Change:** July 10, 2026 (Session 19) — scratch handler rewritten with time-gated reduce path; shadow scorer rebuilt with linear-scale matchup signals; manual dashboard added coverage_overall column
 **Next Architecture Review:** Validate batter stat ranges after first shadow runs / shadow vs. production comparison after ~3-4 weeks / TB/under construction-strategy rerun under new builder (before any promotion decision)

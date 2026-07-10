@@ -539,6 +539,35 @@ ORDER BY legs DESC;
 
 ---
 
+## Data Health Checks
+
+Run these periodically to catch silent data quality regressions.
+
+### game_start_time consistency
+Confirms no `game_pk` has two conflicting `game_start_time` values (symptom of the UTC/ET backfill contamination bug, fixed 2026-07-10):
+
+```sql
+-- Run against mlb_scored_legs
+SELECT game_pk, COUNT(DISTINCT game_start_time) AS distinct_times
+FROM mlb_scored_legs
+WHERE game_pk IS NOT NULL
+GROUP BY game_pk
+HAVING COUNT(DISTINCT game_start_time) > 1
+ORDER BY game_pk;
+
+-- Run against mlb_scored_legs_enriched
+SELECT game_pk, COUNT(DISTINCT game_start_time) AS distinct_times
+FROM mlb_scored_legs_enriched
+WHERE game_pk IS NOT NULL
+GROUP BY game_pk
+HAVING COUNT(DISTINCT game_start_time) > 1
+ORDER BY game_pk;
+```
+
+Zero rows is the expected healthy result. If any rows appear, run `scripts/fix_game_start_time_contamination.py` to investigate and remediate.
+
+---
+
 ## Schema Last Verified
 - `mlb_scored_legs`: 2026-07-10 (Session 19 — no changes; confirmed `pitcher_era`/`pitcher_whip`/`pitcher_k9` raw NUMERIC columns populated since May 12; MLB-StatsAPI gameLog batter field names confirmed: `atBats`, `hits`, `baseOnBalls`, `strikeOuts`, `plateAppearances`, `hitByPitch` — these are transient/in-memory, not stored in DB)
 - `mlb_scored_legs_enriched`: 2026-07-10 (Session 19 follow-up — 5 matchup debug columns added and confirmed present: `matchup_adj`, `matchup_era_adj`, `matchup_whip_adj`, `matchup_k9_adj`, `matchup_batter_adj` — all NUMERIC, written by `_log_enriched_legs()`, NULL when not applicable to the prop type. Decimal coercion note: `float(value)` applied inside `_linear_adj()` to handle psycopg2 returning NUMERIC columns as Python `Decimal`.)

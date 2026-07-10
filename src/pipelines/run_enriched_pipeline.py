@@ -390,10 +390,12 @@ def run_enriched_pipeline(scored_legs: list, production_batch_id: str = "") -> N
         ("strikeouts", "over", 0.5),
         ("totalBases", "under", 1.5),
     }
+
     enriched_legs = [
         leg for leg in enriched_legs
         if (leg.get("stat"), leg.get("direction"), leg.get("best_line")) in _SHADOW_WHITELIST
     ]
+
     if not enriched_legs:
         print("[ENRICHED PIPELINE] No qualifying legs after whitelist filter — skipping")
         return

@@ -1,5 +1,5 @@
 # MLB Parlay Agent — Session Handoff
-**Last Updated:** July 10, 2026 (Session 19 — Scratch Rewrite + Dead-Link Fix, Manual Dashboard Coverage Column, Shadow Scoring Rebuild)
+**Last Updated:** July 10, 2026 (Session 20 — game_start_time UTC/ET contamination cleanup; Brandon Lowe / hits-over matchup_adj NULL root cause investigation)
 
 ## Current Status
 ✅ **OPERATIONAL — SESSION 19 DEPLOYED**
@@ -8,9 +8,51 @@
 ✅ **Manual dashboard: `coverage_overall` column added alongside `coverage_vs_hand`**
 ✅ **Shadow scoring rebuilt: absolute-value linear-scale pitcher/batter signals replace rank buckets**
 ✅ **37 enriched scorer tests + 9 lineup confirmation tests committed and passing**
+✅ **Issue A: game_start_time UTC/ET contamination fully remediated — 503 rows fixed, both tables clean**
+✅ **Issue B: Brandon Lowe / hits-over matchup_adj NULL — resolved (root cause reconstructed, fix confirmed live on 2026-07-10)**
 🔲 **Pending user action (carried from Session 17): cancel SGO Pro subscription ($149/mo)**
 🔲 **Pending: first true end-to-end test of the manual pick flow (submit → resolve) — still not done**
 ⚠️ **New shadow scorer running live — compare shadow vs. production win rate after a few weeks**
+
+---
+
+## What Happened on July 10, 2026 (Session 20)
+
+### Issue A — game_start_time UTC/ET Contamination Cleanup
+
+**Root cause (confirmed):** `scripts/backfill_game_start_time.py` wrote `game_start_time` as a naive Eastern Time string (via `.astimezone(ET_TZ)` + `.strftime(...)`, stripping tzinfo), while `src/pipelines/enrich_legs.py` stores raw UTC ISO strings. Both values land in the same column in the same format, with no way to distinguish the convention by inspection. 15 `game_pk`s had two conflicting `game_start_time` values across their legs — 503 individual legs affected in `mlb_scored_legs`. `mlb_scored_legs_enriched` had zero conflicts (those game_pks had no enriched rows).
+
+**Scope (verified against Supabase before any fix):**
+- 10 game_pks with a clean 4-hour gap (EDT vs UTC — certain timezone mixup): 822983, 823140, 823384, 823707, 824037, 824194, 824360, 824601, 824925, 825009 — 406 rows
+- 5 game_pks with other gaps — confirmed via StatsAPI as postponed/rescheduled games, same fix applies: 823471, 824362, 824684, 824840, 824850 — 97 rows
+
+**Fix:** `scripts/fix_game_start_time_contamination.py` — re-fetches authoritative UTC start time from `statsapi.get('game', {'gamePk': game_pk})` (the same call `enrich_legs.py` already makes) and overwrites all affected rows in both tables. Both a dry-run (confirmed in prior session) and live run (this session) executed. Post-fix verification: zero conflicts in both `mlb_scored_legs` and `mlb_scored_legs_enriched`.
+
+**Bleeding stopped:** `scripts/backfill_game_start_time.py` was retired (renamed `.retired`) before the historical fix was applied — no further new contamination possible. A regression-detection query is documented in `SUPABASE_SCHEMA_REFERENCE.md` under "Data Health Checks."
+
+---
+
+### Issue B — Brandon Lowe / hits-over matchup_adj NULL: Root Cause (Reconstructed, Not Log-Confirmed)
+
+**Context:** After `81374e4` (which added `matchup_adj` and related columns to the enriched legs INSERT) was deployed, `/api/admin/run_full_pipeline` was triggered live and the affected legs were re-queried directly from Supabase — `matchup_adj` was still NULL, and `composite_score` was bit-for-bit identical to its pre-fix value, meaning the pipeline had not touched those rows at all. This ruled out "the INSERT bug alone" as a sufficient explanation.
+
+**Root cause (reconstructed from code analysis — not confirmed by log evidence):** Most likely, `run_enriched_pipeline.py` was crashing at the source-label block (lines 510-517) due to a pytz import before `6bdd86b` centralized timezone handling via `src/utils.time_utils.now_et`. The crash happened *after* `_calculate_enriched_score` computed `matchup_adj` correctly, but *before* `_log_enriched_legs` (line 521) ran the INSERT — so `matchup_adj` was calculated but never persisted. That crash was caught by the broad `try/except` in `main.py` wrapping `run_enriched_pipeline`, silencing it entirely.
+
+Both `81374e4` (INSERT columns) and `6bdd86b` (pytz fix) were required: together they allowed the INSERT to run with the correct columns populated. The 2026-07-10 pipeline run (post-`6bdd86b` deployment) confirmed `matchup_adj=2.62` for Brandon Lowe in Supabase, and all previous run_dates (07-07 through 07-09) show NULL — consistent with the fix timing.
+
+**Important caveat:** this root cause was identified by reading the code and git history, not by direct log evidence. Railway logs for the pre-`6bdd86b` timeframe were not accessible (Railway CLI not available locally; browser check was flagged as quick/non-blocking but also not completed this session). The "pytz crash at line 510" explanation is the most coherent one given the code structure and commit history, but it was not directly confirmed by a log line showing the exception. It should be treated as the most likely explanation, not a settled fact.
+
+**Debug instrumentation added and then removed this session:** `[DEBUG whitelist]`, `[DEBUG matchup]`, and `[DEBUG INSERT]` print blocks were added to `run_enriched_pipeline.py` and `enriched_scorer.py` to trace Brandon Lowe through the pipeline — but because the fix was already deployed when the debug run was executed, all three checkpoints showed correct behavior (whitelist: passes, matchup_adj=2.62, INSERT tuple present). The instrumentation was removed before this commit. A temporary `scripts/debug_issue_b.py` was also deleted.
+
+**Status: resolved** — `matchup_adj` populating correctly in live production as of 2026-07-10.
+
+---
+
+## Session 20 Commits
+
+| Commit | Message |
+|--------|---------|
+| *(this commit)* | fix: game_start_time UTC/ET contamination cleanup + Issue B root cause investigation |
 
 ---
 
