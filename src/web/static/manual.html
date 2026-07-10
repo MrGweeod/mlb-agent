@@ -336,8 +336,9 @@ const COLS = [
   ['direction',           'Dir',        36,  0],
   ['line',                'Line',       45,  0],
   ['odds',                'Odds',       52,  0],
-  ['coverage_pct',        'Cov%',       48,  1],
-  ['coverage_vs_hand',    'CovHnd',     56,  1],
+  ['coverage_pct',        'Cov%',           48,  1],
+  ['coverage_overall',    'Cov (Overall)',  64,  1],
+  ['coverage_vs_hand',    'Cov (vs Hand)',  68,  1],
   ['coverage_recent_10',  'Cov10',      50,  1],
   ['coverage_recent_5',   'Cov5',       46,  1],
   ['trend_score',         'Trend',      50,  1],
@@ -595,7 +596,7 @@ function statusBadgeClass(s) {
 function formatVal(key, val) {
   if (val == null) return '—';
   if (typeof val === 'number') {
-    if (['coverage_pct','coverage_vs_hand','coverage_recent_10','coverage_recent_5','pitcher_vulnerability'].includes(key))
+    if (['coverage_pct','coverage_overall','coverage_vs_hand','coverage_recent_10','coverage_recent_5','pitcher_vulnerability'].includes(key))
       return (val * 1).toFixed(1);
     if (['composite_score','trend_score','ev_per_unit','park_factor','blended_era_rank'].includes(key))
       return (val * 1).toFixed(2);
