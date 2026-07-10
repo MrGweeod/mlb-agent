@@ -18,7 +18,6 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
-import pytz
 import statsapi
 
 from src.apis.mlb_stats import (
@@ -754,9 +753,8 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
     qualifying_legs = enrich_legs(qualifying_legs, pitcher_id_map, opponent_map, season)
 
     # ── Filter: remove legs whose games have already started ─────────────────
-    _et_tz = pytz.timezone("America/New_York")
-    _now_et = datetime.now(_et_tz)
-    _cutoff = _now_et + timedelta(minutes=15)
+    from src.utils.time_utils import now_et as _now_et_fn, parse_game_start_et as _parse_gst
+    _cutoff = _now_et_fn() + timedelta(minutes=15)
     upcoming_legs = []
     _started_count = 0
     _null_count = 0
@@ -766,10 +764,7 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
             _null_count += 1
             continue  # fail-closed: missing time = exclude
         try:
-            _gt = datetime.fromisoformat(str(_gst))
-            if _gt.tzinfo is None:
-                # Legacy naive ET timestamp — localize before comparing
-                _gt = _et_tz.localize(_gt)
+            _gt = _parse_gst(_gst)
             if _gt > _cutoff:
                 upcoming_legs.append(_leg)
             else:
@@ -973,8 +968,8 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
             if source:
                 _source = source
             else:
-                _et = pytz.timezone("America/New_York")
-                _hour_et = datetime.now(_et).hour
+                from src.utils.time_utils import now_et as _src_now_et
+                _hour_et = _src_now_et().hour
                 if _hour_et < 11:
                     _source = "auto_9am"
                 elif _hour_et < 14:
@@ -1257,9 +1252,8 @@ def run_targeted_pipeline(buffer_minutes: int = 15, source: str = "auto") -> Non
 
     today  = str(date.today())
     season = date.today().year
-    et_tz  = pytz.timezone("America/New_York")
-    now_et = datetime.now(et_tz)
-    cutoff = now_et + timedelta(minutes=buffer_minutes)
+    from src.utils.time_utils import now_et as _rt_now_et, parse_game_start_et as _rt_parse_gst
+    cutoff = _rt_now_et() + timedelta(minutes=buffer_minutes)
 
     _PITCHER_STATS = {"inningsPitched", "hitsAllowed", "earnedRuns"}
 
@@ -1314,10 +1308,7 @@ def run_targeted_pipeline(buffer_minutes: int = 15, source: str = "auto") -> Non
             null_count += 1
             continue  # fail-closed: missing time = exclude
         try:
-            gt = datetime.fromisoformat(str(gst))
-            if gt.tzinfo is None:
-                # Legacy naive ET timestamp — localize before comparing
-                gt = et_tz.localize(gt)
+            gt = _rt_parse_gst(gst)
             if gt > cutoff:
                 upcoming.append(leg)
             else:

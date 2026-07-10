@@ -24,7 +24,6 @@ import asyncio
 import os
 import json
 import pathlib
-import pytz
 from datetime import date, datetime, time as dtime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -122,8 +121,8 @@ async def handle_legs(request: web.Request) -> web.Response:
                 continue
             if -300 <= odds_int <= 300:
                 filtered_legs.append(leg)
-        est = pytz.timezone('America/New_York')
-        current_time_est = datetime.now(est).strftime('%Y-%m-%d %H:%M:%S')
+        from src.utils.time_utils import now_et as _legs_now_et
+        current_time_est = _legs_now_et().strftime('%Y-%m-%d %H:%M:%S')
         return web.Response(
             text=json.dumps({'legs': filtered_legs, 'current_time_est': current_time_est}, default=str),
             content_type="application/json",
@@ -300,9 +299,8 @@ async def handle_build_parlays(request: web.Request) -> web.Response:
                 content_type="application/json",
             )
 
-        et_tz = pytz.timezone("America/New_York")
-        now_et = datetime.now(et_tz)
-        cutoff = now_et + timedelta(minutes=15)
+        from src.utils.time_utils import now_et as _now_et, parse_game_start_et
+        cutoff = _now_et() + timedelta(minutes=15)
 
         upcoming_legs = []
         started_count = 0
@@ -314,8 +312,8 @@ async def handle_build_parlays(request: web.Request) -> web.Response:
                 null_count += 1
                 continue  # fail-closed: missing time = exclude
             try:
-                gt = datetime.strptime(str(gst), "%Y-%m-%d %H:%M:%S")
-                if et_tz.localize(gt) > cutoff:
+                gt = parse_game_start_et(gst)
+                if gt > cutoff:
                     upcoming_legs.append(leg)
                 else:
                     started_count += 1
@@ -618,7 +616,9 @@ def _fetch_missing_game_times(legs: list[dict], run_date: str) -> list[dict]:
     has_pk = sum(1 for leg in missing if leg.get("game_pk"))
     print(f"[_fetch_missing_game_times] {len(missing)}/{len(legs)} legs missing time; {has_pk} have game_pk, {len(missing) - has_pk} do not")
 
-    et_tz = pytz.timezone("America/New_York")
+    from src.utils.time_utils import parse_game_start_et as _fmt_parse_gst
+    from zoneinfo import ZoneInfo as _ZI
+    _et_tz_ref = _ZI("America/New_York")
     gk_to_time: dict[int, str] = {}
 
     # Strategy 1: fetch by game_pk (fast, exact)
@@ -629,7 +629,7 @@ def _fetch_missing_game_times(legs: list[dict], run_date: str) -> list[dict]:
             game_data = statsapi.get("game", {"gamePk": gk})
             raw = game_data["gameData"]["datetime"]["dateTime"]
             utc_dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-            gk_to_time[gk] = utc_dt.astimezone(et_tz).strftime("%Y-%m-%d %H:%M:%S")
+            gk_to_time[gk] = utc_dt.astimezone(_et_tz_ref).strftime("%Y-%m-%d %H:%M:%S")
         except Exception as e:
             print(f"[_fetch_missing_game_times] Warning: could not fetch time for game_pk {gk}: {e}")
     print(f"[_fetch_missing_game_times] Strategy 1 resolved {len(gk_to_time)}/{len(unique_pks)} game_pks")
@@ -826,8 +826,8 @@ async def handle_refresh(request: web.Request) -> web.Response:
         from src.utils.db import get_scored_legs, get_todays_recommendations
         from datetime import timezone, timedelta as _td
 
-        et_tz = pytz.timezone("America/New_York")
-        now_et = datetime.now(et_tz)
+        from src.utils.time_utils import now_et as _refresh_now_et
+        now_et = _refresh_now_et()
 
         # Only fetch games starting >3 hours from now to save API quota
         cutoff_utc = datetime.now(timezone.utc) + _td(hours=3)

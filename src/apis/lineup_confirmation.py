@@ -430,10 +430,9 @@ def run_confirmed_lineup_resolution(run_date_str: str, affected_parlay_ids: list
     )
     from src.engine.parlay_builder import build_parlays, TOTAL_LEGS
     from src.utils.sorting import sort_legs_by_game_time
-    import pytz
+    from src.utils.time_utils import now_et as _now_et
 
-    et_tz  = pytz.timezone("America/New_York")
-    now_et = datetime.now(et_tz)
+    now_et = _now_et()
 
     print(f"[clr] Starting confirmed_lineup_resolution for {len(affected_parlay_ids)} parlay(s)")
 
@@ -446,7 +445,7 @@ def run_confirmed_lineup_resolution(run_date_str: str, affected_parlay_ids: list
         FROM mlb_scored_legs
         WHERE run_date = %s
           AND game_start_time IS NOT NULL
-          AND game_start_time::timestamp > now()
+          AND game_start_time::timestamptz > now()
           AND (lineup_check_status IN ('LINEUP_CONFIRMED', 'MISSING_LINEUP_CONFIRMATION')
                OR lineup_check_status IS NULL)
           AND composite_score IS NOT NULL

@@ -476,9 +476,8 @@ def run_enriched_pipeline(scored_legs: list, production_batch_id: str = "") -> N
     )
 
     # Determine source label (matches production _source + _enriched suffix)
-    import pytz
-    _et = pytz.timezone("America/New_York")
-    _hour_et = datetime.datetime.now(_et).hour
+    from src.utils.time_utils import now_et as _now_et
+    _hour_et = _now_et().hour
     if _hour_et < 11:
         _source = "auto_9am_enriched"
     elif _hour_et < 14:
