@@ -26,6 +26,18 @@ _PROP_STAT_MAP = {
 
 _ballpark_cache: dict | None = None
 
+# ── Absolute-value matchup scoring constants ──────────────────────────────────
+# Ranges derived from actual mlb_scored_legs data (p5–p95, 11k+ legs, May–Jul 2026)
+# K/9 range confirmed by user 2026-07-10.
+_ERA_MID,   _ERA_HALF   = 4.25, 2.75   # range 1.50–7.00
+_WHIP_MID,  _WHIP_HALF  = 1.20, 0.50   # range 0.70–1.70
+_K9_MID,    _K9_HALF    = 8.25, 2.75   # range 5.50–11.00  (user-confirmed 2026-07-10)
+# Batter ranges: league-wide qualified-hitter estimates; validate after first shadow run.
+_OBP_MID,   _OBP_HALF   = 0.350, 0.070  # range 0.28–0.42
+_BA_MID,    _BA_HALF    = 0.265, 0.055  # range 0.21–0.32
+_KPCT_MID,  _KPCT_HALF  = 0.220, 0.100  # range 0.12–0.32
+_BBPCT_MID, _BBPCT_HALF = 0.090, 0.050  # range 0.04–0.14
+
 # ── Stack bonus constants ─────────────────────────────────────────────────────
 
 STACK_VULNERABILITY_THRESHOLD = 0.60   # bottom ~40% of the actual rank pool
@@ -37,6 +49,147 @@ STACK_ELIGIBLE_PROPS = {
     ("hits", "over"),         # bad pitcher → more hits → over hits
     # Future: ("totalBases", "over"), ("rbi", "over") if added to whitelist
 }
+
+
+# ── Linear adjustment helpers ────────────────────────────────────────────────
+
+def _clamp(val: float, limit: float) -> float:
+    return max(-limit, min(limit, val))
+
+
+def _linear_adj(value: float | None, midpoint: float, half_range: float, max_weight: float) -> float:
+    """
+    Standard linear scoring adjustment — clamped to ±max_weight.
+
+    adjustment = ((value − midpoint) / half_range) × max_weight
+
+    Returns 0.0 when value is None (graceful degradation for missing stats).
+    Sign convention: value > midpoint → positive adjustment.
+    Flip the return value for factors where below-midpoint should be positive.
+    """
+    if value is None:
+        return 0.0
+    return _clamp(((float(value) - midpoint) / half_range) * max_weight, max_weight)
+
+
+# ── Batter season stats ───────────────────────────────────────────────────────
+
+def _compute_batter_season_stats(leg: dict, season: int) -> dict | None:
+    """
+    Compute season-to-date BA, OBP, K%, BB% from the batter's game log.
+
+    Field names confirmed against live MLB-StatsAPI gameLog response 2026-07-10:
+    atBats, hits, baseOnBalls, strikeOuts, plateAppearances, hitByPitch
+    are all present in each split's stat dict.
+
+    Requires ≥50 plate appearances; returns None for small samples / no data.
+    """
+    player_id = leg.get("player_id")
+    if not player_id:
+        return None
+    try:
+        game_log = get_batter_game_log(int(player_id), season)
+    except Exception:
+        return None
+    if not game_log:
+        return None
+
+    ab = hits = bb = so = pa = hbp = 0
+    for g in game_log:
+        s = g.get("stat", {})
+        try:
+            ab  += int(s.get("atBats",           0) or 0)
+            hits += int(s.get("hits",             0) or 0)
+            bb  += int(s.get("baseOnBalls",       0) or 0)
+            so  += int(s.get("strikeOuts",        0) or 0)
+            pa  += int(s.get("plateAppearances",  0) or 0)
+            hbp += int(s.get("hitByPitch",        0) or 0)
+        except (ValueError, TypeError):
+            pass
+
+    if pa < 50:
+        return None
+
+    return {
+        "ba":     hits / ab if ab > 0 else None,
+        "obp":    (hits + bb + hbp) / pa,
+        "k_pct":  so / pa,
+        "bb_pct": bb / pa,
+    }
+
+
+# ── Absolute-value matchup adjustment ────────────────────────────────────────
+
+def _compute_matchup_adjustment(
+    stat: str,
+    direction: str,
+    era: float | None,
+    whip: float | None,
+    k9: float | None,
+    batter_stats: dict | None,
+) -> tuple[float, dict]:
+    """
+    Compute absolute-value matchup adjustment using linear scale formulas.
+
+    Per-prop weight table and combined caps (from session 19 build prompt):
+      hits/over:        ERA ±5, WHIP ±3 (weak pitcher → +)   combined cap ±7
+      hits/under:       ERA ±5, WHIP ±3 (elite pitcher → +)  combined cap ±7
+      strikeouts/over:  K/9 ±5 (high K/9 → +)                combined cap ±5
+      totalBases/under: Pitcher ERA ±4, WHIP ±2, K/9 ±1 +
+                        Batter OBP ±2, K% ±1.5, BB% ±1, BA ±0.5  combined cap ±12
+
+    For hits/over and hits/under: when the sum of individually-clamped factors
+    exceeds ±7, both factors are scaled proportionally (not hard-clipped).
+
+    Returns (total_adjustment, debug_fields_dict).
+    """
+    debug: dict = {}
+
+    if stat == "hits":
+        # Weak pitcher (high ERA/WHIP) → positive for over; elite → positive for under
+        sign = 1.0 if direction == "over" else -1.0
+        era_adj  = _linear_adj(era,  _ERA_MID,  _ERA_HALF,  5.0) * sign
+        whip_adj = _linear_adj(whip, _WHIP_MID, _WHIP_HALF, 3.0) * sign
+        raw = era_adj + whip_adj
+        cap = 7.0
+        if abs(raw) > cap and raw != 0.0:
+            scale    = cap / abs(raw)
+            era_adj  *= scale
+            whip_adj *= scale
+        debug["matchup_era_adj"]  = round(era_adj,  2)
+        debug["matchup_whip_adj"] = round(whip_adj, 2)
+        return era_adj + whip_adj, debug
+
+    if stat == "strikeouts" and direction == "over":
+        # High K/9 → positive
+        k9_adj = _linear_adj(k9, _K9_MID, _K9_HALF, 5.0)
+        debug["matchup_k9_adj"] = round(k9_adj, 2)
+        return k9_adj, debug
+
+    if stat == "totalBases" and direction == "under":
+        # Elite pitcher → positive (low ERA/WHIP, high K/9 → +)
+        era_adj  = -_linear_adj(era,  _ERA_MID,  _ERA_HALF,  4.0)
+        whip_adj = -_linear_adj(whip, _WHIP_MID, _WHIP_HALF, 2.0)
+        k9_adj   =  _linear_adj(k9,   _K9_MID,   _K9_HALF,   1.0)
+        debug["matchup_era_adj"]  = round(era_adj,  2)
+        debug["matchup_whip_adj"] = round(whip_adj, 2)
+        debug["matchup_k9_adj"]   = round(k9_adj,   2)
+
+        # Weak batter → positive (low OBP/BA/BB%, high K% → fewer total bases)
+        batter_total = 0.0
+        if batter_stats:
+            obp_adj  = -_linear_adj(batter_stats.get("obp"),   _OBP_MID,   _OBP_HALF,   2.0)
+            k_adj    =  _linear_adj(batter_stats.get("k_pct"), _KPCT_MID,  _KPCT_HALF,  1.5)
+            bb_adj   = -_linear_adj(batter_stats.get("bb_pct"),_BBPCT_MID, _BBPCT_HALF, 1.0)
+            ba_adj   = -_linear_adj(batter_stats.get("ba"),    _BA_MID,    _BA_HALF,    0.5)
+            batter_total = obp_adj + k_adj + bb_adj + ba_adj
+            debug["matchup_batter_adj"] = round(batter_total, 2)
+
+        total = _clamp(era_adj + whip_adj + k9_adj + batter_total, 12.0)
+        return total, debug
+
+    # Prop/direction not covered by matchup formulas — no adjustment
+    return 0.0, debug
 
 
 # ── Pitcher vulnerability scoring ─────────────────────────────────────────────
@@ -358,70 +511,32 @@ def _calculate_enriched_score(
     stat = leg.get("stat", "")
     direction = leg.get("direction", "over")
 
-    n = max(len(pitcher_ranks), 2)
-    midpoint = (n + 1) / 2.0
-
     # Line gate: totalBases is only meaningful at the 1.5 line
     if stat == "totalBases" and leg.get("best_line") != 1.5:
         return None
 
-    # ── Signal 1: Blended ERA rank replaces raw pitcher_era in matchup calc ───
+    # ── Signal 1: Blended ERA rank (stored as metadata, no longer drives scoring) ─
     blended_era_rank, recent_form_rank = _compute_blended_era_rank(
         leg, pitcher_ranks, season
     )
     enriched["blended_era_rank"] = blended_era_rank
     enriched["recent_form_rank"] = recent_form_rank
 
-    # K/9 rank signal for strikeouts over props
-    # Rank convention: rank 1 = highest K/9 = elite = batter MORE likely to strikeout = BOOST SO/over
-    # High rank (weak K pitcher) = batter LESS likely to strikeout = PENALIZE SO/over
-    if stat == "strikeouts" and direction == "over":
-        k9_rank = leg.get("opp_pitcher_k9_rank")
-        if k9_rank is not None:
-            # rank 1 (elite K/9) → +5 boost for SO/over
-            # midpoint → 0
-            # high rank (weak K/9) → -5 penalty for SO/over
-            k9_adj = round((midpoint - k9_rank) / (midpoint - 1) * 5.0, 1)
-            k9_adj = max(-5.0, min(5.0, k9_adj))
-            score += k9_adj
-            enriched["k9_adj"] = k9_adj
+    # ── Matchup adjustment (absolute-value linear scale, Session 19) ──────────
+    raw_era  = leg.get("pitcher_era")
+    raw_whip = leg.get("pitcher_whip")
+    raw_k9   = leg.get("pitcher_k9")
 
-    # Pitcher vulnerability signal for hits/over only
-    # Low vulnerability (elite pitcher) → penalize hits/over; hits/under has no pitcher signal
-    if stat == "hits" and direction == "over":
-        max_era_rank  = max((v.get("era_rank")  or 0 for v in pitcher_ranks.values()), default=0)
-        max_k9_rank   = max((v.get("k9_rank")   or 0 for v in pitcher_ranks.values()), default=0)
-        max_whip_rank = max((v.get("whip_rank") or 0 for v in pitcher_ranks.values()), default=0)
-        vuln = pitcher_vulnerability(leg, max_era_rank, max_k9_rank, max_whip_rank)
-        if vuln is not None:
-            # Recalibrated Jun 25, 2026 based on 400 resolved hits/over legs:
-            # Sweet spot is vuln 0.20–0.49 (64–68% win rate).
-            # Penalties are symmetric: elite pitchers suppress hits/over,
-            # AND weak pitchers suppress hits/over (book prices weakness in).
-            # Elite pitcher penalty (<0.15 → -10 removed — only 19 legs,
-            # and 57.9% win rate doesn't justify -10pt penalty).
-            if vuln < 0.20:          # elite pitcher — mild suppression
-                score -= 6
-            elif vuln < 0.30:        # good pitcher — slight suppression
-                score -= 3
-            elif vuln >= 0.65:       # weak pitcher — book prices it in, hurts bets
-                score -= 6
-            elif vuln >= 0.50:       # below-avg pitcher — mild suppression
-                score -= 3
+    batter_stats: dict | None = None
+    if stat == "totalBases" and direction == "under":
+        batter_stats = _compute_batter_season_stats(leg, season)
 
-    # WHIP rank signal for totalBases props
-    # Low WHIP (rank 1) = elite pitcher = fewer baserunners = boost UNDER, penalize OVER
-    # High WHIP (rank 30) = weak pitcher = more baserunners = boost OVER, penalize UNDER
-    if stat == "totalBases":
-        whip_rank = leg.get("opp_pitcher_whip_rank")
-        if whip_rank is not None:
-            # rank 1 → -5, rank 15.5 → 0, rank 30 → +5
-            whip_adj = round((whip_rank - midpoint) / (midpoint - 1) * 5.0, 1)
-            whip_adj = max(-5.0, min(5.0, whip_adj))
-            if direction == "under":
-                whip_adj = -whip_adj  # invert: elite WHIP boosts under
-            score += whip_adj
-            enriched["whip_adj"] = whip_adj
+    matchup_adj, matchup_debug = _compute_matchup_adjustment(
+        stat, direction, raw_era, raw_whip, raw_k9, batter_stats
+    )
+    score += matchup_adj
+    enriched.update(matchup_debug)
+    enriched["matchup_adj"] = round(matchup_adj, 2)
 
     # Lineup stability (unchanged from simple_scorer)
     lineup_consistency = leg.get("lineup_consistency")
@@ -457,9 +572,11 @@ def _calculate_enriched_score(
         else:
             score += park_adjustment
 
-    enriched.setdefault("era_adj", None)
-    enriched.setdefault("k9_adj", None)
-    enriched.setdefault("whip_adj", None)
+    enriched.setdefault("matchup_adj",         None)
+    enriched.setdefault("matchup_era_adj",     None)
+    enriched.setdefault("matchup_whip_adj",    None)
+    enriched.setdefault("matchup_k9_adj",      None)
+    enriched.setdefault("matchup_batter_adj",  None)
     enriched["composite_score"] = max(5.0, min(95.0, score))
     return enriched
 
@@ -537,9 +654,7 @@ def score_legs(
             if enriched_fields is None:
                 # Leg excluded by line gate (e.g. totalBases non-1.5 line)
                 leg["composite_score"] = None
-                leg.setdefault("era_adj", None)
-                leg.setdefault("k9_adj", None)
-                leg.setdefault("whip_adj", None)
+                leg.setdefault("matchup_adj", None)
             else:
                 leg.update(enriched_fields)
         except Exception as e:
@@ -552,9 +667,7 @@ def score_legs(
             leg.setdefault("park_adjustment", None)
             leg.setdefault("blended_era_rank", None)
             leg.setdefault("recent_form_rank", None)
-            leg.setdefault("era_adj", None)
-            leg.setdefault("k9_adj", None)
-            leg.setdefault("whip_adj", None)
+            leg.setdefault("matchup_adj", None)
 
     if legs:
         scores = [l["composite_score"] for l in legs if l.get("composite_score") is not None]
