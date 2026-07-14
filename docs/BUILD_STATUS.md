@@ -61,6 +61,10 @@
 │                                    collapsed from 17.3-vs-43.9 to 15.7-vs-   │
 │                                    18.8 (Session 18 finding). Real shift or  │
 │                                    noise, undetermined — ~1 week of data.    │
+│                                    Session 20: production 7/8-7/9 check adds │
+│                                    2 more weak reads — 33.3%/45.5% leg WR    │
+│                                    vs ~61.6% baseline. 3 consecutive weak    │
+│                                    reads now — priority raised to High.      │
 ├────────────────────────────────────────────────────────────────────────────────┤
 │ SCORING — SHADOW (enriched_scorer.py)                                          │
 │ Offense Stack Bonus:            ✅ ACTIVE and firing (confirmed Session 18 — │
@@ -250,7 +254,7 @@
 | Install pytest in venv | — (environment) | High — blocks the above |
 | Live-data performance recheck of new builder | — (verification only) | High — once ~1 week of data exists |
 | Rerun TB/under construction-strategy analysis under new builder | `parlay_builder.py` / analysis only | Medium — before any promotion decision |
-| Recheck SO/over pool-composition softening | — (verification only) | Medium — once more volume accumulates |
+| Recheck SO/over pool-composition softening | — (verification only) | **High** (raised Session 20 — 3 consecutive weak reads: Session 18 + 7/8 + 7/9) |
 | Cancel SGO Pro subscription (account-level, not code) | — (manual action) | High — carried multiple sessions, not yet confirmed |
 | Add hits/over coverage ceiling at ~80% | `main.py` | High — data reconfirmed Session 18, still not implemented |
 | Re-evaluate K/9 / WHIP with starter-only data | `enriched_scorer.py` | Medium — new small-sample reversal signal adds urgency |

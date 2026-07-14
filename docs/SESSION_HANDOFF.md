@@ -10,6 +10,7 @@
 ✅ **37 enriched scorer tests + 9 lineup confirmation tests committed and passing**
 ✅ **Issue A: game_start_time UTC/ET contamination fully remediated — 503 rows fixed, both tables clean**
 ✅ **Issue B: Brandon Lowe / hits-over matchup_adj NULL — resolved (root cause reconstructed, fix confirmed live on 2026-07-10)**
+⚠️ **7/8-7/9 production check: parlay win rate 4.5% (21/22 lost) — explained by leg-mix math (hits/over strong, strikeouts/over weak), not a new bug. SO/over softening now has 2 more days of supporting data — see Pending Item #7 (elevated).**
 🔲 **Pending user action (carried from Session 17): cancel SGO Pro subscription ($149/mo)**
 🔲 **Pending: first true end-to-end test of the manual pick flow (submit → resolve) — still not done**
 ⚠️ **New shadow scorer running live — compare shadow vs. production win rate after a few weeks**
@@ -250,6 +251,26 @@ A standalone 7-case test script validated the new logic (4-6 leg range, floor en
 
 ---
 
+## Production Performance Check — July 8-9, 2026 (checked 2026-07-10, end of Session 20)
+
+**Requested as a sanity check before closing out Session 20.** Parlay-level results looked alarming at first glance — worth documenting the actual finding so it isn't re-investigated from scratch next session.
+
+**Parlay-level:** 21 of 22 resolved parlays lost across both days (4.5% win rate). Only one parlay won (a `confirmed_lineup_resolution` rebuild on 7/8).
+
+**Leg-level (deduped, matches the row-inflation-safe query pattern in `SUPABASE_SCHEMA_REFERENCE.md`):**
+| Date | Prop | Resolved | Win Rate |
+|---|---|---|---|
+| 7/8 | hits/over | 22 | 59.1% |
+| 7/8 | strikeouts/over | 9 | 33.3% |
+| 7/9 | hits/over | 20 | 65.0% |
+| 7/9 | strikeouts/over | 11 | 45.5% |
+
+**Conclusion: not a new bug.** hits/over is at or above its ~62% historical baseline on both days — no concern. strikeouts/over is well below its ~61.6% baseline on both days (combined 8/20 = 40%), which is more data in the same direction as the already-tracked "SO/over pool softening" item (see Pending Item #7 below, elevated this session). The parlay-level near-shutout is consistent with what leg-level AND-condition math predicts once a weak prop is mixed into 4-6-leg parlays — e.g. 3 hits/over legs at ~62% × 2 strikeouts/over legs at ~40% ≈ 3.8% expected parlay win rate, close to the ~4.5% actually observed. Not flagged as a new investigation.
+
+**Ruled out as a cause:** confirmed none of the three scratch events on these two days (Tyler Callihan, Rodolfo Duran on 7/8; Willson Contreras on 7/9) used Item 1's new time-gated reduce-path — Item 1 hadn't deployed yet at the time these ran, so nothing from Session 19/20's fixes touches this window. The dangling `clr_2026-07-08_2125` reference also shows up here again — this is the same historical dead-link case already found and explicitly not backfilled (Item 1 fix is going-forward-only), not a new occurrence.
+
+---
+
 ## Pending Items — Next Session
 
 ### 1. Complete the manual-pick end-to-end test (High Priority — never actually completed)
@@ -270,8 +291,8 @@ The enriched scorer rebuild is live in shadow. Check it against the comparison q
 ### 6. Re-evaluate TB/under construction strategy under the new builder (Medium Priority, carried)
 Combinatorial-drag numbers were generated under the old fixed-4-leg builder. Re-run before any promotion decision.
 
-### 7. SO/over pool softening — recheck with more volume (Medium Priority, carried from Session 18)
-The composite score's K/9-rank differentiation weakened post-slot-gate-fix. More data needed before drawing conclusions.
+### 7. SO/over pool softening — recheck with more volume (Priority raised: Medium → High, carried from Session 18, reinforced Session 20)
+The composite score's K/9-rank differentiation weakened post-slot-gate-fix. Session 18 had ~1 week of thin post-fix data. Session 20's production check (7/8-7/9) adds two more consecutive weak reads: 33.3% (n=9) and 45.5% (n=11) leg-level win rate on strikeouts/over, both well under the ~61.6% historical baseline, and this prop is the main driver behind the 4.5% parlay win rate over those two days (see "Production Performance Check" above). Individually-thin samples, but now three separate reads in the same direction rather than one — raising priority since it's no longer a single cold stretch.
 
 ### 8. Cancel SGO Pro subscription (High Priority, carried from Session 17, still not done)
 Code change validated. Account-level downgrade is a manual action outside the codebase.
@@ -304,7 +325,7 @@ Retire `README_10.md` and other stale files from Project Knowledge.
 ⚠️ New builder logic has limited live-data performance validation — only ~2 days under new logic
 ⚠️ Manual pick end-to-end flow (submit → resolve) still never actually tested
 ⚠️ Builder's 7-case regression test suite was never committed — zero persisted test coverage for the biggest architecture change in the project
-⚠️ SO/over pool softening — real effect or noise, undetermined
+⚠️ SO/over pool softening — priority raised to High (Session 20): 3 consecutive weak reads now (Session 18's ~1 week + 7/8 33.3% + 7/9 45.5%), still not enough volume to call it confirmed, but no longer a single cold stretch
 ⚠️ TB/under construction-strategy numbers stale relative to the new builder
 🔲 SGO Pro subscription cancellation still not confirmed (carried multiple sessions)
 ⚠️ hits/over ~80% coverage ceiling still not implemented (carried, reconfirmed)
@@ -326,7 +347,7 @@ See the prior version of this document (or git history) for full Session 17 deta
 
 ---
 
-**Last Review:** July 10, 2026
-**System Status:** ✅ Operational — Session 19 Deployed (scratch rewrite, manual dashboard column, shadow scorer rebuild)
-**Next Review:** Validate batter ranges after first shadow runs / complete manual-pick end-to-end test / compare shadow vs. production win rate after ~3-4 weeks
-**Pending Decisions:** TB/under construction strategy under new builder (rerun analysis first), SO/over softening recheck (more volume needed), SGO Pro cancellation (user action, still not confirmed), hits/over ceiling implementation (carried, no target date set)
+**Last Review:** July 10, 2026 (Session 20)
+**System Status:** ✅ Operational — Session 20 closed out (game_start_time contamination remediated, Brandon Lowe/matchup_adj issue resolved, 7/8-7/9 production check completed — no new bugs found, SO/over softening priority raised)
+**Next Review:** SO/over softening recheck now High Priority (3 consecutive weak reads) / validate batter ranges after first shadow runs / complete manual-pick end-to-end test / compare shadow vs. production win rate after ~3-4 weeks
+**Pending Decisions:** SO/over softening — is this real degradation or noise (elevated priority, Session 20), TB/under construction strategy under new builder (rerun analysis first), SGO Pro cancellation (user action, still not confirmed), hits/over ceiling implementation (carried, no target date set)
