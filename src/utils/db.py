@@ -787,6 +787,7 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
             leg.get("opp_pitcher_era_rank") if leg.get("opp_pitcher_era_rank") is not None else leg.get("pitcher_era_rank"),
             leg.get("opp_pitcher_k9_rank")  if leg.get("opp_pitcher_k9_rank")  is not None else leg.get("pitcher_k9_rank"),
             leg.get("opp_pitcher_whip_rank") if leg.get("opp_pitcher_whip_rank") is not None else leg.get("pitcher_whip_rank"),
+            leg.get("lineup_consistency"),
         )
         for leg in legs
         if leg.get("stat") and leg.get("player_name") and leg.get("odd_id")
@@ -807,7 +808,7 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
              coverage_overall, coverage_vs_hand, coverage_recent_10,
              pitcher_id, pitcher_name, pitcher_team, pitcher_era, pitcher_k9, pitcher_whip,
              batter_hand, pitcher_vs_batter_hand_era,
-             pitcher_era_rank, pitcher_k9_rank, pitcher_whip_rank)
+             pitcher_era_rank, pitcher_k9_rank, pitcher_whip_rank, lineup_consistency)
         VALUES %s
         ON CONFLICT (run_date, odd_id) DO UPDATE
             SET composite_score             = COALESCE(mlb_scored_legs.composite_score,             EXCLUDED.composite_score),
@@ -826,7 +827,8 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
                 pitcher_vs_batter_hand_era  = COALESCE(mlb_scored_legs.pitcher_vs_batter_hand_era,  EXCLUDED.pitcher_vs_batter_hand_era),
                 pitcher_era_rank            = COALESCE(mlb_scored_legs.pitcher_era_rank,            EXCLUDED.pitcher_era_rank),
                 pitcher_k9_rank             = COALESCE(mlb_scored_legs.pitcher_k9_rank,             EXCLUDED.pitcher_k9_rank),
-                pitcher_whip_rank           = COALESCE(mlb_scored_legs.pitcher_whip_rank,           EXCLUDED.pitcher_whip_rank)
+                pitcher_whip_rank           = COALESCE(mlb_scored_legs.pitcher_whip_rank,           EXCLUDED.pitcher_whip_rank),
+                lineup_consistency          = COALESCE(mlb_scored_legs.lineup_consistency,          EXCLUDED.lineup_consistency)
         """,
         rows,
     )

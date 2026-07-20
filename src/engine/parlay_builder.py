@@ -1,7 +1,7 @@
 """
 parlay_builder.py — Single flat pool parlay builder for MLB.
 
-Parlays are 4–6 legs from a single flat pool.
+Parlays are fixed 4 legs from a single flat pool.
 Combined odds minimum: +400. No ceiling.
 
 Pool: composite_score >= 65, odds in [-250, +150].
@@ -27,7 +27,7 @@ _PITCHER_POSITIONS = frozenset({"SP", "RP", "P"})
 # Parlay structure constants
 MIN_PARLAY_ODDS    = 400
 MIN_LEGS           = 4
-MAX_LEGS           = 6
+MAX_LEGS           = 4
 TOTAL_LEGS         = MIN_LEGS   # backward-compat alias (imported by lineup_confirmation.py)
 MIN_COV_POOL       = 65.0
 MIN_COV_POOL_UNDER = 65.0  # hits/under gate raised from 40% to 65% (Jun 25, 2026)
@@ -136,7 +136,7 @@ def build_parlays(
     """
     Build up to top_n parlays from a single flat leg pool.
 
-    4–6 legs per parlay. Minimum combined odds: +400. No ceiling.
+    Fixed 4 legs per parlay. Minimum combined odds: +400. No ceiling.
     All legs must have composite_score >= 65, odds -250 to +150.
 
     Selection is greedy by composite_score (highest first). Walks the sorted

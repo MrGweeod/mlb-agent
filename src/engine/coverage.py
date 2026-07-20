@@ -51,6 +51,9 @@ from src.utils.db import get_player_handedness
 # Position codes that identify a pitcher
 PITCHER_POSITIONS = frozenset({"P", "SP", "RP", "TWP"})
 
+# Minimum recent games threshold for coverage_recent_10
+MIN_RECENT_GAMES = 5
+
 BASE_URL = "https://statsapi.mlb.com/api/v1"
 
 # Prop type → stat field in batter game log
@@ -287,7 +290,10 @@ def _hitter_coverage(
     # Recent 10 games
     recent_log = full_log[-10:]
     recent_covered, recent_games = _count_coverage(recent_log, stat_field, line, direction)
-    coverage_recent_10 = round(100.0 * recent_covered / recent_games, 1) if recent_games > 0 else None
+    coverage_recent_10 = (
+        round(100.0 * recent_covered / recent_games, 1)
+        if recent_games >= MIN_RECENT_GAMES else None
+    )
 
     # Handedness split
     coverage_vs_hand = None
@@ -373,7 +379,10 @@ def _pitcher_coverage(
     return {
         "coverage_overall":  round(100.0 * overall_covered / overall_games, 1),
         "coverage_vs_hand":  None,
-        "coverage_recent_10": round(100.0 * recent_covered / recent_games, 1) if recent_games > 0 else None,
+        "coverage_recent_10": (
+            round(100.0 * recent_covered / recent_games, 1)
+            if recent_games >= MIN_RECENT_GAMES else None
+        ),
         "games_total":       overall_games,
         "games_vs_hand":     None,
         "games_recent":      recent_games,
