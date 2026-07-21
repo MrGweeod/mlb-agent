@@ -1,19 +1,79 @@
 # MLB Parlay Agent — Session Handoff
-**Last Updated:** July 10, 2026 (Session 20 — game_start_time UTC/ET contamination cleanup; Brandon Lowe / hits-over matchup_adj NULL root cause investigation)
+**Last Updated:** July 20, 2026 (Session 21 — Post-All-Star-break production investigation: parlay-builder leg-count EV regression found and reverted, lineup_consistency DB-persistence bug found and fixed, pitcher ERA signal confirmed inverted (rebuild scoped, not implemented), coverage_recent_10 sample floor added)
 
 ## Current Status
-✅ **OPERATIONAL — SESSION 19 DEPLOYED**
-✅ **Scratch handling rewritten: time-gated reduce-path (drop legs, keep parlay) vs. rebuild-path**
-✅ **Dead-link bug fixed: `superseded_by_batch_id` no longer set when no replacement was inserted**
-✅ **Manual dashboard: `coverage_overall` column added alongside `coverage_vs_hand`**
-✅ **Shadow scoring rebuilt: absolute-value linear-scale pitcher/batter signals replace rank buckets**
-✅ **37 enriched scorer tests + 9 lineup confirmation tests committed and passing**
-✅ **Issue A: game_start_time UTC/ET contamination fully remediated — 503 rows fixed, both tables clean**
-✅ **Issue B: Brandon Lowe / hits-over matchup_adj NULL — resolved (root cause reconstructed, fix confirmed live on 2026-07-10)**
-⚠️ **7/8-7/9 production check: parlay win rate 4.5% (21/22 lost) — explained by leg-mix math (hits/over strong, strikeouts/over weak), not a new bug. SO/over softening now has 2 more days of supporting data — see Pending Item #7 (elevated).**
+✅ **OPERATIONAL — SESSION 21 FIXES ON BRANCH, PENDING MERGE TO MASTER**
+✅ **Parlay builder reverted: MAX_LEGS 6→4 (fixed 4-leg structure restored) — Session 18's floor-only/4-6-leg redesign proven -EV against live data, reverted this session**
+✅ **`lineup_consistency` DB-persistence bug fixed — `db.py`'s INSERT into `mlb_scored_legs` never included the column; had been silently NULL for 100% of ~18,000+ rows since project inception**
+✅ **`coverage_recent_10` sample-size floor added (`MIN_RECENT_GAMES = 5`) — previously any recent_games > 0 (even 1) produced a trusted value; fixed in both hitter and pitcher paths (shared code, benefits shadow too)**
+✅ **14 new tests committed (`tests/test_bug_fixes.py`) — 76 total passing (62 original + 14 new)**
+⚠️ **Pitcher ERA signal confirmed inverted via controlled analysis (holding base coverage constant) — same root-cause pattern as the WHIP signal removed Session 15 (both pulled from the same uncapped, role-blind, 5.0-IP-floor cumulative season stat). Rebuild scoped (recent-starts ERA via a new `get_pitcher_game_log()`, higher IP floor, backtest before shipping) but explicitly NOT implemented this session — deferred by user decision. Still ACTIVE and unchanged in `simple_scorer.py`.**
+⚠️ **K/9-rank signal shares the same underlying data-source risk as ERA (same `_fetch_pitcher_season_stats()` call) but controlled testing came back mixed/inconclusive, not clearly inverted — monitor, no action taken**
+🔲 **Pending: confirm the Step 5b lineup_consistency pre-filter in `main.py` is actually running successfully against live Railway logs — persistence bug fix doesn't tell us whether the upstream filter itself has been silently no-op'ing this whole time**
 🔲 **Pending user action (carried from Session 17): cancel SGO Pro subscription ($149/mo)**
 🔲 **Pending: first true end-to-end test of the manual pick flow (submit → resolve) — still not done**
-⚠️ **New shadow scorer running live — compare shadow vs. production win rate after a few weeks**
+
+**Carried from Session 20 (still true, no change this session):**
+✅ Scratch handling rewritten: time-gated reduce-path (drop legs, keep parlay) vs. rebuild-path
+✅ Shadow scoring rebuilt: absolute-value linear-scale pitcher/batter signals replace rank buckets
+✅ Issue A (game_start_time UTC/ET contamination) and Issue B (Brandon Lowe/matchup_adj NULL) — both resolved, reconfirmed clean this session (health-check query re-run, zero conflicts since 7/10)
+⚠️ New shadow scorer running live — compare shadow vs. production win rate after a few weeks (still pending, see Pending Items)
+
+---
+
+## What Happened on July 20, 2026 (Session 21)
+
+**Context.** First review since the All-Star break (games resumed July 17). Operator asked for a 3-day production + shadow performance check (7/17-7/19), excluding `manual_pick` source, prompted by concern that pre-break changes were responsible for a perceived decline.
+
+### Investigation 1 — 3-Day Post-Break Performance Check
+
+Production: 33 resolved parlays, 2 won (6.1%). Shadow: 36 resolved, 7 won (19.4%). Leg-level win rates for both pipelines were healthy (58-68% weekly, in line with historical norms) — the weakness was concentrated at the parlay level, not the leg level.
+
+### Investigation 2 — Root Cause Is the July 8 Builder Redesign, Not the July 10 Changes
+
+The operator's original hypothesis was the Session 19/20 changes (scratch handling, timezone centralization), deployed July 10. Git history confirmed **nothing was pushed to `master` between 7/10 and 7/20 except a docs-only commit (`6b5ca06`, 7/14)** — no code changes exist in the window the operator suspected. Void rate actually *improved* post-7/10 (consistent with the scratch-handling fix working as intended), and no `game_start_time` contamination had reoccurred. Weekly production win rate showed a **multi-week decline that predates 7/10** (18.8%→26.3%→15.3%→20.0%→14.5%→9.9%→6.1%, week of 6/1 through week of 7/13) — the week of 7/6 (all pre-7/10) was already at 9.9%.
+
+The actual fingerprint: **avg legs/parlay jumped from a fixed 4.00 (100% 4-leg, all of June) to 4.4-4.5 (only ~45% 4-leg) exactly at the July 8 builder redesign** (Session 18, `ARCHITECTURE_DECISIONS.md` §21 — floor-only odds, flexible 4-6 leg count). With individual legs winning independently at ~60-65%, more legs per parlay mechanically drives down parlay-level win rate (0.62⁴≈15% vs 0.62⁶≈6%) even with unchanged leg quality — confirmed leg quality didn't meaningfully change (avg `composite_score` of selected legs: 73.7 pre-redesign vs 71.3 post).
+
+### Investigation 3 — EV Confirms It's a Real Loss, Not Just Optics
+
+Actual dollar EV per $1 staked, pre- vs. post-redesign:
+
+| Era | Legs | n | Win Rate | Avg Odds | EV per $1 |
+|---|---|---|---|---|---|
+| Pre-redesign | 4 | 486 | 20.2% | +450 | **+$0.128** |
+| Post-redesign | 4 | 28 | 7.1% | +419 | **−$0.662** |
+| Post-redesign | 5 | 58 | 8.6% | +574 | **−$0.416** |
+
+The higher payout on longer parlays does not compensate for the lower hit rate — both post-redesign buckets are solidly negative EV, while the pre-redesign fixed-4-leg structure was solidly positive on a large sample.
+
+**Simulated hard 4-leg cap** (top-4-by-`composite_score` within each actual post-redesign parlay, using current signals): 14.5-16.7% win rate, −$0.25 to −$0.34 EV per $1 (n=48-69, two overlapping windows). Better than the current 5-6-leg structure, but **doesn't cleanly restore the pre-redesign +$0.128 EV** — flagged honestly as either small-sample noise (windows disagreed by ~10 points against each other) or a second, unisolated factor (in-season signal drift, All-Star-break calendar noise on recent-form signals). Not resolved this session — see Pending Items.
+
+**Decision:** revert `MAX_LEGS` from 6 back to 4 (fixed 4-leg parlays). Backed by the large pre-redesign sample; the "does it fully restore profitability" question is left open for live tracking rather than further backtesting, given sample-size limits.
+
+### Investigation 4 — Signal Audit: What's Actually Working
+
+Systematic check of every adjustment in `simple_scorer.py`, controlling for the selection-bias trap where `composite_score >= 65` gating can make a bonus look bad or a penalty look good purely because bonused legs needed less base coverage to qualify.
+
+**`lineup_consistency` — confirmed dead, not a scoring problem.** `main.py` computes it correctly in memory (Step 5b filter, `<0.70` removes the leg unless an injury-expanded-role exception applies), but `db.py`'s `log_scored_legs()` INSERT for `mlb_scored_legs` never included the column in its column list or values tuple — computed, then silently discarded before reaching the database. 100% NULL across the entire season (18,356/18,356 rows, 4/17-7/20). **Fixed this session** (Fix 2 below). Note: fixing persistence doesn't confirm the upstream Step 5b filter has actually been running successfully — see Pending Items.
+
+**Pitcher ERA adjustment — confirmed inverted, controlling for base coverage.** `pitcher_era` comes from `_fetch_pitcher_season_stats()` in `src/apis/matchup.py` — cumulative full-season ERA, 5.0 IP floor, no role/recency separation. This is the *same function and same raw stat split* WHIP was pulled from on June 25 for "reliever-contaminated pool" reasons. Bucketed by base coverage band (~5-pt bands), the "weak pitcher" bucket (ERA>5.0, gets a +5 boost for hits/over) underperformed "neutral" in every band and underperformed "ace pitcher" (ERA<3.0, −5 penalty) in 3 of 4 bands — e.g. band ~72 coverage: ace 63.8% (n=80), neutral 59.8% (n=246), weak-pitcher 54.2% (n=59). The adjustment is currently rewarding exactly the legs that perform worse. **Not fixed this session** — operator explicitly wants ERA kept as a signal (reasonable — pitcher quality should matter), so a rebuild was scoped rather than a removal: replace cumulative season ERA with a recent-starts ERA (new `get_pitcher_game_log()`, same pattern as the existing batter game-log function), raise the sample floor from 5.0 IP to ~3 starts, and backtest the replacement with the same controlled-band method before shipping. **Deferred to a future session.**
+
+**K9-rank adjustment — same data-source risk, inconclusive evidence.** Also sourced from `_fetch_pitcher_season_stats()`, same theoretical contamination risk as ERA. Controlled-band test came back mixed (one band showed the expected direction, another inverted it) rather than consistently backwards — plausibly because K/9 is a more stable, less luck-dependent stat than ERA. **No action taken — monitor with more data before deciding.**
+
+**Streak/consistency adjustment (`coverage_recent_10` gap) — weak signal, missing sample floor.** Bucketed win rate spanned only 57.1%-63.3% and was non-monotonic (the "severe cold" bucket, −6 penalty, actually beat "moderate cold," −4 penalty: 61.5% vs 57.1%). Root cause: `coverage_recent_10` in `src/engine/coverage.py` had no minimum-sample floor — `coverage_overall` requires `get_season_minimum(overall_games)` before being trusted, but the recent-10 window would compute and trust a value off as few as 1 logged game. **Fixed this session** (Fix 3 below) — `MIN_RECENT_GAMES = 5` added, applied to both `_hitter_coverage()` and `_pitcher_coverage()` (shared code — benefits the shadow scorer too, no separate fix needed there).
+
+### Fixes Shipped This Session (branch: `fix/leg-cap-lineup-consistency-streak-floor`)
+
+**Fix 1 — `src/engine/parlay_builder.py`:** `MAX_LEGS` 6→4. Docstrings updated. Verified the greedy-selection loop's boundary behavior directly: with `MIN_LEGS == MAX_LEGS == 4`, the early-exit check (`len(legs) >= MIN_LEGS and combined_dec >= floor`) and the hard cap (`len(legs) >= MAX_LEGS`) now converge at the same point — no off-by-one, no infinite-loop risk, confirmed by direct code read of `build_parlays()` in addition to the new tests passing.
+
+**Fix 2 — `src/utils/db.py`:** `log_scored_legs()`'s INSERT for `mlb_scored_legs` — added `lineup_consistency` to the column list, the values tuple (`leg.get("lineup_consistency")`), and the `ON CONFLICT` `COALESCE` clause. Confirmed only one `INSERT INTO mlb_scored_legs` exists in the file.
+
+**Fix 3 — `src/engine/coverage.py`:** `MIN_RECENT_GAMES = 5` constant added; `coverage_recent_10` now returns `None` (skipping the adjustment entirely) when `recent_games < 5`, in both `_hitter_coverage()` and `_pitcher_coverage()`.
+
+**Tests:** `tests/test_bug_fixes.py` (new, 340 lines, 14 tests across 5 classes) — leg-count boundary behavior, `lineup_consistency` column/tuple/conflict-clause presence via source inspection, `coverage_recent_10` floor behavior on both paths. Full suite: 76 passing (62 original + 14 new), 0 failures.
+
+**Status: on branch, not yet merged to master as of this doc update.**
 
 ---
 
@@ -273,37 +333,49 @@ A standalone 7-case test script validated the new logic (4-6 leg range, floor en
 
 ## Pending Items — Next Session
 
-### 1. Complete the manual-pick end-to-end test (High Priority — never actually completed)
-Submit one real parlay from `/manual`, confirm it lands in `mlb_parlay_recommendations_v2` with `source = 'manual_pick'` and correct leg data in `mlb_parlay_legs_v2`, then confirm it resolves correctly (not left `pending`) after the next 9am run. Deferred through Sessions 18 and 19.
+### 1. Merge Session 21 branch to master and deploy (High Priority — blocks everything below that needs live data)
+`fix/leg-cap-lineup-consistency-streak-floor` is reviewed and ready (diffs verified line-by-line) but not yet merged as of this doc update. Nothing below involving new data can start until this is live.
 
-### 2. Commit regression tests for the greedy parlay builder (High Priority, carried from Session 18)
-The 7 synthetic test cases that validated the builder rewrite were run ad hoc from `/tmp` and never committed. Build `tests/test_parlay_builder.py` covering: 4-6 leg range, floor enforcement, no ceiling, per-game/per-player constraints, insufficient-pool no-op.
+### 2. Confirm the lineup_consistency Step 5b filter is actually running (High Priority, new Session 21)
+The DB-persistence fix means `lineup_consistency` will start populating going forward, but that doesn't confirm the upstream filter in `main.py` (Step 5b — removes legs with `lineup_consistency < 0.70` unless injury-exception) has been successfully calling the MLB Stats API this whole time. The whole block is wrapped in a broad `try/except` that would silently swallow an import or runtime error. Check a live Railway log for `[5b]`/`[lineup_consistency]` print output on a recent run to confirm it's actually executing and removing legs, not silently hitting the except branch every run.
 
-### 3. Backtest new floor-only/4-6-leg builder against real performance (High Priority, carried)
-Once ~2 weeks of live data exist under the new builder, run a proper pre/post comparison (parlay win rate, leg-count distribution, void rate) the way the slot-gate fix was rechecked in Session 18.
+### 3. Watch leg-cap revert live performance (High Priority, new Session 21)
+Parlay win rate should move back toward the 15-20% range within days of the fixed-4-leg revert going live. If it doesn't, that's a signal the "doesn't fully restore pre-redesign EV" gap found in this session's simulation (Investigation 3) is real and not just small-sample noise — worth a fresh pre/post comparison after ~1-2 weeks.
 
-### 4. Validate batter ranges for shadow scorer after first shadow run (High Priority, new Session 19)
+### 4. Scope and build the pitcher ERA signal rebuild (High Priority, new Session 21, explicitly deferred by operator this session)
+Replace cumulative season ERA with recent-starts ERA: build `get_pitcher_game_log()` (same StatsAPI gameLog pattern as the existing batter function), compute ERA over the pitcher's last 5 starts, raise the minimum sample floor from 5.0 IP to ~3 starts. Backtest with the same controlled-band method used this session (bucket by base coverage, compare win rate across ERA tiers) before wiring it into `simple_scorer.py` — do not ship without that validation, since the original signal never got this treatment and that's exactly how it went unnoticed this long.
+
+### 5. Re-validate lineup_consistency's 0.70 filter threshold once data accumulates (Medium Priority, new Session 21)
+No historical data exists to backtest the 0.70 cutoff itself — it's never been persisted before this session's fix. Once a few weeks of live data exist, check whether 0.70 is actually the right line, the same way other thresholds in this project have been tuned from real data rather than left at their original guess.
+
+### 6. Monitor K9-rank signal with more data (Medium Priority, new Session 21)
+Shares the same theoretical data-source risk as the now-confirmed-inverted ERA signal (same `_fetch_pitcher_season_stats()` call), but controlled testing this session was mixed/inconclusive rather than clearly backwards. No action taken — revisit with a larger sample before deciding either way.
+
+### 7. Complete the manual-pick end-to-end test (High Priority — never actually completed)
+Submit one real parlay from `/manual`, confirm it lands in `mlb_parlay_recommendations_v2` with `source = 'manual_pick'` and correct leg data in `mlb_parlay_legs_v2`, then confirm it resolves correctly (not left `pending`) after the next 9am run. Deferred through Sessions 18, 19, 20, and 21.
+
+### 8. Validate batter ranges for shadow scorer after first shadow run (High Priority, new Session 19)
 The batter OBP/BA/K%/BB% ranges in `enriched_scorer.py` use league-average estimates. After the first few shadow runs, pull actual p5/p95 from the populated batter stats and update `_OBP_MID/_OBP_HALF` etc. to match the real range of this leg pool (same methodology as the pitcher ranges were derived from actual DB data).
 
-### 5. Compare shadow vs. production win rate after a few weeks (Medium Priority, new Session 19)
-The enriched scorer rebuild is live in shadow. Check it against the comparison queries in this doc and `SUPABASE_SCHEMA_REFERENCE.md` after 3-4 weeks of shadow runs. Look for: shadow win rate > production win rate on the same prop types, and shadow edge (WR vs. odds-implied probability) vs. production edge.
+### 9. Compare shadow vs. production win rate after a few weeks (Medium Priority, new Session 19)
+The enriched scorer rebuild is live in shadow. Check it against the comparison queries in this doc and `SUPABASE_SCHEMA_REFERENCE.md` after 3-4 weeks of shadow runs. Look for: shadow win rate > production win rate on the same prop types, and shadow edge (WR vs. odds-implied probability) vs. production edge. Session 21 note: the 7/17-19 window showed shadow's best week (19.4%) vs. production's worst (6.1%) — biggest gap of the season, but still only n=36, same small-sample caveat as everything else this window.
 
-### 6. Re-evaluate TB/under construction strategy under the new builder (Medium Priority, carried)
-Combinatorial-drag numbers were generated under the old fixed-4-leg builder. Re-run before any promotion decision.
+### 10. Re-evaluate TB/under construction strategy under the new builder (Medium Priority, carried)
+Combinatorial-drag numbers were generated under the old fixed-4-leg builder. Session 21 note: the builder is now back to fixed-4-legs (reverted), so this analysis's original fixed-4-leg assumption is valid again — may not need re-running after all now that Session 18's 4-6-leg structure has been reverted. Confirm before spending time on this.
 
-### 7. SO/over pool softening — recheck with more volume (Priority raised: Medium → High, carried from Session 18, reinforced Session 20)
-The composite score's K/9-rank differentiation weakened post-slot-gate-fix. Session 18 had ~1 week of thin post-fix data. Session 20's production check (7/8-7/9) adds two more consecutive weak reads: 33.3% (n=9) and 45.5% (n=11) leg-level win rate on strikeouts/over, both well under the ~61.6% historical baseline, and this prop is the main driver behind the 4.5% parlay win rate over those two days (see "Production Performance Check" above). Individually-thin samples, but now three separate reads in the same direction rather than one — raising priority since it's no longer a single cold stretch.
+### 11. SO/over pool softening — recheck with more volume (Priority: High, carried from Session 18/20)
+The composite score's K/9-rank differentiation weakened post-slot-gate-fix. Three consecutive weak reads as of Session 20 (Session 18's ~1 week + 7/8 33.3% + 7/9 45.5%, all vs. ~61.6% baseline). Session 21's leg-level check on 7/17-19 didn't add a clean fourth read in either direction — strikeouts/over dipped to 51.5% the week of 7/6 but recovered to 68.4% the week of 7/13 — so this remains unresolved, not newly confirmed or newly cleared.
 
-### 8. Cancel SGO Pro subscription (High Priority, carried from Session 17, still not done)
+### 12. Cancel SGO Pro subscription (High Priority, carried from Session 17, still not done)
 Code change validated. Account-level downgrade is a manual action outside the codebase.
 
-### 9. Add hits/over coverage ceiling at ~80% (High Priority, carried from Session 15, reconfirmed)
+### 13. Add hits/over coverage ceiling at ~80% (High Priority, carried from Session 15, reconfirmed)
 Full-history data still shows the climb-then-cliff pattern (72.0% at 75-79.7%, 62.3% at 80-84.6%). Not yet implemented.
 
-### 10. Fix void_reason logging gap (Medium Priority, carried from Session 16, still not done)
+### 14. Fix void_reason logging gap (Medium Priority, carried from Session 16, still not done)
 `void_reason` on `mlb_scored_legs` is still NULL for the large majority of voided legs.
 
-### 11. Project file cleanup (Low priority, carried, still not done)
+### 15. Project file cleanup (Low priority, carried, still not done)
 Retire `README_10.md` and other stale files from Project Knowledge.
 
 ---
@@ -311,22 +383,26 @@ Retire `README_10.md` and other stale files from Project Knowledge.
 ## System Health Indicators
 
 ### Green Lights
+✅ Parlay builder leg-count regression found and reverted with real EV evidence (Session 21) — pre-redesign fixed-4-leg era: +$0.128 EV/$1 (n=486); post-redesign 4-6 leg era: −$0.42 to −$0.66 EV/$1
+✅ lineup_consistency DB-persistence bug root-caused via direct trace from main.py → db.py, not guessed (Session 21) — confirmed 100% NULL across 18,356 rows before fix
+✅ coverage_recent_10 missing sample floor root-caused via direct code read and inconsistency with coverage_overall's existing floor (Session 21)
+✅ Pitcher ERA signal inversion confirmed via controlled analysis (base-coverage-banded), not just a raw bucket comparison that could've been a selection-bias artifact (Session 21)
+✅ 14 new tests committed alongside all three Session 21 fixes — 76/76 passing
 ✅ Scratch reduce-path rewrite validated with 9 committed tests — covers all time-gate branches, void-on-thin-survivors, second-scratch re-application
 ✅ Dead-link bug fix root-caused via live Supabase query (7+ confirmed dangling `superseded_by_batch_id` references) before code was changed
 ✅ Shadow scorer rebuild validated against real 2026-07-09 legs before deployment — all four prop types directionally correct, caps enforced
-✅ Decimal type coercion fixed (`float(value)` in `_linear_adj`) — caught by live validation run before deploy, not by a user complaint
 ✅ K/9 range confirmed by user (5.5–11.0) rather than deployed on assumption — per session prompt requirement
-✅ Parlay builder redesign validated against real data before deployment (Session 18)
-✅ Slot-gate fix's void-rate improvement confirmed (58.3%→20.3%) (Session 18)
 
 ### Yellow Flags
+⚠️ Pitcher ERA signal confirmed inverted but not yet fixed — rebuild scoped (recent-starts ERA), explicitly deferred by operator this session, still active and unchanged in production
+⚠️ Session 21 fixes on branch, not yet merged/deployed as of this doc update — nothing involving new data can be checked until live
+⚠️ lineup_consistency Step 5b filter's actual live behavior (vs. its persistence, now fixed) still unconfirmed — needs a Railway log check
+⚠️ Whether the fixed-4-leg revert fully restores pre-redesign profitability is unconfirmed — simulation suggested a partial gap (−$0.25 to −$0.34 EV vs. the pre-redesign +$0.128), possibly noise, possibly a second unisolated factor
 ⚠️ Batter OBP/BA/K%/BB% ranges in enriched scorer use league-average estimates — need validation after first shadow runs
 ⚠️ New shadow scorer running live but no performance comparison possible yet — check after 3-4 weeks
-⚠️ New builder logic has limited live-data performance validation — only ~2 days under new logic
-⚠️ Manual pick end-to-end flow (submit → resolve) still never actually tested
-⚠️ Builder's 7-case regression test suite was never committed — zero persisted test coverage for the biggest architecture change in the project
-⚠️ SO/over pool softening — priority raised to High (Session 20): 3 consecutive weak reads now (Session 18's ~1 week + 7/8 33.3% + 7/9 45.5%), still not enough volume to call it confirmed, but no longer a single cold stretch
-⚠️ TB/under construction-strategy numbers stale relative to the new builder
+⚠️ Manual pick end-to-end flow (submit → resolve) still never actually tested (carried 4 sessions)
+⚠️ SO/over pool softening — still unresolved (carried, High Priority) — Session 21 didn't add a clean additional read either direction
+⚠️ TB/under construction-strategy numbers may now be valid again since the builder reverted to fixed-4-legs — needs confirming before re-running
 🔲 SGO Pro subscription cancellation still not confirmed (carried multiple sessions)
 ⚠️ hits/over ~80% coverage ceiling still not implemented (carried, reconfirmed)
 ⚠️ void_reason logging gap still not fixed (carried)
@@ -347,7 +423,7 @@ See the prior version of this document (or git history) for full Session 17 deta
 
 ---
 
-**Last Review:** July 10, 2026 (Session 20)
-**System Status:** ✅ Operational — Session 20 closed out (game_start_time contamination remediated, Brandon Lowe/matchup_adj issue resolved, 7/8-7/9 production check completed — no new bugs found, SO/over softening priority raised)
-**Next Review:** SO/over softening recheck now High Priority (3 consecutive weak reads) / validate batter ranges after first shadow runs / complete manual-pick end-to-end test / compare shadow vs. production win rate after ~3-4 weeks
-**Pending Decisions:** SO/over softening — is this real degradation or noise (elevated priority, Session 20), TB/under construction strategy under new builder (rerun analysis first), SGO Pro cancellation (user action, still not confirmed), hits/over ceiling implementation (carried, no target date set)
+**Last Review:** July 20, 2026 (Session 21)
+**System Status:** ✅ Operational — Session 21 closed out (parlay-builder leg-count EV regression found and reverted, lineup_consistency DB-persistence bug fixed, coverage_recent_10 sample floor added, pitcher ERA signal confirmed inverted and scoped for rebuild but not yet implemented). Fixes on branch `fix/leg-cap-lineup-consistency-streak-floor`, pending merge/deploy.
+**Next Review:** Confirm Session 21 branch merged and deployed, first thing / watch leg-cap-revert live performance over 1-2 weeks / confirm lineup_consistency Step 5b filter via Railway logs / build and backtest the pitcher ERA rebuild / complete manual-pick end-to-end test (carried 4 sessions) / compare shadow vs. production win rate after ~3-4 weeks
+**Pending Decisions:** Pitcher ERA rebuild scope and timeline (scoped Session 21, not started), whether the leg-cap revert alone restores full pre-redesign EV or a second factor is also at play (needs live data), SO/over softening — still unresolved, TB/under construction strategy re-run (may be moot now that the builder reverted — confirm first), SGO Pro cancellation (user action, still not confirmed), hits/over ceiling implementation (carried, no target date set)
