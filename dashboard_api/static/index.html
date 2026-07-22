@@ -629,6 +629,7 @@ class Component extends DCLogic {
     const sideFilter = st.sideFilter || 'over';
     const sideFilterEnabled = propFilter !== 'strikeouts';
 
+    const fmtDec = (v, d) => v != null ? v.toFixed(d) : '-';
     const formatBatterRow = (b) => {
       let line, odds, cov, label;
       if (propFilter === 'hits') {
@@ -645,13 +646,13 @@ class Component extends DCLogic {
       return {
         id: b.id, name: b.name, team: b.team, opp: b.oppPitcher, gameLabel: b.gameLabel,
         propLabel: label, oddsFmt: fmt(odds), oddsNum: odds, covFmt: cov + '%', covNum: cov,
-        oppEra: b.oppPitcherStats.era.toFixed(2), oppEraNum: b.oppPitcherStats.era,
-        oppK9: b.oppPitcherStats.k9.toFixed(1), oppK9Num: b.oppPitcherStats.k9,
-        oppWhip: b.oppPitcherStats.whip.toFixed(2), oppWhipNum: b.oppPitcherStats.whip,
-        baFmt: b.ba.toFixed(3), baNum: b.ba,
+        oppEra: fmtDec(b.oppPitcherStats.era, 2), oppEraNum: b.oppPitcherStats.era,
+        oppK9: fmtDec(b.oppPitcherStats.k9, 1), oppK9Num: b.oppPitcherStats.k9,
+        oppWhip: fmtDec(b.oppPitcherStats.whip, 2), oppWhipNum: b.oppPitcherStats.whip,
+        baFmt: fmtDec(b.ba, 3), baNum: b.ba,
         kPctFmt: b.kPct + '%', kPctNum: b.kPct,
         bbPctFmt: b.bbPct + '%', bbPctNum: b.bbPct,
-        obpFmt: b.obp.toFixed(3), obpNum: b.obp,
+        obpFmt: fmtDec(b.obp, 3), obpNum: b.obp,
         openThisBatter: () => this.setState({ selectedBatterId: b.id, showGamelog: false, showPitcherLog: false }),
       };
     };
@@ -667,10 +668,10 @@ class Component extends DCLogic {
 
     const formatPitcherRow = (p) => ({
       id: p.id, name: p.name, team: p.team, opp: p.opp, gameLabel: p.gameLabel,
-      era: p.stats.era.toFixed(2), eraNum: p.stats.era,
-      k9: p.stats.k9.toFixed(1), k9Num: p.stats.k9,
-      whip: p.stats.whip.toFixed(2), whipNum: p.stats.whip,
-      record: p.stats.wins + '-' + p.stats.losses, winsNum: p.stats.wins,
+      era: fmtDec(p.stats.era, 2), eraNum: p.stats.era,
+      k9: fmtDec(p.stats.k9, 1), k9Num: p.stats.k9,
+      whip: fmtDec(p.stats.whip, 2), whipNum: p.stats.whip,
+      record: (p.stats.wins != null && p.stats.losses != null) ? (p.stats.wins + '-' + p.stats.losses) : '-', winsNum: p.stats.wins,
       openThisPitcher: () => this.setState({ selectedPitcherId: p.id }),
     });
     const pitcherAccessors = { name: p => p.name, team: p => p.team, era: p => p.eraNum, k9: p => p.k9Num, whip: p => p.whipNum, record: p => p.winsNum };
@@ -767,14 +768,14 @@ class Component extends DCLogic {
       stopProp: e => e.stopPropagation(),
       selBatterName: selectedBatter ? selectedBatter.name : '',
       selBatterMeta: selectedBatter ? (selectedBatter.pos + ' · ' + selectedBatter.team + ' · ' + selectedBatter.gameLabel) : '',
-      selBatterBA: selectedBatter ? selectedBatter.ba.toFixed(3) : '',
+      selBatterBA: selectedBatter ? fmtDec(selectedBatter.ba, 3) : '',
       selBatterKPct: selectedBatter ? selectedBatter.kPct + '%' : '',
       selBatterBBPct: selectedBatter ? selectedBatter.bbPct + '%' : '',
-      selBatterOBP: selectedBatter ? selectedBatter.obp.toFixed(3) : '',
+      selBatterOBP: selectedBatter ? fmtDec(selectedBatter.obp, 3) : '',
       selBatterOppName: selectedBatter ? selectedBatter.oppPitcher : '',
-      selBatterOppEra: selectedBatter ? selectedBatter.oppPitcherStats.era.toFixed(2) : '',
-      selBatterOppK9: selectedBatter ? selectedBatter.oppPitcherStats.k9.toFixed(1) : '',
-      selBatterOppWhip: selectedBatter ? selectedBatter.oppPitcherStats.whip.toFixed(2) : '',
+      selBatterOppEra: selectedBatter ? fmtDec(selectedBatter.oppPitcherStats.era, 2) : '',
+      selBatterOppK9: selectedBatter ? fmtDec(selectedBatter.oppPitcherStats.k9, 1) : '',
+      selBatterOppWhip: selectedBatter ? fmtDec(selectedBatter.oppPitcherStats.whip, 2) : '',
       selBatterProps,
       selBatterGamelog: selectedBatter ? selectedBatter.gamelog : [],
       selBatterOppLast5: selectedBatter ? selectedBatter.oppPitcherStats.last5 : [],
@@ -788,10 +789,10 @@ class Component extends DCLogic {
       closePitcherModal: () => this.setState({ selectedPitcherId: null }),
       selPitcherName: selectedPitcher ? selectedPitcher.name : '',
       selPitcherMeta: selectedPitcher ? (selectedPitcher.team + ' · ' + selectedPitcher.gameLabel) : '',
-      selPitcherEra: selectedPitcher ? selectedPitcher.stats.era.toFixed(2) : '',
-      selPitcherK9: selectedPitcher ? selectedPitcher.stats.k9.toFixed(1) : '',
-      selPitcherWhip: selectedPitcher ? selectedPitcher.stats.whip.toFixed(2) : '',
-      selPitcherRecord: selectedPitcher ? (selectedPitcher.stats.wins + '-' + selectedPitcher.stats.losses) : '',
+      selPitcherEra: selectedPitcher ? fmtDec(selectedPitcher.stats.era, 2) : '',
+      selPitcherK9: selectedPitcher ? fmtDec(selectedPitcher.stats.k9, 1) : '',
+      selPitcherWhip: selectedPitcher ? fmtDec(selectedPitcher.stats.whip, 2) : '',
+      selPitcherRecord: selectedPitcher ? ((selectedPitcher.stats.wins != null && selectedPitcher.stats.losses != null) ? (selectedPitcher.stats.wins + '-' + selectedPitcher.stats.losses) : '-') : '',
       selPitcherLast5: selectedPitcher ? selectedPitcher.stats.last5 : [],
     };
   }
