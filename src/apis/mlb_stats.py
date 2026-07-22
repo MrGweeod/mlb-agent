@@ -88,6 +88,39 @@ def get_schedule(date: str) -> list[dict]:
         return []
 
 
+# ── 1b. get_standings ────────────────────────────────────────────────────────
+
+def get_standings(season: int) -> dict[int, str]:
+    """
+    Return current W-L record per MLB team for the given season.
+
+    Returns:
+        Dict mapping team_id (int) -> "W-L" string, e.g. {147: "56-44"}.
+        Empty dict on network error.
+
+    Cache TTL: 24 hours (TTL_TEAM_STATS) — standings don't need to be
+    fresher than once a day for display purposes.
+    """
+    key = f"standings:{season}"
+    cached = _get(key, TTL_TEAM_STATS)
+    if cached is not None:
+        return cached
+
+    try:
+        divisions = statsapi.standings_data(leagueId="103,104", season=season)
+        records: dict[int, str] = {}
+        for div in divisions.values():
+            for t in div.get("teams", []):
+                team_id = t.get("team_id")
+                if team_id is not None:
+                    records[team_id] = f"{t.get('w', 0)}-{t.get('l', 0)}"
+        _set(key, records)
+        return records
+    except Exception as e:
+        print(f"  [mlb_stats] get_standings({season}) error: {e}")
+        return {}
+
+
 # ── 2. get_batter_game_log ───────────────────────────────────────────────────
 
 def get_batter_game_log(player_id: int, season: int) -> list[dict]:

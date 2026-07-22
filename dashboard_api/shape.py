@@ -14,18 +14,50 @@ run before trusting fully):
   - Pitcher `last5` kLine/result comes from joining each real last-5 start
     against mlb_scored_legs for that (pitcher_name, run_date, stat=
     'strikeouts'). No match → kLine/result are None, not fabricated.
-  - Game `favML`/`sortMinutes` and team `record`/`network` — see _build_games().
+  - Game `favML`/`sortMinutes` and the `network` field's national-broadcast-only
+    coverage — see _build_games().
 """
 from datetime import date as date_type
 
 from src.apis import mlb_stats
 from src.apis import sportsgameodds as sgo
+from src.utils.time_utils import parse_game_start_et
 
 from dashboard_api import queries
 from dashboard_api import season_stats
 from dashboard_api import odds_extra
 
 SEASON = date_type.today().year
+
+_INNING_STATE_ABBR = {"top": "TOP", "bottom": "BOT", "middle": "MID", "end": "END"}
+
+
+def _format_time_et(raw_utc: str) -> str:
+    """statsapi's game_datetime uses a trailing "Z" (e.g. "...T17:05:00Z"),
+    which parse_game_start_et's docstring doesn't list as an accepted format
+    (only " "-separated or explicit "+00:00") — normalize before parsing."""
+    if not raw_utc:
+        return ""
+    try:
+        normalized = raw_utc.replace("Z", "+00:00")
+        return parse_game_start_et(normalized).strftime("%-I:%M %p ET")
+    except ValueError:
+        return ""
+
+
+def _ordinal(n: int) -> str:
+    if 10 <= n % 100 <= 20:
+        suffix = "TH"
+    else:
+        suffix = {1: "ST", 2: "ND", 3: "RD"}.get(n % 10, "TH")
+    return f"{n}{suffix}"
+
+
+def _format_inning(current_inning, inning_state: str) -> str | None:
+    if not current_inning or not inning_state:
+        return None
+    abbr = _INNING_STATE_ABBR.get(inning_state.lower(), inning_state.upper()[:3])
+    return f"{abbr} {_ordinal(int(current_inning))}"
 
 
 def _abbr(team_name: str) -> str:
@@ -45,10 +77,13 @@ def _abbr(team_name: str) -> str:
 
 
 def _build_games(run_date: str) -> tuple[list[dict], dict]:
-    """TODOs: `record` needs a standings call (not wired up). `favML` depends
-    on odds_extra.get_moneyline_and_spread(), which is UNVERIFIED — see that
-    file's docstring. `network` isn't in statsapi.schedule() output."""
+    """`network` comes from statsapi's national_broadcasts field, which only
+    covers national TV (ESPN, Fox, etc.) — most games are regional-only and
+    will correctly show "" here since MLB Stats API doesn't expose regional
+    broadcast data. Not a bug; confirmed 2026-07-22 (1 of 17 games that day
+    had a populated value)."""
     schedule = mlb_stats.get_schedule(run_date)
+    standings = mlb_stats.get_standings(SEASON)
     sgo_games_by_key = {}
     try:
         for g in sgo.get_todays_games():
@@ -80,20 +115,20 @@ def _build_games(run_date: str) -> tuple[list[dict], dict]:
         shaped = {
             "id": i + 1,
             "status": status,
-            "time": g.get("game_datetime", ""),
-            "inning": g.get("summary") if status == "live" else None,
+            "time": _format_time_et(g.get("game_datetime", "")),
+            "inning": _format_inning(g.get("current_inning"), g.get("inning_state", "")) if status == "live" else None,
             "away": {
-                "abbr": away_abbr, "record": "",
+                "abbr": away_abbr, "record": standings.get(g.get("away_id"), ""),
                 "pitcher": g.get("away_probable_pitcher", ""),
                 "score": g.get("away_score") if status != "scheduled" else None,
             },
             "home": {
-                "abbr": home_abbr, "record": "",
+                "abbr": home_abbr, "record": standings.get(g.get("home_id"), ""),
                 "pitcher": g.get("home_probable_pitcher", ""),
                 "score": g.get("home_score") if status != "scheduled" else None,
             },
             "venue": g.get("venue_name", ""),
-            "network": "",
+            "network": ", ".join(g.get("national_broadcasts") or []),
             "ml": ml_rl["ml"],
             "rl": ml_rl["rl"],
             "favML": abs(ml_rl["ml"]["away"] or ml_rl["ml"]["home"] or 0) or None,
