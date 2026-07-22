@@ -14,16 +14,20 @@ Shares the mlb-agent service's env vars (DATABASE_URL, SPORTSGAMEODDS_API_KEY)
 just copy them into this service's own variables tab.
 """
 import os
+import pathlib
 import time
 from datetime import date
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from dashboard_api.shape import build_dashboard
 from dashboard_api.db import get_legs_by_odd_ids, save_dashboard_parlay
 from src.utils.odds_math import american_to_decimal
+
+_STATIC_DIR = pathlib.Path(__file__).parent / "static"
 
 app = FastAPI(title="MLB Slate Explorer API")
 
@@ -180,3 +184,10 @@ async def post_dashboard_parlay(request: Request):
         "meets_floor": meets_floor,
         "legs": len(all_legs),
     }
+
+
+# Mounted last so it only catches paths not matched by the explicit API
+# routes above (e.g. "/", "/support.js", "/styles.css") — html=True serves
+# index.html for "/", and index.html's own "./support.js"/"styles.css"
+# references resolve correctly since everything is served flat from here.
+app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="static")

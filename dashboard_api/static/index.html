@@ -1,0 +1,802 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="styles.css">
+  <style>
+    @keyframes pulseDot { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+    a { color: var(--color-accent); }
+    a:hover { color: var(--color-accent-700); }
+  </style>
+</helmet>
+<div style="min-height:100vh; background:var(--color-bg); color:var(--color-text); font-family:var(--font-body);">
+
+  <div class="nav" style="background:var(--color-surface); border-bottom:1px solid var(--color-divider);">
+    <div class="nav-brand">DIAMOND LINE</div>
+    <div style="display:flex; align-items:center; gap:8px; background:var(--color-bg); border:1px solid var(--color-divider); padding:6px 10px; border-radius:var(--radius-md); width:300px;">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+      <input class="input" style="border:none; background:transparent; padding:0; min-height:auto;" placeholder="Search player, team, pitcher…" aria-label="Search" value="{{ search }}" onChange="{{ setSearch }}">
+    </div>
+    <span class="tag tag-outline">TODAY · JUL 21</span>
+  </div>
+
+  <div style="display:flex; align-items:center; justify-content:space-between; gap:16px; padding:var(--space-3) var(--space-4); border-bottom:1px solid var(--color-divider); flex-wrap:wrap;">
+    <div class="seg">
+      <button class="seg-opt" style="{{ matchupTabStyle }}" onClick="{{ setViewMatchup }}">Matchup</button>
+      <button class="seg-opt" style="{{ battersTabStyle }}" onClick="{{ setViewBatters }}">Batters</button>
+      <button class="seg-opt" style="{{ pitchersTabStyle }}" onClick="{{ setViewPitchers }}">Pitchers</button>
+    </div>
+
+    <sc-if value="{{ isMatchupList }}" hint-placeholder-val="{{ true }}">
+      <span class="text-muted" style="font-size:12px;">{{ matchupCount }} games · click a column to sort</span>
+    </sc-if>
+    <sc-if value="{{ isBattersList }}" hint-placeholder-val="{{ false }}">
+      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+        <div class="seg">
+          <button class="seg-opt" style="{{ propHitsStyle }}" onClick="{{ setPropHits }}">Hits</button>
+          <button class="seg-opt" style="{{ propSoStyle }}" onClick="{{ setPropSo }}">1+ K</button>
+          <button class="seg-opt" style="{{ propTbStyle }}" onClick="{{ setPropTb }}">Total Bases</button>
+        </div>
+        <sc-if value="{{ sideFilterEnabled }}" hint-placeholder-val="{{ true }}">
+          <div class="seg">
+            <button class="seg-opt" style="{{ sideOverStyle }}" onClick="{{ setSideOver }}">Over</button>
+            <button class="seg-opt" style="{{ sideUnderStyle }}" onClick="{{ setSideUnder }}">Under</button>
+          </div>
+        </sc-if>
+        <span class="text-muted" style="font-size:12px;">{{ battersCount }} batters</span>
+      </div>
+    </sc-if>
+    <sc-if value="{{ isPitchersList }}" hint-placeholder-val="{{ false }}">
+      <span class="text-muted" style="font-size:12px;">{{ pitchersCount }} probable starters</span>
+    </sc-if>
+  </div>
+
+  <sc-if value="{{ isMatchupList }}" hint-placeholder-val="{{ true }}">
+    <div style="padding:var(--space-4); overflow:auto;">
+      <table class="table">
+        <thead><tr>
+          <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortMatchupTime }}">{{ hStatus }}</button></th>
+          <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortMatchupMatchup }}">{{ hMatchup }}</button></th>
+          <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortMatchupScore }}">{{ hScore }}</button></th>
+          <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortMatchupMlAway }}">{{ hMlAway }}</button></th>
+          <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortMatchupMlHome }}">{{ hMlHome }}</button></th>
+          <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortMatchupRlAway }}">{{ hRlAway }}</button></th>
+          <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortMatchupRlHome }}">{{ hRlHome }}</button></th>
+        </tr></thead>
+        <tbody>
+          <sc-for list="{{ matchupRows }}" as="g" hint-placeholder-count="10">
+            <tr style="cursor:pointer;" onClick="{{ g.openGame }}">
+              <td>
+                <sc-if value="{{ g.isLive }}" hint-placeholder-val="{{ false }}"><span class="tag tag-accent" style="display:inline-flex; gap:5px; align-items:center;"><span style="width:6px; height:6px; border-radius:50%; background:var(--color-accent-700); animation:pulseDot 1.4s ease-in-out infinite;"></span>{{ g.statusLabel }}</span></sc-if>
+                <sc-if value="{{ g.isFinal }}" hint-placeholder-val="{{ false }}"><span class="tag tag-neutral">FINAL</span></sc-if>
+                <sc-if value="{{ g.isScheduled }}" hint-placeholder-val="{{ true }}"><span class="text-muted" style="font-size:12px;">{{ g.time }}</span></sc-if>
+              </td>
+              <td style="font-family:var(--font-heading); font-weight:600;">{{ g.matchupLabel }}</td>
+              <td>{{ g.scoreDisplay }}</td>
+              <td>{{ g.mlAway }}</td>
+              <td>{{ g.mlHome }}</td>
+              <td>{{ g.rlAway }}</td>
+              <td>{{ g.rlHome }}</td>
+            </tr>
+          </sc-for>
+        </tbody>
+      </table>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ isGameView }}" hint-placeholder-val="{{ false }}">
+    <div style="padding:var(--space-4);">
+      <button class="btn btn-ghost" style="padding-left:0; margin-bottom:12px;" onClick="{{ backToMatchup }}">← All Games</button>
+      <div style="display:flex; align-items:baseline; gap:16px; margin-bottom:4px;">
+        <h2 style="margin:0;">{{ selGameLabel }}</h2>
+        <span class="tag tag-outline">{{ selGameStatusText }}</span>
+      </div>
+      <div class="text-muted" style="font-size:13px; margin-bottom:20px;">{{ selGameVenue }} · {{ selGameNetwork }}</div>
+
+      <div class="seg" style="margin-bottom:16px;">
+        <button class="seg-opt" style="{{ gameFilterBatterStyle }}" onClick="{{ setGameFilterBatter }}">Batter Legs</button>
+        <button class="seg-opt" style="{{ gameFilterPitcherStyle }}" onClick="{{ setGameFilterPitcher }}">Pitcher Legs</button>
+      </div>
+
+      <sc-if value="{{ isGameBatterFilter }}" hint-placeholder-val="{{ true }}">
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px;">
+          <div class="seg">
+            <button class="seg-opt" style="{{ propHitsStyle }}" onClick="{{ setPropHits }}">Hits</button>
+            <button class="seg-opt" style="{{ propSoStyle }}" onClick="{{ setPropSo }}">1+ K</button>
+            <button class="seg-opt" style="{{ propTbStyle }}" onClick="{{ setPropTb }}">Total Bases</button>
+          </div>
+          <sc-if value="{{ sideFilterEnabled }}" hint-placeholder-val="{{ true }}">
+            <div class="seg">
+              <button class="seg-opt" style="{{ sideOverStyle }}" onClick="{{ setSideOver }}">Over</button>
+              <button class="seg-opt" style="{{ sideUnderStyle }}" onClick="{{ setSideUnder }}">Under</button>
+            </div>
+          </sc-if>
+        </div>
+        <table class="table">
+          <thead><tr>
+            <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortBattersName }}">{{ hName }}</button></th>
+            <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortBattersTeam }}">{{ hTeam }}</button></th>
+            <th>Line</th>
+            <th>Opp Pitcher</th>
+            <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortBattersOppEra }}">{{ hOppEra }}</button></th>
+            <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortBattersOppK9 }}">{{ hOppK9 }}</button></th>
+            <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortBattersOppWhip }}">{{ hOppWhip }}</button></th>
+            <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortBattersBA }}">{{ hBA }}</button></th>
+            <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortBattersKPct }}">{{ hKPct }}</button></th>
+            <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortBattersBBPct }}">{{ hBBPct }}</button></th>
+            <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortBattersOBP }}">{{ hOBP }}</button></th>
+            <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortBattersOdds }}">{{ hOdds }}</button></th>
+            <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortBattersCoverage }}">{{ hCoverage }}</button></th>
+          </tr></thead>
+          <tbody>
+            <sc-for list="{{ gameBatterRows }}" as="b" hint-placeholder-count="10">
+              <tr style="cursor:pointer;" onClick="{{ b.openThisBatter }}">
+                <td style="font-family:var(--font-heading); font-weight:600;">{{ b.name }}</td>
+                <td>{{ b.team }}</td>
+                <td>{{ b.propLabel }}</td>
+                <td class="text-muted" style="font-size:12px;">{{ b.opp }}</td>
+                <td>{{ b.oppEra }}</td>
+                <td>{{ b.oppK9 }}</td>
+                <td>{{ b.oppWhip }}</td>
+                <td>{{ b.baFmt }}</td>
+                <td>{{ b.kPctFmt }}</td>
+                <td>{{ b.bbPctFmt }}</td>
+                <td>{{ b.obpFmt }}</td>
+                <td>{{ b.oddsFmt }}</td>
+                <td>{{ b.covFmt }}</td>
+              </tr>
+            </sc-for>
+          </tbody>
+        </table>
+      </sc-if>
+
+      <sc-if value="{{ isGamePitcherFilter }}" hint-placeholder-val="{{ false }}">
+        <table class="table">
+          <thead><tr>
+            <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortPitchersName }}">{{ hPName }}</button></th>
+            <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortPitchersTeam }}">{{ hPTeam }}</button></th>
+            <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortPitchersEra }}">{{ hPEra }}</button></th>
+            <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortPitchersK9 }}">{{ hPK9 }}</button></th>
+            <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortPitchersWhip }}">{{ hPWhip }}</button></th>
+            <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortPitchersRecord }}">{{ hPRecord }}</button></th>
+          </tr></thead>
+          <tbody>
+            <sc-for list="{{ gamePitcherRows }}" as="p" hint-placeholder-count="2">
+              <tr style="cursor:pointer;" onClick="{{ p.openThisPitcher }}">
+                <td style="font-family:var(--font-heading); font-weight:600;">{{ p.name }}</td>
+                <td>{{ p.team }}</td>
+                <td>{{ p.era }}</td>
+                <td>{{ p.k9 }}</td>
+                <td>{{ p.whip }}</td>
+                <td>{{ p.record }}</td>
+              </tr>
+            </sc-for>
+          </tbody>
+        </table>
+      </sc-if>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ isBattersList }}" hint-placeholder-val="{{ false }}">
+    <div style="padding:var(--space-4); overflow:auto;">
+      <table class="table">
+        <thead><tr>
+          <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortBattersName }}">{{ hName }}</button></th>
+          <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortBattersTeam }}">{{ hTeam }}</button></th>
+          <th>Game</th>
+          <th>Line</th>
+          <th>Opp Pitcher</th>
+          <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortBattersOppEra }}">{{ hOppEra }}</button></th>
+          <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortBattersOppK9 }}">{{ hOppK9 }}</button></th>
+          <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortBattersOppWhip }}">{{ hOppWhip }}</button></th>
+          <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortBattersBA }}">{{ hBA }}</button></th>
+          <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortBattersKPct }}">{{ hKPct }}</button></th>
+          <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortBattersBBPct }}">{{ hBBPct }}</button></th>
+          <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortBattersOBP }}">{{ hOBP }}</button></th>
+          <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortBattersOdds }}">{{ hOdds }}</button></th>
+          <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortBattersCoverage }}">{{ hCoverage }}</button></th>
+        </tr></thead>
+        <tbody>
+          <sc-for list="{{ battersRows }}" as="b" hint-placeholder-count="14">
+            <tr style="cursor:pointer;" onClick="{{ b.openThisBatter }}">
+              <td style="font-family:var(--font-heading); font-weight:600;">{{ b.name }}</td>
+              <td>{{ b.team }}</td>
+              <td class="text-muted" style="font-size:12px;">{{ b.gameLabel }}</td>
+              <td>{{ b.propLabel }}</td>
+              <td class="text-muted" style="font-size:12px;">{{ b.opp }}</td>
+              <td>{{ b.oppEra }}</td>
+              <td>{{ b.oppK9 }}</td>
+              <td>{{ b.oppWhip }}</td>
+              <td>{{ b.baFmt }}</td>
+              <td>{{ b.kPctFmt }}</td>
+              <td>{{ b.bbPctFmt }}</td>
+              <td>{{ b.obpFmt }}</td>
+              <td>{{ b.oddsFmt }}</td>
+              <td>{{ b.covFmt }}</td>
+            </tr>
+          </sc-for>
+        </tbody>
+      </table>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ isPitchersList }}" hint-placeholder-val="{{ false }}">
+    <div style="padding:var(--space-4); overflow:auto;">
+      <table class="table">
+        <thead><tr>
+          <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortPitchersName }}">{{ hPName }}</button></th>
+          <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortPitchersTeam }}">{{ hPTeam }}</button></th>
+          <th>Game</th>
+          <th>Opp</th>
+          <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortPitchersEra }}">{{ hPEra }}</button></th>
+          <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortPitchersK9 }}">{{ hPK9 }}</button></th>
+          <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortPitchersWhip }}">{{ hPWhip }}</button></th>
+          <th><button style="background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-transform:inherit;letter-spacing:inherit;" onClick="{{ sortPitchersRecord }}">{{ hPRecord }}</button></th>
+        </tr></thead>
+        <tbody>
+          <sc-for list="{{ pitchersRows }}" as="p" hint-placeholder-count="20">
+            <tr style="cursor:pointer;" onClick="{{ p.openThisPitcher }}">
+              <td style="font-family:var(--font-heading); font-weight:600;">{{ p.name }}</td>
+              <td>{{ p.team }}</td>
+              <td class="text-muted" style="font-size:12px;">{{ p.gameLabel }}</td>
+              <td>{{ p.opp }}</td>
+              <td>{{ p.era }}</td>
+              <td>{{ p.k9 }}</td>
+              <td>{{ p.whip }}</td>
+              <td>{{ p.record }}</td>
+            </tr>
+          </sc-for>
+        </tbody>
+      </table>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ hasSelectedBatter }}" hint-placeholder-val="{{ false }}">
+    <div class="dialog-backdrop" style="z-index:60; background:rgba(15,16,18,0.75);" onClick="{{ closeBatterModal }}">
+      <div class="dialog" style="width:min(680px,100%); max-height:85vh; overflow:auto; background:#e9e9ea; border:1px solid var(--color-text); box-shadow:var(--shadow-lg);" onClick="{{ stopProp }}">
+        <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:8px;">
+          <div>
+            <div class="dialog-title">{{ selBatterName }}</div>
+            <div class="text-muted" style="font-size:13px;">{{ selBatterMeta }}</div>
+          </div>
+          <button class="btn btn-icon btn-ghost" onClick="{{ closeBatterModal }}">✕</button>
+        </div>
+
+        <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-top:8px;">
+          <div style="border:1px solid var(--color-divider); padding:8px; text-align:center;"><div class="text-muted" style="font-size:10px; letter-spacing:0.08em; text-transform:uppercase;">BA</div><div style="font-family:var(--font-heading); font-size:18px; font-weight:600;">{{ selBatterBA }}</div></div>
+          <div style="border:1px solid var(--color-divider); padding:8px; text-align:center;"><div class="text-muted" style="font-size:10px; letter-spacing:0.08em; text-transform:uppercase;">K%</div><div style="font-family:var(--font-heading); font-size:18px; font-weight:600;">{{ selBatterKPct }}</div></div>
+          <div style="border:1px solid var(--color-divider); padding:8px; text-align:center;"><div class="text-muted" style="font-size:10px; letter-spacing:0.08em; text-transform:uppercase;">BB%</div><div style="font-family:var(--font-heading); font-size:18px; font-weight:600;">{{ selBatterBBPct }}</div></div>
+          <div style="border:1px solid var(--color-divider); padding:8px; text-align:center;"><div class="text-muted" style="font-size:10px; letter-spacing:0.08em; text-transform:uppercase;">OBP</div><div style="font-family:var(--font-heading); font-size:18px; font-weight:600;">{{ selBatterOBP }}</div></div>
+        </div>
+
+        <div class="hr"></div>
+
+        <div>
+          <h6 style="margin-bottom:8px;">Opposing Probable Pitcher</h6>
+          <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
+            <span style="font-family:var(--font-heading); font-weight:600;">{{ selBatterOppName }}</span>
+            <span class="text-muted" style="font-size:13px;">ERA {{ selBatterOppEra }} · K/9 {{ selBatterOppK9 }} · WHIP {{ selBatterOppWhip }}</span>
+          </div>
+        </div>
+
+        <div class="hr"></div>
+
+        <div>
+          <h6 style="margin-bottom:8px;">Available Props · Coverage %</h6>
+          <sc-for list="{{ selBatterProps }}" as="p" hint-placeholder-count="3">
+            <div style="display:flex; align-items:center; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--color-divider); gap:12px; flex-wrap:wrap;">
+              <span style="font-family:var(--font-heading); font-weight:600;">{{ p.label }}</span>
+              <sc-if value="{{ p.twoSided }}" hint-placeholder-val="{{ true }}">
+                <div style="display:flex; gap:16px;">
+                  <span class="text-muted" style="font-size:12px;">O {{ p.overOdds }} · {{ p.overCov }} cov</span>
+                  <span class="text-muted" style="font-size:12px;">U {{ p.underOdds }} · {{ p.underCov }} cov</span>
+                </div>
+              </sc-if>
+              <sc-if value="{{ p.oneSided }}" hint-placeholder-val="{{ false }}">
+                <span class="text-muted" style="font-size:12px;">{{ p.odds }} · {{ p.cov }} cov</span>
+              </sc-if>
+            </div>
+          </sc-for>
+        </div>
+
+        <div style="display:flex; gap:8px; margin-top:12px; flex-wrap:wrap;">
+          <button class="btn btn-secondary" onClick="{{ toggleGamelog }}">{{ gamelogBtnLabel }}</button>
+          <button class="btn btn-secondary" onClick="{{ togglePitcherLog }}">{{ pitcherLogBtnLabel }}</button>
+        </div>
+
+        <sc-if value="{{ showGamelog }}" hint-placeholder-val="{{ false }}">
+          <table class="table" style="margin-top:8px;">
+            <thead><tr><th>Date</th><th>Opp</th><th>AB</th><th>H</th><th>K</th><th>TB</th></tr></thead>
+            <tbody>
+              <sc-for list="{{ selBatterGamelog }}" as="row" hint-placeholder-count="10">
+                <tr><td>{{ row.date }}</td><td>{{ row.opp }}</td><td>{{ row.ab }}</td><td>{{ row.h }}</td><td>{{ row.k }}</td><td>{{ row.tb }}</td></tr>
+              </sc-for>
+            </tbody>
+          </table>
+        </sc-if>
+
+        <sc-if value="{{ showPitcherLog }}" hint-placeholder-val="{{ false }}">
+          <table class="table" style="margin-top:8px;">
+            <thead><tr><th>Date</th><th>Opp</th><th>IP</th><th>ER</th><th>K</th><th>K Line</th><th>Result</th></tr></thead>
+            <tbody>
+              <sc-for list="{{ selBatterOppLast5 }}" as="row" hint-placeholder-count="5">
+                <tr><td>{{ row.date }}</td><td>{{ row.opp }}</td><td>{{ row.ip }}</td><td>{{ row.er }}</td><td>{{ row.k }}</td><td>{{ row.kLine }}</td><td>{{ row.result }}</td></tr>
+              </sc-for>
+            </tbody>
+          </table>
+        </sc-if>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ hasSelectedPitcher }}" hint-placeholder-val="{{ false }}">
+    <div class="dialog-backdrop" style="z-index:60; background:rgba(15,16,18,0.75);" onClick="{{ closePitcherModal }}">
+      <div class="dialog" style="width:min(600px,100%); max-height:85vh; overflow:auto; background:#e9e9ea; border:1px solid var(--color-text); box-shadow:var(--shadow-lg);" onClick="{{ stopProp }}">
+        <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:8px;">
+          <div>
+            <div class="dialog-title">{{ selPitcherName }}</div>
+            <div class="text-muted" style="font-size:13px;">{{ selPitcherMeta }}</div>
+          </div>
+          <button class="btn btn-icon btn-ghost" onClick="{{ closePitcherModal }}">✕</button>
+        </div>
+
+        <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-top:8px;">
+          <div style="border:1px solid var(--color-divider); padding:8px; text-align:center;"><div class="text-muted" style="font-size:10px; letter-spacing:0.08em; text-transform:uppercase;">ERA</div><div style="font-family:var(--font-heading); font-size:18px; font-weight:600;">{{ selPitcherEra }}</div></div>
+          <div style="border:1px solid var(--color-divider); padding:8px; text-align:center;"><div class="text-muted" style="font-size:10px; letter-spacing:0.08em; text-transform:uppercase;">K/9</div><div style="font-family:var(--font-heading); font-size:18px; font-weight:600;">{{ selPitcherK9 }}</div></div>
+          <div style="border:1px solid var(--color-divider); padding:8px; text-align:center;"><div class="text-muted" style="font-size:10px; letter-spacing:0.08em; text-transform:uppercase;">WHIP</div><div style="font-family:var(--font-heading); font-size:18px; font-weight:600;">{{ selPitcherWhip }}</div></div>
+          <div style="border:1px solid var(--color-divider); padding:8px; text-align:center;"><div class="text-muted" style="font-size:10px; letter-spacing:0.08em; text-transform:uppercase;">Record</div><div style="font-family:var(--font-heading); font-size:18px; font-weight:600;">{{ selPitcherRecord }}</div></div>
+        </div>
+
+        <div class="hr"></div>
+        <h6 style="margin-bottom:8px;">Last 5 Starts</h6>
+        <table class="table">
+          <thead><tr><th>Date</th><th>Opp</th><th>IP</th><th>ER</th><th>K</th><th>K Line</th><th>Result</th></tr></thead>
+          <tbody>
+            <sc-for list="{{ selPitcherLast5 }}" as="row" hint-placeholder-count="5">
+              <tr><td>{{ row.date }}</td><td>{{ row.opp }}</td><td>{{ row.ip }}</td><td>{{ row.er }}</td><td>{{ row.k }}</td><td>{{ row.kLine }}</td><td>{{ row.result }}</td></tr>
+            </sc-for>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </sc-if>
+
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;apiBaseUrl&quot;:{&quot;editor&quot;:&quot;text&quot;,&quot;default&quot;:&quot;https://dashboard-api-production-de16.up.railway.app&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Data Source&quot;}}">
+class Component extends DCLogic {
+  state = { search: '', view: 'matchup', selectedGameId: null, gameFilter: 'batter', propFilter: 'hits', sideFilter: 'over', selectedBatterId: null, selectedPitcherId: null, showGamelog: false, showPitcherLog: false,
+    matchupSort: { key: 'time', dir: 'asc' }, battersSort: { key: 'name', dir: 'asc' }, pitchersSort: { key: 'name', dir: 'asc' } };
+
+  gamesBase = [
+    { id:1, status:'final', time:'6:40 PM ET', inning:null,
+      away:{abbr:'MIL', record:'56-40', pitcher:'F. Peralta', score:5},
+      home:{abbr:'CIN', record:'50-46', pitcher:'H. Greene', score:4},
+      venue:'Great American Ball Park', network:'Bally Sports',
+      ml:{away:-128, home:108}, rl:{awayLine:-1.5, awayOdds:145, homeLine:1.5, homeOdds:-165},
+      total:{line:8, overOdds:-108, underOdds:-112, movement:'flat'}, favML:128, sortMinutes:1 },
+    { id:2, status:'scheduled', time:'6:45 PM ET', inning:null,
+      away:{abbr:'PHI', record:'58-38', pitcher:'Z. Wheeler', score:null},
+      home:{abbr:'WSH', record:'42-54', pitcher:'M. Parker', score:null},
+      venue:'Nationals Park', network:'MLB Network',
+      ml:{away:-168, home:142}, rl:{awayLine:-1.5, awayOdds:100, homeLine:1.5, homeOdds:-120},
+      total:{line:7.5, overOdds:-105, underOdds:-115, movement:'down'}, favML:168, sortMinutes:2 },
+    { id:3, status:'final', time:'7:05 PM ET', inning:null,
+      away:{abbr:'ATL', record:'52-44', pitcher:'S. Strider', score:6},
+      home:{abbr:'NYM', record:'49-47', pitcher:'K. Senga', score:3},
+      venue:'Citi Field', network:'ESPN',
+      ml:{away:-155, home:130}, rl:{awayLine:-1.5, awayOdds:115, homeLine:1.5, homeOdds:-135},
+      total:{line:8.5, overOdds:-110, underOdds:-110, movement:'flat'}, favML:155, sortMinutes:3 },
+    { id:4, status:'scheduled', time:'7:07 PM ET', inning:null,
+      away:{abbr:'TB', record:'45-51', pitcher:'R. Pepiot', score:null},
+      home:{abbr:'TOR', record:'53-43', pitcher:'J. Berrios', score:null},
+      venue:'Rogers Centre', network:'FS1',
+      ml:{away:102, home:-120}, rl:{awayLine:1.5, awayOdds:-185, homeLine:-1.5, homeOdds:165},
+      total:{line:8, overOdds:-112, underOdds:-108, movement:'up'}, favML:120, sortMinutes:4 },
+    { id:5, status:'live', time:'7:10 PM ET', inning:'BOT 5TH',
+      away:{abbr:'NYY', record:'54-42', pitcher:'G. Alvarez', score:4},
+      home:{abbr:'BOS', record:'49-47', pitcher:'B. Cortez', score:2},
+      venue:'Fenway Park', network:'ESPN',
+      ml:{away:-142, home:120}, rl:{awayLine:-1.5, awayOdds:125, homeLine:1.5, homeOdds:-145},
+      total:{line:8.5, overOdds:-110, underOdds:-105, movement:'up'}, favML:142, sortMinutes:5 },
+    { id:6, status:'scheduled', time:'8:10 PM ET', inning:null,
+      away:{abbr:'TEX', record:'46-50', pitcher:'N. Eovaldi', score:null},
+      home:{abbr:'MIN', record:'51-45', pitcher:'P. Lopez', score:null},
+      venue:'Target Field', network:'Apple TV+',
+      ml:{away:114, home:-135}, rl:{awayLine:1.5, awayOdds:-160, homeLine:-1.5, homeOdds:140},
+      total:{line:7.5, overOdds:-112, underOdds:-108, movement:'flat'}, favML:135, sortMinutes:6 },
+    { id:7, status:'live', time:'8:15 PM ET', inning:'TOP 2ND',
+      away:{abbr:'CHC', record:'50-46', pitcher:'J. Steele', score:1},
+      home:{abbr:'STL', record:'48-48', pitcher:'S. Gray', score:0},
+      venue:'Busch Stadium', network:'MLB.TV',
+      ml:{away:-125, home:106}, rl:{awayLine:-1.5, awayOdds:160, homeLine:1.5, homeOdds:-180},
+      total:{line:8, overOdds:-105, underOdds:-115, movement:'down'}, favML:125, sortMinutes:7 },
+    { id:8, status:'scheduled', time:'9:10 PM ET', inning:null,
+      away:{abbr:'HOU', record:'55-41', pitcher:'F. Valdez', score:null},
+      home:{abbr:'SEA', record:'52-44', pitcher:'L. Gilbert', score:null},
+      venue:'T-Mobile Park', network:'Local',
+      ml:{away:-152, home:128}, rl:{awayLine:-1.5, awayOdds:110, homeLine:1.5, homeOdds:-130},
+      total:{line:7.5, overOdds:-110, underOdds:-110, movement:'flat'}, favML:152, sortMinutes:8 },
+    { id:9, status:'scheduled', time:'9:40 PM ET', inning:null,
+      away:{abbr:'LAD', record:'62-34', pitcher:'Y. Yamamoto', score:null},
+      home:{abbr:'SF', record:'47-49', pitcher:'L. Webb', score:null},
+      venue:'Oracle Park', network:'FOX',
+      ml:{away:-195, home:164}, rl:{awayLine:-1.5, awayOdds:-105, homeLine:1.5, homeOdds:-115},
+      total:{line:7.5, overOdds:-108, underOdds:-112, movement:'up'}, favML:195, sortMinutes:9 },
+    { id:10, status:'scheduled', time:'9:40 PM ET', inning:null,
+      away:{abbr:'SD', record:'53-43', pitcher:'D. Cease', score:null},
+      home:{abbr:'ARI', record:'50-46', pitcher:'Z. Gallen', score:null},
+      venue:'Chase Field', network:'MLB Network',
+      ml:{away:-130, home:110}, rl:{awayLine:-1.5, awayOdds:135, homeLine:1.5, homeOdds:-155},
+      total:{line:8, overOdds:-110, underOdds:-110, movement:'down'}, favML:130, sortMinutes:10 },
+  ];
+
+  fmt(n) { return n > 0 ? '+' + n : String(n); }
+
+  buildData() {
+    const LAST = ['Alvarez','Bauer','Castillo','Diaz','Ellis','Franco','Garcia','Hicks','Ibarra','Jansen','Kim','Lopez','Martin','Nunez','Ortega','Perez','Quinn','Ramirez','Soto','Torres','Vargas','Ward','Ximenez','Young','Zamora'];
+    const FI = ['A','B','C','D','J','K','L','M','R','S','T','W'];
+    const POS = ['SS','2B','1B','3B','OF'];
+    const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const baseDate = new Date(2026, 6, 21);
+    const dateFor = (daysAgo) => { const d = new Date(baseDate.getTime()); d.setDate(d.getDate() - daysAgo); return MONTHS[d.getMonth()] + ' ' + d.getDate(); };
+    const TEAMS = [];
+    this.gamesBase.forEach(g => { TEAMS.push(g.away.abbr, g.home.abbr); });
+    const rngFor = (str) => {
+      let h = 0;
+      for (let i = 0; i < str.length; i++) h = (Math.imul(31, h) + str.charCodeAt(i)) | 0;
+      let s = h || 1;
+      return () => { s = (Math.imul(s, 1103515245) + 12345) | 0; return ((s >>> 0) % 100000) / 100000; };
+    };
+    const pickOdds = (rng) => [-105, -110, -115, -120, -125][Math.floor(rng() * 5)];
+    const oppFor = (rng, own) => { let t; do { t = TEAMS[Math.floor(rng() * TEAMS.length)]; } while (t === own); return t; };
+
+    const buildBatters = (gid, side, teamAbbr) => {
+      const rng = rngFor(gid + '-' + side + '-batters');
+      const used = new Set();
+      const list = [];
+      for (let i = 0; i < 5; i++) {
+        let name;
+        do { name = FI[Math.floor(rng() * FI.length)] + '. ' + LAST[Math.floor(rng() * LAST.length)]; } while (used.has(name));
+        used.add(name);
+        const ba = +(0.220 + rng() * 0.100).toFixed(3);
+        const kPct = Math.round(12 + rng() * 20);
+        const bbPct = Math.round(5 + rng() * 9);
+        const obp = +(ba + 0.05 + rng() * 0.05).toFixed(3);
+        const gamelog = [];
+        for (let gI = 0; gI < 10; gI++) {
+          const ab = 3 + (rng() < 0.5 ? 0 : 1);
+          let h = 0, k = 0;
+          for (let a = 0; a < ab; a++) { if (rng() < ba + 0.04) h++; if (rng() < kPct / 100) k++; }
+          let tb = h;
+          for (let hh = 0; hh < h; hh++) { if (rng() < 0.30) tb++; if (rng() < 0.07) tb++; }
+          gamelog.push({ g: gI + 1, date: dateFor(gI + 1), opp: oppFor(rng, teamAbbr), ab, h, k, tb });
+        }
+        const avgHits = gamelog.reduce((s, r) => s + r.h, 0) / 10;
+        const hitsLine = avgHits >= 1.3 ? 1.5 : 0.5;
+        const tbLine = ba >= 0.27 ? 2.5 : 1.5;
+        const hitsOverCov = Math.round(gamelog.filter(r => r.h > hitsLine).length / 10 * 100);
+        const tbOverCov = Math.round(gamelog.filter(r => r.tb > tbLine).length / 10 * 100);
+        const soCov = Math.round(gamelog.filter(r => r.k >= 1).length / 10 * 100);
+        list.push({
+          id: gid + '-' + side + '-' + i, name, team: teamAbbr, pos: POS[i],
+          ba, kPct, bbPct, obp, gamelog,
+          hitsLine, hitsOverOdds: pickOdds(rng), hitsUnderOdds: pickOdds(rng), hitsOverCov, hitsUnderCov: 100 - hitsOverCov,
+          soOdds: pickOdds(rng), soCov,
+          tbLine, tbOverOdds: pickOdds(rng), tbUnderOdds: pickOdds(rng), tbOverCov, tbUnderCov: 100 - tbOverCov,
+        });
+      }
+      return list;
+    };
+
+    const buildPitcherStats = (gid, side, teamAbbr) => {
+      const rng = rngFor(gid + '-' + side + '-pitcher');
+      const era = +(2.60 + rng() * 2.40).toFixed(2);
+      const k9 = +(6.5 + rng() * 4.7).toFixed(1);
+      const whip = +(0.95 + rng() * 0.48).toFixed(2);
+      const wins = 4 + Math.floor(rng() * 10);
+      const losses = 2 + Math.floor(rng() * 9);
+      const last5 = [];
+      for (let i = 0; i < 5; i++) {
+        const ip = +(4.0 + rng() * 3.0).toFixed(1);
+        const k = Math.max(2, Math.round(ip * (k9 / 9) + (rng() * 3 - 1.5)));
+        const er = Math.floor(rng() * 5);
+        const kLine = Math.max(2.5, Math.round((k9 * ip / 9) * 2) / 2 - 0.5);
+        const daysAgo = (5 - i) * 5;
+        last5.push({ agoLabel: (5 - i) + ' back', date: dateFor(daysAgo), opp: oppFor(rng, teamAbbr), ip, er, k, kLine, result: k > kLine ? 'OVER' : 'UNDER' });
+      }
+      return { era, k9, whip, wins, losses, last5 };
+    };
+
+    const games = this.gamesBase.map(g => {
+      const awayPitcherStats = buildPitcherStats(g.id, 'away', g.away.abbr);
+      const homePitcherStats = buildPitcherStats(g.id, 'home', g.home.abbr);
+      const awayBatters = buildBatters(g.id, 'away', g.away.abbr).map(b => ({
+        ...b, gameId: g.id, gameLabel: g.away.abbr + ' @ ' + g.home.abbr, gameTime: g.time,
+        oppPitcher: g.home.pitcher, oppPitcherStats: homePitcherStats, opp: g.home.abbr,
+      }));
+      const homeBatters = buildBatters(g.id, 'home', g.home.abbr).map(b => ({
+        ...b, gameId: g.id, gameLabel: g.away.abbr + ' @ ' + g.home.abbr, gameTime: g.time,
+        oppPitcher: g.away.pitcher, oppPitcherStats: awayPitcherStats, opp: g.away.abbr,
+      }));
+      return { ...g, awayPitcherStats, homePitcherStats, awayBatters, homeBatters };
+    });
+
+    const battersAll = [];
+    const pitchersAll = [];
+    games.forEach(g => {
+      battersAll.push(...g.awayBatters, ...g.homeBatters);
+      pitchersAll.push(
+        { id: g.id + '-away', name: g.away.pitcher, team: g.away.abbr, opp: g.home.abbr, gameId: g.id, gameLabel: g.away.abbr + ' @ ' + g.home.abbr, gameTime: g.time, stats: g.awayPitcherStats },
+        { id: g.id + '-home', name: g.home.pitcher, team: g.home.abbr, opp: g.away.abbr, gameId: g.id, gameLabel: g.away.abbr + ' @ ' + g.home.abbr, gameTime: g.time, stats: g.homePitcherStats }
+      );
+    });
+
+    return { games, battersAll, pitchersAll };
+  }
+
+  getData() {
+    if (!this._data) this._data = this.buildData();
+    return this._data;
+  }
+
+  componentDidMount() {
+    const base = (this.props.apiBaseUrl || '').trim();
+    if (!base) return;
+    fetch(base.replace(/\/+$/, '') + '/api/dashboard')
+      .then(r => { if (!r.ok) throw new Error('bad status'); return r.json(); })
+      .then(json => {
+        if (json && json.games && json.battersAll && json.pitchersAll) {
+          this._data = json;
+          this._liveDataError = false;
+          this.forceUpdate();
+        }
+      })
+      .catch(() => { this._liveDataError = true; this.forceUpdate(); });
+  }
+
+  renderVals() {
+    const data = this.getData();
+    const fmt = this.fmt;
+    const st = this.state;
+    const q = (st.search || '').trim().toLowerCase();
+    const segBase = 'border:none; background:none; font-family:var(--font-heading); font-weight:600; color:inherit; cursor:pointer; padding:7px 14px; font-size:13px;';
+    const activeSeg = 'background:var(--color-accent); color:var(--color-bg);';
+
+    const view = st.view || 'matchup';
+    const isMatchupList = view === 'matchup';
+    const isGameView = view === 'game';
+    const isBattersList = view === 'batters';
+    const isPitchersList = view === 'pitchers';
+    const matchupTabActive = view === 'matchup' || view === 'game';
+
+    const arrow = (s, key) => s.key === key ? (s.dir === 'asc' ? ' \u25B2' : ' \u25BC') : '';
+    const sortBy = (rows, s, accessors) => {
+      const acc = accessors[s.key];
+      if (!acc) return rows;
+      const dir = s.dir === 'desc' ? -1 : 1;
+      return rows.slice().sort((a, b) => {
+        const av = acc(a), bv = acc(b);
+        if (typeof av === 'string') return av.localeCompare(bv) * dir;
+        return (av - bv) * dir;
+      });
+    };
+    const makeSort = (stateKey, key, defaultDir) => () => this.setState(s => {
+      const cur = s[stateKey] || {};
+      const dir = cur.key === key ? (cur.dir === 'asc' ? 'desc' : 'asc') : defaultDir;
+      return { [stateKey]: { key, dir } };
+    });
+
+    const matchupSort = st.matchupSort || { key: 'time', dir: 'asc' };
+    const battersSort = st.battersSort || { key: 'name', dir: 'asc' };
+    const pitchersSort = st.pitchersSort || { key: 'name', dir: 'asc' };
+
+    const gamesDisplay = data.games.map(g => {
+      const statusLabel = g.status === 'live' ? g.inning : g.status === 'final' ? 'FINAL' : g.time;
+      const scoreDisplay = g.status !== 'scheduled' ? (g.away.score + '\u2013' + g.home.score) : '\u2013';
+      return {
+        ...g, statusLabel, scoreDisplay,
+        isLive: g.status === 'live', isFinal: g.status === 'final', isScheduled: g.status === 'scheduled',
+        matchupLabel: g.away.abbr + ' @ ' + g.home.abbr,
+        mlAway: fmt(g.ml.away), mlHome: fmt(g.ml.home),
+        rlAway: fmt(g.rl.awayLine) + '  ' + fmt(g.rl.awayOdds),
+        rlHome: fmt(g.rl.homeLine) + '  ' + fmt(g.rl.homeOdds),
+        openGame: () => this.setState({ view: 'game', selectedGameId: g.id, gameFilter: 'batter' }),
+      };
+    });
+
+    const matchupAccessors = {
+      time: g => g.sortMinutes, matchup: g => g.matchupLabel, score: g => ((g.away.score || 0) + (g.home.score || 0)),
+      mlAway: g => g.ml.away, mlHome: g => g.ml.home, rlAway: g => g.rl.awayLine, rlHome: g => g.rl.homeLine,
+    };
+    let matchupList = gamesDisplay.filter(g => {
+      if (!q) return true;
+      const hay = [g.away.abbr, g.away.pitcher, g.home.abbr, g.home.pitcher].join(' ').toLowerCase();
+      return hay.includes(q);
+    });
+    matchupList = sortBy(matchupList, matchupSort, matchupAccessors);
+
+    const selGame = gamesDisplay.find(g => g.id === st.selectedGameId) || gamesDisplay[0];
+
+    const propFilter = st.propFilter || 'hits';
+    const sideFilter = st.sideFilter || 'over';
+    const sideFilterEnabled = propFilter !== 'strikeouts';
+
+    const formatBatterRow = (b) => {
+      let line, odds, cov, label;
+      if (propFilter === 'hits') {
+        line = b.hitsLine;
+        if (sideFilter === 'under') { odds = b.hitsUnderOdds; cov = b.hitsUnderCov; label = 'Under ' + line + ' Hits'; }
+        else { odds = b.hitsOverOdds; cov = b.hitsOverCov; label = 'Over ' + line + ' Hits'; }
+      } else if (propFilter === 'totalBases') {
+        line = b.tbLine;
+        if (sideFilter === 'under') { odds = b.tbUnderOdds; cov = b.tbUnderCov; label = 'Under ' + line + ' Total Bases'; }
+        else { odds = b.tbOverOdds; cov = b.tbOverCov; label = 'Over ' + line + ' Total Bases'; }
+      } else {
+        odds = b.soOdds; cov = b.soCov; label = '1+ Strikeouts';
+      }
+      return {
+        id: b.id, name: b.name, team: b.team, opp: b.oppPitcher, gameLabel: b.gameLabel,
+        propLabel: label, oddsFmt: fmt(odds), oddsNum: odds, covFmt: cov + '%', covNum: cov,
+        oppEra: b.oppPitcherStats.era.toFixed(2), oppEraNum: b.oppPitcherStats.era,
+        oppK9: b.oppPitcherStats.k9.toFixed(1), oppK9Num: b.oppPitcherStats.k9,
+        oppWhip: b.oppPitcherStats.whip.toFixed(2), oppWhipNum: b.oppPitcherStats.whip,
+        baFmt: b.ba.toFixed(3), baNum: b.ba,
+        kPctFmt: b.kPct + '%', kPctNum: b.kPct,
+        bbPctFmt: b.bbPct + '%', bbPctNum: b.bbPct,
+        obpFmt: b.obp.toFixed(3), obpNum: b.obp,
+        openThisBatter: () => this.setState({ selectedBatterId: b.id, showGamelog: false, showPitcherLog: false }),
+      };
+    };
+    const batterAccessors = { name: b => b.name, team: b => b.team, oppEra: b => b.oppEraNum, oppK9: b => b.oppK9Num, oppWhip: b => b.oppWhipNum, odds: b => b.oddsNum, coverage: b => b.covNum, ba: b => b.baNum, kPct: b => b.kPctNum, bbPct: b => b.bbPctNum, obp: b => b.obpNum };
+
+    const battersFilteredAll = data.battersAll.filter(b => {
+      if (!q) return true;
+      const hay = [b.name, b.team, b.oppPitcher].join(' ').toLowerCase();
+      return hay.includes(q);
+    });
+    const battersRows = sortBy(battersFilteredAll.map(formatBatterRow), battersSort, batterAccessors);
+    const gameBatterRows = sortBy(data.battersAll.filter(b => selGame && b.gameId === selGame.id).map(formatBatterRow), battersSort, batterAccessors);
+
+    const formatPitcherRow = (p) => ({
+      id: p.id, name: p.name, team: p.team, opp: p.opp, gameLabel: p.gameLabel,
+      era: p.stats.era.toFixed(2), eraNum: p.stats.era,
+      k9: p.stats.k9.toFixed(1), k9Num: p.stats.k9,
+      whip: p.stats.whip.toFixed(2), whipNum: p.stats.whip,
+      record: p.stats.wins + '-' + p.stats.losses, winsNum: p.stats.wins,
+      openThisPitcher: () => this.setState({ selectedPitcherId: p.id }),
+    });
+    const pitcherAccessors = { name: p => p.name, team: p => p.team, era: p => p.eraNum, k9: p => p.k9Num, whip: p => p.whipNum, record: p => p.winsNum };
+    const pitchersFilteredAll = data.pitchersAll.filter(p => {
+      if (!q) return true;
+      return (p.name + ' ' + p.team).toLowerCase().includes(q);
+    });
+    const pitchersRows = sortBy(pitchersFilteredAll.map(formatPitcherRow), pitchersSort, pitcherAccessors);
+    const gamePitcherRows = sortBy(data.pitchersAll.filter(p => selGame && p.gameId === selGame.id).map(formatPitcherRow), pitchersSort, pitcherAccessors);
+
+    const selectedBatter = st.selectedBatterId ? data.battersAll.find(b => b.id === st.selectedBatterId) : null;
+    const selectedPitcher = st.selectedPitcherId ? data.pitchersAll.find(p => p.id === st.selectedPitcherId) : null;
+
+    let selBatterProps = [];
+    if (selectedBatter) {
+      selBatterProps = [
+        { key: 'hits', label: 'Hits', twoSided: true, oneSided: false, overOdds: fmt(selectedBatter.hitsOverOdds) + ' (O ' + selectedBatter.hitsLine + ')', underOdds: fmt(selectedBatter.hitsUnderOdds) + ' (U ' + selectedBatter.hitsLine + ')', overCov: selectedBatter.hitsOverCov + '%', underCov: selectedBatter.hitsUnderCov + '%' },
+        { key: 'so', label: '1+ Strikeouts', twoSided: false, oneSided: true, odds: fmt(selectedBatter.soOdds), cov: selectedBatter.soCov + '%' },
+        { key: 'tb', label: 'Total Bases', twoSided: true, oneSided: false, overOdds: fmt(selectedBatter.tbOverOdds) + ' (O ' + selectedBatter.tbLine + ')', underOdds: fmt(selectedBatter.tbUnderOdds) + ' (U ' + selectedBatter.tbLine + ')', overCov: selectedBatter.tbOverCov + '%', underCov: selectedBatter.tbUnderCov + '%' },
+      ];
+    }
+
+    return {
+      search: st.search || '', setSearch: e => this.setState({ search: e.target.value }),
+
+      matchupTabStyle: segBase + (matchupTabActive ? activeSeg : ''),
+      battersTabStyle: segBase + (view === 'batters' ? activeSeg : ''),
+      pitchersTabStyle: segBase + (view === 'pitchers' ? activeSeg : ''),
+      setViewMatchup: () => this.setState({ view: 'matchup', selectedGameId: null }),
+      setViewBatters: () => this.setState({ view: 'batters' }),
+      setViewPitchers: () => this.setState({ view: 'pitchers' }),
+
+      isMatchupList, isGameView, isBattersList, isPitchersList,
+
+      matchupCount: matchupList.length,
+      matchupRows: matchupList,
+      hStatus: 'Status' + arrow(matchupSort, 'time'), sortMatchupTime: makeSort('matchupSort', 'time', 'asc'),
+      hMatchup: 'Matchup' + arrow(matchupSort, 'matchup'), sortMatchupMatchup: makeSort('matchupSort', 'matchup', 'asc'),
+      hScore: 'Score' + arrow(matchupSort, 'score'), sortMatchupScore: makeSort('matchupSort', 'score', 'desc'),
+      hMlAway: 'Moneyline · Away' + arrow(matchupSort, 'mlAway'), sortMatchupMlAway: makeSort('matchupSort', 'mlAway', 'asc'),
+      hMlHome: 'Moneyline · Home' + arrow(matchupSort, 'mlHome'), sortMatchupMlHome: makeSort('matchupSort', 'mlHome', 'asc'),
+      hRlAway: 'Run Line · Away' + arrow(matchupSort, 'rlAway'), sortMatchupRlAway: makeSort('matchupSort', 'rlAway', 'asc'),
+      hRlHome: 'Run Line · Home' + arrow(matchupSort, 'rlHome'), sortMatchupRlHome: makeSort('matchupSort', 'rlHome', 'asc'),
+
+      backToMatchup: () => this.setState({ view: 'matchup', selectedGameId: null }),
+      selGameLabel: selGame ? selGame.matchupLabel : '',
+      selGameStatusText: selGame ? (selGame.isLive ? selGame.statusLabel : selGame.isFinal ? 'FINAL ' + selGame.scoreDisplay : selGame.time) : '',
+      selGameVenue: selGame ? selGame.venue : '',
+      selGameNetwork: selGame ? selGame.network : '',
+      gameFilterBatterStyle: segBase + ((st.gameFilter || 'batter') !== 'pitcher' ? activeSeg : ''),
+      gameFilterPitcherStyle: segBase + (st.gameFilter === 'pitcher' ? activeSeg : ''),
+      setGameFilterBatter: () => this.setState({ gameFilter: 'batter' }),
+      setGameFilterPitcher: () => this.setState({ gameFilter: 'pitcher' }),
+      isGameBatterFilter: (st.gameFilter || 'batter') !== 'pitcher',
+      isGamePitcherFilter: st.gameFilter === 'pitcher',
+      gameBatterRows, gamePitcherRows,
+
+      propHitsStyle: segBase + (propFilter === 'hits' ? activeSeg : ''),
+      propSoStyle: segBase + (propFilter === 'strikeouts' ? activeSeg : ''),
+      propTbStyle: segBase + (propFilter === 'totalBases' ? activeSeg : ''),
+      setPropHits: () => this.setState({ propFilter: 'hits' }),
+      setPropSo: () => this.setState({ propFilter: 'strikeouts' }),
+      setPropTb: () => this.setState({ propFilter: 'totalBases' }),
+      sideFilterEnabled,
+      sideOverStyle: segBase + (sideFilter === 'over' ? activeSeg : ''),
+      sideUnderStyle: segBase + (sideFilter === 'under' ? activeSeg : ''),
+      setSideOver: () => this.setState({ sideFilter: 'over' }),
+      setSideUnder: () => this.setState({ sideFilter: 'under' }),
+      battersCount: battersRows.length,
+      battersRows,
+      hName: 'Player' + arrow(battersSort, 'name'), sortBattersName: makeSort('battersSort', 'name', 'asc'),
+      hTeam: 'Team' + arrow(battersSort, 'team'), sortBattersTeam: makeSort('battersSort', 'team', 'asc'),
+      hOppEra: 'Opp ERA' + arrow(battersSort, 'oppEra'), sortBattersOppEra: makeSort('battersSort', 'oppEra', 'asc'),
+      hOppK9: 'Opp K/9' + arrow(battersSort, 'oppK9'), sortBattersOppK9: makeSort('battersSort', 'oppK9', 'desc'),
+      hOppWhip: 'Opp WHIP' + arrow(battersSort, 'oppWhip'), sortBattersOppWhip: makeSort('battersSort', 'oppWhip', 'asc'),
+      hOdds: 'Odds' + arrow(battersSort, 'odds'), sortBattersOdds: makeSort('battersSort', 'odds', 'asc'),
+      hCoverage: 'Coverage %' + arrow(battersSort, 'coverage'), sortBattersCoverage: makeSort('battersSort', 'coverage', 'desc'),
+      hBA: 'BA' + arrow(battersSort, 'ba'), sortBattersBA: makeSort('battersSort', 'ba', 'desc'),
+      hKPct: 'K%' + arrow(battersSort, 'kPct'), sortBattersKPct: makeSort('battersSort', 'kPct', 'asc'),
+      hBBPct: 'BB%' + arrow(battersSort, 'bbPct'), sortBattersBBPct: makeSort('battersSort', 'bbPct', 'desc'),
+      hOBP: 'OBP' + arrow(battersSort, 'obp'), sortBattersOBP: makeSort('battersSort', 'obp', 'desc'),
+
+      pitchersCount: pitchersRows.length,
+      pitchersRows,
+      hPName: 'Pitcher' + arrow(pitchersSort, 'name'), sortPitchersName: makeSort('pitchersSort', 'name', 'asc'),
+      hPTeam: 'Team' + arrow(pitchersSort, 'team'), sortPitchersTeam: makeSort('pitchersSort', 'team', 'asc'),
+      hPEra: 'ERA' + arrow(pitchersSort, 'era'), sortPitchersEra: makeSort('pitchersSort', 'era', 'asc'),
+      hPK9: 'K/9' + arrow(pitchersSort, 'k9'), sortPitchersK9: makeSort('pitchersSort', 'k9', 'desc'),
+      hPWhip: 'WHIP' + arrow(pitchersSort, 'whip'), sortPitchersWhip: makeSort('pitchersSort', 'whip', 'asc'),
+      hPRecord: 'Record' + arrow(pitchersSort, 'record'), sortPitchersRecord: makeSort('pitchersSort', 'record', 'desc'),
+
+      hasSelectedBatter: !!selectedBatter,
+      closeBatterModal: () => this.setState({ selectedBatterId: null }),
+      stopProp: e => e.stopPropagation(),
+      selBatterName: selectedBatter ? selectedBatter.name : '',
+      selBatterMeta: selectedBatter ? (selectedBatter.pos + ' · ' + selectedBatter.team + ' · ' + selectedBatter.gameLabel) : '',
+      selBatterBA: selectedBatter ? selectedBatter.ba.toFixed(3) : '',
+      selBatterKPct: selectedBatter ? selectedBatter.kPct + '%' : '',
+      selBatterBBPct: selectedBatter ? selectedBatter.bbPct + '%' : '',
+      selBatterOBP: selectedBatter ? selectedBatter.obp.toFixed(3) : '',
+      selBatterOppName: selectedBatter ? selectedBatter.oppPitcher : '',
+      selBatterOppEra: selectedBatter ? selectedBatter.oppPitcherStats.era.toFixed(2) : '',
+      selBatterOppK9: selectedBatter ? selectedBatter.oppPitcherStats.k9.toFixed(1) : '',
+      selBatterOppWhip: selectedBatter ? selectedBatter.oppPitcherStats.whip.toFixed(2) : '',
+      selBatterProps,
+      selBatterGamelog: selectedBatter ? selectedBatter.gamelog : [],
+      selBatterOppLast5: selectedBatter ? selectedBatter.oppPitcherStats.last5 : [],
+      showGamelog: !!st.showGamelog, showPitcherLog: !!st.showPitcherLog,
+      toggleGamelog: () => this.setState(s => ({ showGamelog: !s.showGamelog })),
+      togglePitcherLog: () => this.setState(s => ({ showPitcherLog: !s.showPitcherLog })),
+      gamelogBtnLabel: st.showGamelog ? 'Hide Last 10 Games' : 'View Last 10 Games',
+      pitcherLogBtnLabel: st.showPitcherLog ? 'Hide Pitcher Last 5 Starts' : "View Opposing Pitcher's Last 5 Starts",
+
+      hasSelectedPitcher: !!selectedPitcher,
+      closePitcherModal: () => this.setState({ selectedPitcherId: null }),
+      selPitcherName: selectedPitcher ? selectedPitcher.name : '',
+      selPitcherMeta: selectedPitcher ? (selectedPitcher.team + ' · ' + selectedPitcher.gameLabel) : '',
+      selPitcherEra: selectedPitcher ? selectedPitcher.stats.era.toFixed(2) : '',
+      selPitcherK9: selectedPitcher ? selectedPitcher.stats.k9.toFixed(1) : '',
+      selPitcherWhip: selectedPitcher ? selectedPitcher.stats.whip.toFixed(2) : '',
+      selPitcherRecord: selectedPitcher ? (selectedPitcher.stats.wins + '-' + selectedPitcher.stats.losses) : '',
+      selPitcherLast5: selectedPitcher ? selectedPitcher.stats.last5 : [],
+    };
+  }
+}
+
+</script>
+</body>
+</html>
