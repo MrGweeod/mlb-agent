@@ -166,7 +166,7 @@ def _build_batter(player_legs: list[dict], game_lookup: dict) -> dict:
     gamelog = [
         {
             "date": s.get("date", ""),
-            "opp": (s.get("opponent") or {}).get("abbreviation", ""),
+            "opp": _abbr((s.get("opponent") or {}).get("name", "")),
             "ab": s.get("stat", {}).get("atBats", 0),
             "h": s.get("stat", {}).get("hits", 0),
             "k": s.get("stat", {}).get("strikeOuts", 0),
@@ -243,7 +243,7 @@ def _build_pitcher(pitcher_id: str, pitcher_name: str, team: str, opp: str, game
         matched = scored_by_date.get(d)
         last5.append({
             "date": d,
-            "opp": (s.get("opponent") or {}).get("abbreviation", ""),
+            "opp": _abbr((s.get("opponent") or {}).get("name", "")),
             "ip": stat.get("inningsPitched", 0),
             "er": stat.get("earnedRuns", 0),
             "k": stat.get("strikeOuts", 0),
