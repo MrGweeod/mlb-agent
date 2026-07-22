@@ -1,3 +1,6 @@
+# Dedicated config for the dashboard-api service (Settings -> Config-as-code
+# -> Config File Path = dashboard_api/railway.toml). Kept separate from the
+# root railway.toml, which governs the mlb-agent service's own start command.
 [build]
 builder = "NIXPACKS"
 
