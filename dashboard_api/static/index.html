@@ -33,6 +33,7 @@
     </div>
   </sc-if>
 
+  <sc-if value="{{ contentUnlocked }}" hint-placeholder-val="{{ false }}">
   <div class="nav" style="background:var(--color-surface); border-bottom:1px solid var(--color-divider);">
     <div class="nav-brand">DIAMOND LINE</div>
     <div style="display:flex; align-items:center; gap:8px; background:var(--color-bg); border:1px solid var(--color-divider); padding:6px 10px; border-radius:var(--radius-md); width:300px;">
@@ -396,6 +397,7 @@
       </div>
     </div>
   </sc-if>
+  </sc-if>
 
 </div>
 
@@ -628,6 +630,11 @@ class Component extends DCLogic {
     // with none set there's nothing to authenticate against, so the app
     // just shows sample data unlocked, same as before self-hosting.
     const needsAuth = !!this._apiBase && !st.authed;
+    // Content (nav, tables, everything) stays fully hidden while a live API
+    // is configured but not yet authenticated — the overlay alone doesn't
+    // stop the sample-data fallback from rendering behind it, so this gate
+    // is required, not just visual layering.
+    const contentUnlocked = !needsAuth;
     // data.date is a "YYYY-MM-DD" string from the live API; appending
     // "T00:00:00" (no Z/offset) makes the Date parse as local time, not
     // UTC, avoiding an off-by-one day shift in negative-UTC timezones.
@@ -771,6 +778,7 @@ class Component extends DCLogic {
       todayLabel,
 
       needsAuth,
+      contentUnlocked,
       authPw: st.authPw || '',
       setAuthPw: e => this.setState({ authPw: e.target.value }),
       authKeyDown: e => { if (e.key === 'Enter') this.tryAuth(); },
