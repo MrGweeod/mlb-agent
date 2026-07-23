@@ -295,4 +295,4 @@ def build_dashboard(run_date: str) -> dict:
     for g in games:
         g.pop("_game_pk", None)
 
-    return {"games": games, "battersAll": battersAll, "pitchersAll": pitchersAll}
+    return {"date": run_date, "games": games, "battersAll": battersAll, "pitchersAll": pitchersAll}

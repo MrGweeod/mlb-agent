@@ -23,7 +23,7 @@
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
       <input class="input" style="border:none; background:transparent; padding:0; min-height:auto;" placeholder="Search player, team, pitcher…" aria-label="Search" value="{{ search }}" onChange="{{ setSearch }}">
     </div>
-    <span class="tag tag-outline">TODAY · JUL 21</span>
+    <span class="tag tag-outline">{{ todayLabel }}</span>
   </div>
 
   <div style="display:flex; align-items:center; justify-content:space-between; gap:16px; padding:var(--space-3) var(--space-4); border-bottom:1px solid var(--color-divider); flex-wrap:wrap;">
@@ -184,6 +184,12 @@
   </sc-if>
 
   <sc-if value="{{ isBattersList }}" hint-placeholder-val="{{ false }}">
+   <sc-if value="{{ battersEmpty }}" hint-placeholder-val="{{ false }}">
+    <div style="padding:var(--space-6); text-align:center;" class="text-muted">
+      No batter props posted yet for today's slate — check back closer to game time.
+    </div>
+   </sc-if>
+   <sc-if value="{{ battersHasData }}" hint-placeholder-val="{{ true }}">
     <div style="padding:var(--space-4); overflow:auto;">
       <table class="table">
         <thead><tr>
@@ -224,9 +230,16 @@
         </tbody>
       </table>
     </div>
+   </sc-if>
   </sc-if>
 
   <sc-if value="{{ isPitchersList }}" hint-placeholder-val="{{ false }}">
+   <sc-if value="{{ pitchersEmpty }}" hint-placeholder-val="{{ false }}">
+    <div style="padding:var(--space-6); text-align:center;" class="text-muted">
+      No probable starters posted yet for today's slate — check back closer to game time.
+    </div>
+   </sc-if>
+   <sc-if value="{{ pitchersHasData }}" hint-placeholder-val="{{ true }}">
     <div style="padding:var(--space-4); overflow:auto;">
       <table class="table">
         <thead><tr>
@@ -255,6 +268,7 @@
         </tbody>
       </table>
     </div>
+   </sc-if>
   </sc-if>
 
   <sc-if value="{{ hasSelectedBatter }}" hint-placeholder-val="{{ false }}">
@@ -438,7 +452,7 @@ class Component extends DCLogic {
       total:{line:8, overOdds:-110, underOdds:-110, movement:'down'}, favML:130, sortMinutes:10 },
   ];
 
-  fmt(n) { return n > 0 ? '+' + n : String(n); }
+  fmt(n) { return n == null ? '—' : (n > 0 ? '+' + n : String(n)); }
 
   buildData() {
     const LAST = ['Alvarez','Bauer','Castillo','Diaz','Ellis','Franco','Garcia','Hicks','Ibarra','Jansen','Kim','Lopez','Martin','Nunez','Ortega','Perez','Quinn','Ramirez','Soto','Torres','Vargas','Ward','Ximenez','Young','Zamora'];
@@ -566,6 +580,14 @@ class Component extends DCLogic {
     const data = this.getData();
     const fmt = this.fmt;
     const st = this.state;
+    // data.date is a "YYYY-MM-DD" string from the live API; appending
+    // "T00:00:00" (no Z/offset) makes the Date parse as local time, not
+    // UTC, avoiding an off-by-one day shift in negative-UTC timezones.
+    // Falls back to the browser's current date in sample-data mode, where
+    // data.date isn't present.
+    const _MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+    const _slateDate = data.date ? new Date(data.date + 'T00:00:00') : new Date();
+    const todayLabel = 'TODAY · ' + _MONTHS[_slateDate.getMonth()] + ' ' + _slateDate.getDate();
     const q = (st.search || '').trim().toLowerCase();
     const segBase = 'border:none; background:none; font-family:var(--font-heading); font-weight:600; color:inherit; cursor:pointer; padding:7px 14px; font-size:13px;';
     const activeSeg = 'background:var(--color-accent); color:var(--color-bg);';
@@ -630,28 +652,30 @@ class Component extends DCLogic {
     const sideFilterEnabled = propFilter !== 'strikeouts';
 
     const fmtDec = (v, d) => v != null ? v.toFixed(d) : '-';
+    const fmtPct = v => v != null ? v + '%' : '—';
+    const fmtLine = v => v != null ? v : '—';
     const formatBatterRow = (b) => {
       let line, odds, cov, label;
       if (propFilter === 'hits') {
         line = b.hitsLine;
-        if (sideFilter === 'under') { odds = b.hitsUnderOdds; cov = b.hitsUnderCov; label = 'Under ' + line + ' Hits'; }
-        else { odds = b.hitsOverOdds; cov = b.hitsOverCov; label = 'Over ' + line + ' Hits'; }
+        if (sideFilter === 'under') { odds = b.hitsUnderOdds; cov = b.hitsUnderCov; label = 'Under ' + fmtLine(line) + ' Hits'; }
+        else { odds = b.hitsOverOdds; cov = b.hitsOverCov; label = 'Over ' + fmtLine(line) + ' Hits'; }
       } else if (propFilter === 'totalBases') {
         line = b.tbLine;
-        if (sideFilter === 'under') { odds = b.tbUnderOdds; cov = b.tbUnderCov; label = 'Under ' + line + ' Total Bases'; }
-        else { odds = b.tbOverOdds; cov = b.tbOverCov; label = 'Over ' + line + ' Total Bases'; }
+        if (sideFilter === 'under') { odds = b.tbUnderOdds; cov = b.tbUnderCov; label = 'Under ' + fmtLine(line) + ' Total Bases'; }
+        else { odds = b.tbOverOdds; cov = b.tbOverCov; label = 'Over ' + fmtLine(line) + ' Total Bases'; }
       } else {
         odds = b.soOdds; cov = b.soCov; label = '1+ Strikeouts';
       }
       return {
         id: b.id, name: b.name, team: b.team, opp: b.oppPitcher, gameLabel: b.gameLabel,
-        propLabel: label, oddsFmt: fmt(odds), oddsNum: odds, covFmt: cov + '%', covNum: cov,
+        propLabel: label, oddsFmt: fmt(odds), oddsNum: odds, covFmt: fmtPct(cov), covNum: cov,
         oppEra: fmtDec(b.oppPitcherStats?.era, 2), oppEraNum: b.oppPitcherStats?.era ?? null,
         oppK9: fmtDec(b.oppPitcherStats?.k9, 1), oppK9Num: b.oppPitcherStats?.k9 ?? null,
         oppWhip: fmtDec(b.oppPitcherStats?.whip, 2), oppWhipNum: b.oppPitcherStats?.whip ?? null,
         baFmt: fmtDec(b.ba, 3), baNum: b.ba,
-        kPctFmt: b.kPct + '%', kPctNum: b.kPct,
-        bbPctFmt: b.bbPct + '%', bbPctNum: b.bbPct,
+        kPctFmt: fmtPct(b.kPct), kPctNum: b.kPct,
+        bbPctFmt: fmtPct(b.bbPct), bbPctNum: b.bbPct,
         obpFmt: fmtDec(b.obp, 3), obpNum: b.obp,
         openThisBatter: () => this.setState({ selectedBatterId: b.id, showGamelog: false, showPitcherLog: false }),
       };
@@ -688,14 +712,15 @@ class Component extends DCLogic {
     let selBatterProps = [];
     if (selectedBatter) {
       selBatterProps = [
-        { key: 'hits', label: 'Hits', twoSided: true, oneSided: false, overOdds: fmt(selectedBatter.hitsOverOdds) + ' (O ' + selectedBatter.hitsLine + ')', underOdds: fmt(selectedBatter.hitsUnderOdds) + ' (U ' + selectedBatter.hitsLine + ')', overCov: selectedBatter.hitsOverCov + '%', underCov: selectedBatter.hitsUnderCov + '%' },
-        { key: 'so', label: '1+ Strikeouts', twoSided: false, oneSided: true, odds: fmt(selectedBatter.soOdds), cov: selectedBatter.soCov + '%' },
-        { key: 'tb', label: 'Total Bases', twoSided: true, oneSided: false, overOdds: fmt(selectedBatter.tbOverOdds) + ' (O ' + selectedBatter.tbLine + ')', underOdds: fmt(selectedBatter.tbUnderOdds) + ' (U ' + selectedBatter.tbLine + ')', overCov: selectedBatter.tbOverCov + '%', underCov: selectedBatter.tbUnderCov + '%' },
+        { key: 'hits', label: 'Hits', twoSided: true, oneSided: false, overOdds: fmt(selectedBatter.hitsOverOdds) + ' (O ' + fmtLine(selectedBatter.hitsLine) + ')', underOdds: fmt(selectedBatter.hitsUnderOdds) + ' (U ' + fmtLine(selectedBatter.hitsLine) + ')', overCov: fmtPct(selectedBatter.hitsOverCov), underCov: fmtPct(selectedBatter.hitsUnderCov) },
+        { key: 'so', label: '1+ Strikeouts', twoSided: false, oneSided: true, odds: fmt(selectedBatter.soOdds), cov: fmtPct(selectedBatter.soCov) },
+        { key: 'tb', label: 'Total Bases', twoSided: true, oneSided: false, overOdds: fmt(selectedBatter.tbOverOdds) + ' (O ' + fmtLine(selectedBatter.tbLine) + ')', underOdds: fmt(selectedBatter.tbUnderOdds) + ' (U ' + fmtLine(selectedBatter.tbLine) + ')', overCov: fmtPct(selectedBatter.tbOverCov), underCov: fmtPct(selectedBatter.tbUnderCov) },
       ];
     }
 
     return {
       search: st.search || '', setSearch: e => this.setState({ search: e.target.value }),
+      todayLabel,
 
       matchupTabStyle: segBase + (matchupTabActive ? activeSeg : ''),
       battersTabStyle: segBase + (view === 'batters' ? activeSeg : ''),
@@ -742,6 +767,8 @@ class Component extends DCLogic {
       setSideUnder: () => this.setState({ sideFilter: 'under' }),
       battersCount: battersRows.length,
       battersRows,
+      battersHasData: (data.battersAll || []).length > 0,
+      battersEmpty: (data.battersAll || []).length === 0,
       hName: 'Player' + arrow(battersSort, 'name'), sortBattersName: makeSort('battersSort', 'name', 'asc'),
       hTeam: 'Team' + arrow(battersSort, 'team'), sortBattersTeam: makeSort('battersSort', 'team', 'asc'),
       hOppEra: 'Opp ERA' + arrow(battersSort, 'oppEra'), sortBattersOppEra: makeSort('battersSort', 'oppEra', 'asc'),
@@ -756,6 +783,8 @@ class Component extends DCLogic {
 
       pitchersCount: pitchersRows.length,
       pitchersRows,
+      pitchersHasData: (data.pitchersAll || []).length > 0,
+      pitchersEmpty: (data.pitchersAll || []).length === 0,
       hPName: 'Pitcher' + arrow(pitchersSort, 'name'), sortPitchersName: makeSort('pitchersSort', 'name', 'asc'),
       hPTeam: 'Team' + arrow(pitchersSort, 'team'), sortPitchersTeam: makeSort('pitchersSort', 'team', 'asc'),
       hPEra: 'ERA' + arrow(pitchersSort, 'era'), sortPitchersEra: makeSort('pitchersSort', 'era', 'asc'),
@@ -769,8 +798,8 @@ class Component extends DCLogic {
       selBatterName: selectedBatter ? selectedBatter.name : '',
       selBatterMeta: selectedBatter ? (selectedBatter.pos + ' · ' + selectedBatter.team + ' · ' + selectedBatter.gameLabel) : '',
       selBatterBA: selectedBatter ? fmtDec(selectedBatter.ba, 3) : '',
-      selBatterKPct: selectedBatter ? selectedBatter.kPct + '%' : '',
-      selBatterBBPct: selectedBatter ? selectedBatter.bbPct + '%' : '',
+      selBatterKPct: selectedBatter ? fmtPct(selectedBatter.kPct) : '',
+      selBatterBBPct: selectedBatter ? fmtPct(selectedBatter.bbPct) : '',
       selBatterOBP: selectedBatter ? fmtDec(selectedBatter.obp, 3) : '',
       selBatterOppName: selectedBatter ? selectedBatter.oppPitcher : '',
       selBatterOppEra: selectedBatter ? fmtDec(selectedBatter.oppPitcherStats?.era, 2) : '',
