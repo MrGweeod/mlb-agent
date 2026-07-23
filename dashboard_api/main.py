@@ -64,7 +64,9 @@ _cache: dict = {"date": None, "data": None, "fetched_at": 0.0}
 
 
 @app.get("/api/dashboard")
-def get_dashboard():
+def get_dashboard(request: Request):
+    if not _check_auth(request):
+        raise HTTPException(status_code=401, detail="Unauthorized")
     today = date.today().isoformat()
     now = time.time()
     if (
@@ -82,9 +84,11 @@ def get_dashboard():
 
 
 @app.get("/api/dashboard/refresh")
-def force_refresh():
+def force_refresh(request: Request):
+    if not _check_auth(request):
+        raise HTTPException(status_code=401, detail="Unauthorized")
     _cache.update(date=None, data=None, fetched_at=0.0)
-    return get_dashboard()
+    return get_dashboard(request)
 
 
 @app.get("/health")

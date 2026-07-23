@@ -17,6 +17,22 @@
 </helmet>
 <div style="min-height:100vh; background:var(--color-bg); color:var(--color-text); font-family:var(--font-body);">
 
+  <sc-if value="{{ needsAuth }}" hint-placeholder-val="{{ false }}">
+    <div class="dialog-backdrop" style="z-index:100;">
+      <div class="dialog">
+        <div class="dialog-title">Diamond Line</div>
+        <div class="dialog-body">Enter the password to load today's slate.</div>
+        <input class="input" type="password" placeholder="Password" autocomplete="current-password" value="{{ authPw }}" onChange="{{ setAuthPw }}" onKeyDown="{{ authKeyDown }}">
+        <sc-if value="{{ authError }}" hint-placeholder-val="{{ false }}">
+          <div style="color:var(--color-accent-700); font-size:12px;">{{ authError }}</div>
+        </sc-if>
+        <div class="dialog-actions">
+          <button class="btn btn-primary" style="{{ authBtnStyle }}" onClick="{{ tryAuth }}">{{ authBtnLabel }}</button>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+
   <div class="nav" style="background:var(--color-surface); border-bottom:1px solid var(--color-divider);">
     <div class="nav-brand">DIAMOND LINE</div>
     <div style="display:flex; align-items:center; gap:8px; background:var(--color-bg); border:1px solid var(--color-divider); padding:6px 10px; border-radius:var(--radius-md); width:300px;">
@@ -562,24 +578,56 @@ class Component extends DCLogic {
   }
 
   componentDidMount() {
-    const base = (this.props.apiBaseUrl || '').trim();
-    if (!base) return;
-    fetch(base.replace(/\/+$/, '') + '/api/dashboard')
-      .then(r => { if (!r.ok) throw new Error('bad status'); return r.json(); })
-      .then(json => {
-        if (json && json.games && json.battersAll && json.pitchersAll) {
-          this._data = json;
-          this._liveDataError = false;
-          this.forceUpdate();
-        }
+    // Data fetch now requires a password (see tryAuth()) — GET /api/dashboard
+    // is no longer open. Nothing to do here except note whether a live API
+    // is even configured; sample data stays visible (unauthenticated) when
+    // it isn't, same as before this was self-hosted at a public URL.
+    this._apiBase = (this.props.apiBaseUrl || '').trim().replace(/\/+$/, '');
+    // this._apiBase isn't set until after the first render, so needsAuth
+    // (computed from it in renderVals) would be wrong on that first pass
+    // without forcing a re-render here.
+    this.forceUpdate();
+  }
+
+  tryAuth() {
+    if (this.state.authLoading) return;
+    const pw = (this.state.authPw || '').trim();
+    if (!pw) { this.setState({ authError: 'Password required.' }); return; }
+    this.setState({ authLoading: true, authError: '' });
+    fetch(this._apiBase + '/api/dashboard?password=' + encodeURIComponent(pw))
+      .then(r => {
+        // Grant only on an exact 200 — never "anything but 401" (that
+        // looser check let a transient 500 through as a valid login,
+        // fixed in Session 18; carried over here, not reintroduced).
+        if (r.status !== 200) { const e = new Error(String(r.status)); e.status = r.status; throw e; }
+        return r.json();
       })
-      .catch(() => { this._liveDataError = true; this.forceUpdate(); });
+      .then(json => {
+        if (!(json && json.games && json.battersAll && json.pitchersAll)) {
+          throw new Error('bad shape');
+        }
+        this._data = json;
+        this._liveDataError = false;
+        this.setState({ authed: true, authLoading: false, authError: '' });
+      })
+      .catch(err => {
+        this._liveDataError = true;
+        if (err.status === 401) {
+          this.setState({ authLoading: false, authError: 'Incorrect password.' });
+        } else {
+          this.setState({ authLoading: false, authError: `Server error (${err.status || err.message}) — check the Railway logs.` });
+        }
+      });
   }
 
   renderVals() {
     const data = this.getData();
     const fmt = this.fmt;
     const st = this.state;
+    // Auth is only required when a live apiBaseUrl is actually configured —
+    // with none set there's nothing to authenticate against, so the app
+    // just shows sample data unlocked, same as before self-hosting.
+    const needsAuth = !!this._apiBase && !st.authed;
     // data.date is a "YYYY-MM-DD" string from the live API; appending
     // "T00:00:00" (no Z/offset) makes the Date parse as local time, not
     // UTC, avoiding an off-by-one day shift in negative-UTC timezones.
@@ -721,6 +769,15 @@ class Component extends DCLogic {
     return {
       search: st.search || '', setSearch: e => this.setState({ search: e.target.value }),
       todayLabel,
+
+      needsAuth,
+      authPw: st.authPw || '',
+      setAuthPw: e => this.setState({ authPw: e.target.value }),
+      authKeyDown: e => { if (e.key === 'Enter') this.tryAuth(); },
+      authError: st.authError || '',
+      authBtnLabel: st.authLoading ? 'Checking…' : 'Load',
+      authBtnStyle: st.authLoading ? 'opacity:0.6; pointer-events:none;' : '',
+      tryAuth: () => this.tryAuth(),
 
       matchupTabStyle: segBase + (matchupTabActive ? activeSeg : ''),
       battersTabStyle: segBase + (view === 'batters' ? activeSeg : ''),
