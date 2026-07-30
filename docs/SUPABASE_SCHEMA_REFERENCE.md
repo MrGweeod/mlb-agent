@@ -1,6 +1,6 @@
 # Supabase Schema Reference — MLB Parlay Agent
-**Last Updated:** 2026-07-10 (Session 19 follow-up — added 5 matchup debug columns to `mlb_scored_legs_enriched`: `matchup_adj`, `matchup_era_adj`, `matchup_whip_adj`, `matchup_k9_adj`, `matchup_batter_adj`)
-**Source:** Exported from Supabase information_schema + verified against migration logs
+**Last Updated:** 2026-07-30 (Session 24 — `mlb_training_data`'s full column list documented for the first time (previously a 1-row placeholder) — added `opp_pitcher_id` plus the `pt_*`/`opp_pt_*` point-in-time stat columns and `resolved_player_id`; added `mlb_player_batting_cumulative`/`mlb_player_pitching_cumulative`, the two new reference tables those point-in-time columns are computed from.)
+**Source:** Exported from Supabase information_schema + verified against migration logs + (for the new reference schema) direct live inspection of `information_schema.columns`/`table_constraints`/`pg_indexes` via Supabase MCP, session-dated 2026-07-29; `mlb_training_data`/cumulative-tables section verified live via Supabase MCP `execute_sql` against `information_schema.columns`/`pg_indexes`, session-dated 2026-07-30
 
 This file is the authoritative schema reference. Always read this before writing SQL queries.
 
@@ -22,7 +22,7 @@ This file is the authoritative schema reference. Always read this before writing
 | `mlb_parlay_recommendations_v2` | `run_date` | DATE | No cast needed |
 | `mlb_parlay_recommendations_v2` | `total_odds` | NUMERIC | No cast needed |
 | `mlb_parlay_recommendations_v2` | `outcome` | VARCHAR | Values: `'won'/'lost'/'void'/'pending'` |
-| `mlb_parlay_recommendations_v2` | `source` | VARCHAR | Free text, not an enum. Known values as of Session 18: `'auto_9am'`, `'auto_12pm'`, `'auto_530pm'`, `'manual'` (the "Regenerate Now" button — still runs the algorithm, on demand), and `'manual_pick'` (new, Session 18 — a genuinely hand-picked leg set from `/manual`). Don't conflate `'manual'` and `'manual_pick'` — they mean different things. |
+| `mlb_parlay_recommendations_v2` | `source` | VARCHAR | Free text, not an enum. ⚠️ Documented-vs-actual gap found Session 23: the 9 AM slot correctly produces `'auto_9am'` (via an hour-based fallback when no explicit source is passed), but the 12 PM/5:30 PM slots pass their raw scheduler label straight through, producing literal `'midday'`/`'evening'` in production — NOT `'auto_12pm'`/`'auto_530pm'` as this doc previously claimed. Pre-existing, not fixed. Query `source` values defensively (`SELECT DISTINCT source ...`) rather than assuming the documented set is exhaustive. Also: `'manual'` (the "Regenerate Now" button — still runs the algorithm, on demand), `'manual_pick'` (Session 18 — hand-picked from `/manual`), `'dashboard_pick'` (Session 22 — hand-picked from the Diamond Line dashboard's Slate Explorer). Don't conflate `'manual'`/`'manual_pick'`/`'dashboard_pick'` — three different picking flows. |
 | `mlb_parlay_legs_v2` | `line` | NUMERIC | No cast needed |
 | `mlb_parlay_legs_v2` | `odds` | VARCHAR | Yes — `odds::numeric` for math |
 | `mlb_parlay_legs_v2` | `outcome` | VARCHAR | Values: `'won'/'lost'/'void'/'pending'` |
@@ -240,7 +240,7 @@ Production parlay recommendations (one row per parlay).
 | avg_ev | numeric | |
 | num_legs | smallint | default 2, historically always 4 through Session 17. **As of Session 18, ranges 4-6** — was already a plain integer column, no migration needed for the builder redesign |
 | outcome | character varying | 'won'/'lost'/'void'/'pending' |
-| source | character varying | 'auto_9am'/'auto_12pm'/'auto_530pm'/'manual' (Regenerate Now button)/**'manual_pick'** (new Session 18 — genuinely hand-picked from `/manual`) |
+| source | character varying | ⚠️ Actual values (Session 23 correction): `'auto_9am'`/`'midday'`/`'evening'` (NOT `'auto_12pm'`/`'auto_530pm'` — see Critical Type Rules above), `'manual'` (Regenerate Now button), `'manual_pick'` (Session 18, from `/manual`), `'dashboard_pick'` (Session 22, from the Diamond Line dashboard) |
 | batch_id | character varying | groups parlays from same pipeline run |
 | edge_percent | numeric | |
 | resolved_at | timestamp with time zone | |
@@ -381,11 +381,114 @@ Static 30-row table of park run/HR factors. Loaded once, cached in memory by enr
 
 ## Table: `mlb_training_data`
 
-Historical resolved legs used for ML model training.
+Historical + prospectively-logged legs used for ML model training and calibration analysis (105,728+ rows as of 2026-07-30). Written by `log_training_data_legs()` in `src/utils/db.py` after every pipeline run (`main.py`), plus historically by `scripts/backfill_training_data.py` (older rows only — see the `player_id` gotcha below). Full column list documented for the first time this session (Session 24) — previously only `result`'s value convention was recorded here.
+
+**⚠️ Two non-comparable eras exist in this table, discovered Session 24.** `coverage_overall`/`composite_score` are `NULL`/using a different, incompatible scale for every row before **2026-06-09** — that's when the current `calculate_coverage()`/`calculate_composite_score()` pipeline started populating them. Before that date a different (pre-current) scorer was in effect (confirmed via `composite_score` values as low as 1.36, impossible under the current formula's 65%+ coverage floor). **Any analysis using `coverage_overall`/`composite_score` should filter to `game_date >= '2026-06-09'` (or `coverage_overall IS NOT NULL`) for internal consistency** — see `docs/COVERAGE_VS_MATCHUP_ANALYSIS.md` for the full writeup of how this was found.
+
+**⚠️ `player_id` is not always a numeric MLB person ID.** Rows logged by the current pipeline (`log_training_data_legs()`, `game_date >= 2026-06-09` roughly) always carry a numeric string (e.g. `"592450"`) — same ID space as `mlb_players.player_id`. Older rows from `scripts/backfill_training_data.py`'s original insert carry a raw SGO-style string ID instead (e.g. `"MICHAEL_MCGREEVY_1_MLB"`) with no numeric MLB ID recoverable without a name-based crosswalk. `resolved_player_id` (see below) is `NULL` for these — don't assume every row can be joined to `mlb_players` by casting `player_id::int`.
 
 | column_name | data_type | notes |
 |-------------|-----------|-------|
-| result | text | ⚠️ 'hit'/'miss'/'void'/NULL — DIFFERENT from parlay tables which use 'won'/'lost' |
+| id | integer | PK, auto-increment |
+| game_date | date | |
+| game_pk | text | ⚠️ TEXT, not integer — cast if joining to `mlb_games.game_pk` |
+| player_id | text | ⚠️ Not always numeric — see note above |
+| player_name | text | |
+| stat | text | `'hits'`/`'totalBases'`/`'strikeouts'`/`'rbi'`/`'walks'`/`'stolenBases'`/`'homeRuns'`/`'hitsAllowed'`/`'earnedRuns'` observed. `'strikeouts'` is ambiguous between a batter's own Ks and a pitcher's Ks-thrown — disambiguated by `pt_role`, not by this column alone. |
+| direction | text | `'over'`/`'under'` |
+| line | double precision | |
+| odds | text | ⚠️ TEXT — cast to numeric for math |
+| fair_line | double precision | From the historical backfill script; not populated by the current pipeline's insert |
+| coverage_pct | double precision | Fallback coverage signal |
+| coverage_vs_hand | double precision | |
+| games_vs_hand | integer | |
+| pitcher_id | text | |
+| pitcher_hand | text | |
+| pitcher_era_rank | integer | |
+| pitcher_k9_rank | integer | |
+| pitcher_whip_rank | integer | |
+| home_away | text | |
+| batting_order_position | integer | |
+| pa_last_10 | double precision | |
+| trend_score | double precision | |
+| opponent_adjustment | double precision | |
+| whip_adj | double precision | |
+| k9_adj | double precision | |
+| era_adj | double precision | |
+| composite_score | real | ⚠️ Two non-comparable eras — see note above. Post-6/9 range is roughly 46-95; pre-6/9 rows can be as low as ~1, impossible under the current formula |
+| coverage_overall | double precision | ⚠️ `NULL` for every row before 2026-06-09 (see note above). Hard-floored at 65.0 (over props)/40.0 (under props) once populated — `main.py`'s Gate 1 rejects anything below those floors before a leg is ever scored, so "low coverage" barely exists in this column at all for over-direction props |
+| coverage_recent_10 | double precision | |
+| actual_stat | double precision | Resolved stat value |
+| result | text | ⚠️ `'hit'`/`'miss'`/`'void'`/NULL — DIFFERENT from parlay tables, which use `'won'`/`'lost'` |
+| resolved_at | timestamp without time zone | |
+| logged_at | timestamp without time zone | |
+| odd_id | text | `UNIQUE` — format `{run_date}\|{raw_odd_id}` for current-pipeline rows, `{date}\|{raw_odd_id}` for the historical backfill |
+| resolved_player_id | integer | NEW Session 24. Numeric crosswalk of `player_id`, filled by `scripts/backfill_point_in_time_stats.py`. `NULL` for legacy non-numeric `player_id` rows (see note above) — a safety-net int-cast, not a full name-based crosswalk (the original one-time backfill's own crosswalk resolved those historically without persisting a numeric ID back to this column) |
+| pt_role | text | NEW Session 24. `'batter'`/`'pitcher'`/NULL. Disambiguates `stat='strikeouts'` (own strikeouts vs. strikeouts-thrown) via `mlb_players.primary_position = 'P'`; `'hitsAllowed'`/`'earnedRuns'` are unambiguously pitcher-only, no lookup needed. 98.8% covered as of 2026-07-30 — remainder is legacy non-numeric `player_id` rows (structurally out of scope, not a bug) |
+| pt_games | integer | NEW Session 24. Player's own cumulative games played strictly before `game_date`, from `mlb_player_batting_cumulative`/`_pitching_cumulative` per `pt_role` |
+| pt_avg | numeric | NEW Session 24. Batter-role only. `hits / at_bats` as of strictly before `game_date` |
+| pt_obp | numeric | NEW Session 24. Batter-role only. ⚠️ Approximated as `(hits + walks) / (at_bats + walks)` — `mlb_player_batting_cumulative` doesn't track HBP or sacrifice plays (same upstream gap as `mlb_player_batting_logs.plate_appearances`, always NULL), so this slightly undercounts true PA. Documented approximation, not a bug. |
+| pt_slg | numeric | NEW Session 24. Batter-role only. `total_bases / at_bats` |
+| pt_ops | numeric | NEW Session 24. Batter-role only. `pt_obp + pt_slg` |
+| pt_k_pct | numeric | NEW Session 24. Batter-role only. `strikeouts / (at_bats + walks)` — same PA-approximation caveat as `pt_obp` |
+| pt_bb_pct | numeric | NEW Session 24. Batter-role only. `walks / (at_bats + walks)` — same PA-approximation caveat as `pt_obp` |
+| pt_era | numeric | NEW Session 24. Pitcher-role only. `earned_runs * 9 / innings_pitched`, strictly before `game_date` |
+| pt_whip | numeric | NEW Session 24. Pitcher-role only. `(hits_allowed + walks_allowed) / innings_pitched` |
+| pt_k9 | numeric | NEW Session 24. Pitcher-role only. `strikeouts * 9 / innings_pitched` |
+| pt_innings_pitched | numeric | NEW Session 24. Pitcher-role only. True-decimal innings (same convention as `mlb_player_pitching_logs.innings_pitched`, NOT the `.1`/`.2`-as-thirds convention used by `mlb_player_season_pitching_stats`) |
+| opp_pitcher_id | integer | NEW Session 24 (forward-capture fix — was being silently dropped before this session; see `ARCHITECTURE_DECISIONS.md` §35). Only ever set for batter-role legs — a pitcher-role leg faces a whole lineup, not one opposing pitcher, so this is NULL by design for those. 91,070/105,728 rows have it set as of 2026-07-30 (91% recovered historically + forward-captured going forward) |
+| opp_pt_games | integer | NEW Session 24. Opposing starter's cumulative games strictly before `game_date`, from `mlb_player_pitching_cumulative` |
+| opp_pt_era | numeric | NEW Session 24. Same formula as `pt_era`, keyed off `opp_pitcher_id`. 78,863/91,070 filled (86.6%) as of 2026-07-30 — **100% of the remaining gap is season-opener (3/28-3/31) or individual pitcher-debut games with zero prior in-season data, confirmed via direct query, not a bug or a pending backfill gap** (see `ARCHITECTURE_DECISIONS.md` §35 for the verification) |
+| opp_pt_whip | numeric | NEW Session 24. Same formula as `pt_whip`, keyed off `opp_pitcher_id` |
+| opp_pt_k9 | numeric | NEW Session 24. Same formula as `pt_k9`, keyed off `opp_pitcher_id` |
+| opp_pt_innings_pitched | numeric | NEW Session 24. Same as `pt_innings_pitched`, keyed off `opp_pitcher_id` |
+
+**Indexes:** `mlb_training_data_pkey` (id), `mlb_training_data_odd_id_key` UNIQUE (odd_id), `idx_training_resolved` on `(game_date, stat, result) WHERE result IS NOT NULL`, `idx_training_unresolved` on `(game_date) WHERE result IS NULL`.
+
+---
+
+## Table: `mlb_player_batting_cumulative`
+
+Running season-to-date batting totals, one row per `(player_id, game_date)` — a row exists only for dates a player actually played (not a daily snapshot for every player). Built during the point-in-time-stats backfill (Session 24, applied directly to Supabase, no repo migration file — same out-of-band pattern as the original reference schema). Feeds `mlb_training_data`'s `pt_avg`/`pt_obp`/`pt_slg`/`pt_ops`/`pt_k_pct`/`pt_bb_pct` (batter-role legs). Refreshed daily by `scripts/backfill_point_in_time_stats.py`'s `refresh_batting_cumulative()`, chained into `daily_reference_refresh.py`.
+
+| column_name | data_type | notes |
+|-------------|-----------|-------|
+| player_id | integer | FK → `mlb_players.player_id` |
+| game_date | date | |
+| games | numeric | Cumulative games played through this date (inclusive). Doubleheaders aggregate both games into one row for that date. |
+| at_bats | numeric | |
+| hits | numeric | |
+| doubles | numeric | |
+| triples | numeric | |
+| home_runs | numeric | |
+| rbi | numeric | |
+| walks | numeric | |
+| strikeouts | numeric | |
+| stolen_bases | numeric | |
+| total_bases | numeric | |
+
+**⚠️ No `plate_appearances` column** — same upstream gap as `mlb_player_batting_logs.plate_appearances` (always NULL there too). Anything needing a PA denominator (`pt_obp`/`pt_k_pct`/`pt_bb_pct` above) approximates via `at_bats + walks`.
+
+**Index:** `idx_batting_cum_player_date` UNIQUE on `(player_id, game_date)`.
+
+---
+
+## Table: `mlb_player_pitching_cumulative`
+
+Same pattern as `mlb_player_batting_cumulative`, for pitchers — one row per `(player_id, game_date)` a pitcher actually appeared in (starts and relief appearances both count). Feeds `mlb_training_data`'s `pt_era`/`pt_whip`/`pt_k9`/`pt_innings_pitched` (pitcher-role legs) and `opp_pt_era`/`opp_pt_whip`/`opp_pt_k9`/`opp_pt_innings_pitched` (opposing-starter stats on batter-role legs).
+
+| column_name | data_type | notes |
+|-------------|-----------|-------|
+| player_id | integer | FK → `mlb_players.player_id` |
+| game_date | date | |
+| games | numeric | Cumulative appearances through this date (inclusive) — starts and relief appearances both count |
+| innings_pitched | numeric | ✅ True-decimal running sum (e.g. `45.5`, `117.1`) — NOT the `.1`/`.2`-as-thirds convention `mlb_player_season_pitching_stats.innings_pitched` uses. Confirmed live: values run to arbitrary decimals, not just `.0`/`.1`/`.2`, consistent with summing `mlb_player_pitching_logs.innings_pitched`'s already-true-decimal per-game values. |
+| hits_allowed | numeric | |
+| earned_runs | numeric | |
+| walks_allowed | numeric | |
+| strikeouts | numeric | |
+
+**Index:** `idx_pitching_cum_player_date` UNIQUE on `(player_id, game_date)`.
 
 ---
 
@@ -416,6 +519,277 @@ Same structure as `mlb_sgo_request_log`, but for a separate NBA parlay agent sha
 | http_status | integer | |
 | entities_consumed | integer | Shares the same account-level SGO quota as `mlb_sgo_request_log` — combine both tables if the NBA agent ever becomes active again |
 | notes | text | |
+
+---
+
+# Reference Data Schema (Session 22, 2026-07-29)
+
+Normalized reference tables — teams, players, games, box-score-derived game logs, season-stat/standings daily snapshots. Applied directly to the live database before Session 22 (no repo migration file, same out-of-band pattern used for earlier ad-hoc columns) — the tables below existed, empty, when Session 22 started. **Additive only** — nothing here touches, joins into a write, or changes the meaning of `mlb_scored_legs`, `mlb_parlay_recommendations_v2`/`_enriched`, or any other production table. Backfilled season-to-date (2026-03-25 season opener through 2026-07-29) and validated in Session 22 — see `SESSION_HANDOFF.md`'s Session 22 entry and `ARCHITECTURE_DECISIONS.md` §30 for the full validation and design-decision writeups.
+
+**Design note — keyed on MLB's own IDs, not synthetic keys.** `team_id` = MLB Stats API `team.id`, `player_id` = `person.id`, `game_pk` = the same `gamePk` already used throughout `mlb_scored_legs`/`mlb_games` joins elsewhere in this codebase. No new ID space was introduced.
+
+**Populated by:**
+- `scripts/backfill_reference_data.py` — one-time/range backfill for `mlb_teams`, `mlb_players`, `mlb_games`, `mlb_player_batting_logs`, `mlb_player_pitching_logs`. Reuses `src/apis/mlb_stats.py`'s `get_schedule()`/`get_box_score()`.
+- `scripts/backfill_reference_snapshots.py` — one-time/range backfill for `mlb_player_season_batting_stats`, `mlb_player_season_pitching_stats`, `mlb_team_standings`, `mlb_team_standings_splits`.
+- `scripts/daily_reference_refresh.py` — daily version of both of the above (yesterday's games/logs + today's season-stats/standings snapshot). Wired into `src/web/server.py`'s scheduler (`_reference_data_scheduler()`, 3 AM ET) as of Session 22, **not yet deployed** as of this doc update — check `SESSION_HANDOFF.md`'s Pending Items before assuming these tables are actually current.
+
+**⚠️ `plate_appearances`/`hit_by_pitch` are NULL on every row of `mlb_player_batting_logs`.** `statsapi.boxscore_data()` (the function `get_box_score()` wraps) has its own hardcoded API `fields` parameter that does not include either field — confirmed by direct live inspection, not assumed from the docstring. Getting them would require either a second, unbatched per-player API call or a custom raw request outside the tested `get_box_score()` helper — deliberately not done, out of scope for a box-score-driven backfill. `total_bases` is still correctly computed (from `hits`/`doubles`/`triples`/`home_runs`, all of which ARE present) and does not depend on either missing field.
+
+**⚠️ `mlb_player_season_batting_stats`/`_pitching_stats` are QUALIFIED-PLAYERS-ONLY, always.** Not a bug, a design choice — these mirror MLB.com's "Qualified Players" leaderboards exactly (confirmed live: the API's own `playerPool=QUALIFIED` default matches the PA≥3.1×team-games / IP≥1.0×team-games formula). On a given day this is roughly 150 hitters and 60 pitchers out of the full ~1,300-player pool. Any code reading these tables for a player who might not be qualified (e.g. `dashboard_api/season_stats.py`) needs a fallback path — see that file for the pattern (DB-first, live-API fallback only on a miss).
+
+**⚠️ `mlb_team_standings.wcgb` (and only `wcgb`, not `games_back`) uses a sign convention, not a plain magnitude.** MLB's raw API returns a literal `'+7.0'` string for a team that currently holds a wildcard spot (X games clear of the cutoff) vs. a plain `'7.0'` for a team chasing one (X games behind) — these are semantically opposite and MLB.com displays them differently (with/without the `+`). Stored here as a **negative** number for the "+"-holds-a-spot case (the column is otherwise never negative) so the two remain numerically distinguishable; `dashboard_api/standings.py`'s `_fmt_gb()` reconstructs the `+` display from the sign. `games_back` (division) never has this ambiguity — the division leader is always plainly `0.0`/"-", per MLB's own convention, so it's stored as a plain non-negative magnitude.
+
+---
+
+## Table: `mlb_teams`
+
+All 30 MLB teams. Refreshed (idempotent upsert) on every backfill/daily-refresh run.
+
+| column_name | data_type | notes |
+|-------------|-----------|-------|
+| team_id | integer | PK — MLB Stats API `team.id` |
+| abbreviation | text | e.g. 'NYY', 'TB' |
+| name | text | full team name, e.g. 'Tampa Bay Rays' |
+| division | text | full name, e.g. 'American League East' — used by `dashboard_api/standings.py` to group + derive the EAST/CENTRAL/WEST split columns by string suffix match |
+| league | text | 'American League' / 'National League' |
+| venue_id | integer | |
+| venue_name | text | |
+| created_at | timestamptz | |
+| updated_at | timestamptz | |
+
+---
+
+## Table: `mlb_players`
+
+Player bio/roster info. Rows are upserted lazily — only for players actually encountered in a box score during the batting/pitching-logs backfill, not a separate full-roster pull.
+
+| column_name | data_type | notes |
+|-------------|-----------|-------|
+| player_id | integer | PK — MLB Stats API `person.id` |
+| full_name | text | |
+| primary_position | text | abbreviation, e.g. 'SS', 'P' — taken from the box score's per-player `position.abbreviation` at time of insert, so it reflects whatever position they played in their most recently backfilled game, not necessarily their listed primary position |
+| bats | text | ⚠️ NOT populated by the current backfill — box scores don't carry this field, would need a separate `/people/{id}` call per player. Always NULL as of Session 22. |
+| throws | text | ⚠️ Same as `bats` — always NULL as of Session 22 |
+| current_team_id | integer | FK → `mlb_teams.team_id`. Updated on every re-encounter, so reflects the team they were rostered to as of their most recent backfilled game. |
+| birth_date | date | ⚠️ Not populated — always NULL as of Session 22 |
+| mlb_debut | date | ⚠️ Not populated — always NULL as of Session 22 |
+| active | boolean | default `true` — not actually set/unset by the backfill (no deactivation logic); a player who leaves the league mid-season stays `true` |
+| created_at | timestamptz | |
+| updated_at | timestamptz | |
+
+---
+
+## Table: `mlb_games`
+
+One row per completed (status `Final`/`Game Over`/`Completed Early`) game. `game_pk` is the same ID space as `mlb_scored_legs.game_pk` — see the Data Health Check below for a cross-check query and a known, narrow exception.
+
+| column_name | data_type | notes |
+|-------------|-----------|-------|
+| game_pk | integer | PK — MLB Stats API `gamePk` |
+| game_date | date | |
+| game_start_time | timestamptz | ✅ proper TIMESTAMPTZ, unlike `mlb_scored_legs.game_start_time` (naive timestamp, historically UTC/ET-contaminated — see the game_start_time Data Health Check below). Populated directly from `statsapi.schedule()`'s `gameDate` field, which is a real ISO8601 UTC string with a `Z` suffix — no timezone ambiguity possible here by construction. |
+| home_team_id | integer | FK → `mlb_teams.team_id` |
+| away_team_id | integer | FK → `mlb_teams.team_id` |
+| venue_id | integer | |
+| status | text | free text, e.g. 'Final' — only completed games are ever inserted, so this is 'Final'/'Game Over'/'Completed Early' in practice for backfilled rows |
+| home_score | integer | |
+| away_score | integer | |
+| home_probable_pitcher_id | integer | FK → `mlb_players.player_id`. ⚠️ For historical/completed games (the season-to-date backfill), this is set to the game's ACTUAL starting pitcher, not a pre-game "probable" pitcher prediction — for a completed game these are almost always the same person, and the actual starter is what the backfill already has on hand (from the box score) without an extra call. `daily_reference_refresh.py` does not yet populate this differently for today's/future scheduled games — a real probable-pitcher-vs-actual-starter distinction would need a separate schedule/lineup call for not-yet-played games, not implemented as of Session 22. |
+| away_probable_pitcher_id | integer | Same caveat as `home_probable_pitcher_id` |
+| created_at | timestamptz | |
+| updated_at | timestamptz | |
+
+---
+
+## Table: `mlb_player_batting_logs`
+
+One row per player per completed game, for every batter who appeared (not qualified-players-only — see the reference-schema intro above). Unique on `(player_id, game_pk)`.
+
+| column_name | data_type | notes |
+|-------------|-----------|-------|
+| id | integer | PK, auto-increment |
+| player_id | integer | FK → `mlb_players.player_id` |
+| game_pk | integer | FK → `mlb_games.game_pk` |
+| team_id | integer | FK → `mlb_teams.team_id` |
+| opponent_team_id | integer | FK → `mlb_teams.team_id` |
+| opposing_pitcher_id | integer | FK → `mlb_players.player_id`. The OTHER side's starting pitcher for this game (first entry of that side's `pitchers` list in the box score, confirmed live to be the starter) — NOT the specific pitcher(s) this batter actually faced if a reliever came in. |
+| batting_order | integer | 1-9 lineup slot, derived from the box score's per-player `battingOrder` string field (e.g. `"300"` → slot 3, integer-divided by 100). NULL for players who didn't appear in the starting lineup or as an in-game substitute batter. |
+| plate_appearances | integer | ⚠️ Always NULL — see reference-schema intro above |
+| at_bats | integer | |
+| hits | integer | |
+| doubles | integer | |
+| triples | integer | |
+| home_runs | integer | |
+| rbi | integer | |
+| walks | integer | |
+| strikeouts | integer | |
+| hit_by_pitch | integer | ⚠️ Always NULL — see reference-schema intro above |
+| stolen_bases | integer | |
+| total_bases | integer | computed at insert time as `hits + doubles + 2*triples + 3*home_runs` — does not depend on `plate_appearances`/`hit_by_pitch` |
+| created_at | timestamptz | |
+
+---
+
+## Table: `mlb_player_pitching_logs`
+
+One row per player per completed game, for every pitcher who recorded at least one out. Unique on `(player_id, game_pk)`.
+
+| column_name | data_type | notes |
+|-------------|-----------|-------|
+| id | integer | PK, auto-increment |
+| player_id | integer | FK → `mlb_players.player_id` |
+| game_pk | integer | FK → `mlb_games.game_pk` |
+| team_id | integer | FK → `mlb_teams.team_id` |
+| opponent_team_id | integer | FK → `mlb_teams.team_id` |
+| is_starter | boolean | `player_id == ` that side's starting pitcher (first entry of the box score's `pitchers` list) — NOT derived from a `gamesStarted` stat field, which is never present via this API path (see reference-schema intro) |
+| innings_pitched | numeric | parsed from MLB's `"6.1"` = 6⅓-innings string format into a true decimal (6.333...) before storage — same convention as `src/engine/coverage.py`'s existing `_parse_ip()` |
+| hits_allowed | integer | |
+| earned_runs | integer | |
+| walks_allowed | integer | |
+| strikeouts | integer | |
+| home_runs_allowed | integer | |
+| pitches_thrown | integer | reads the box score's `pitchesThrown` field, falling back to `numberOfPitches` if absent — same fallback order `statsapi`'s own `boxscore_data()` uses internally; both keys were observed present with identical values on real data |
+| created_at | timestamptz | |
+
+---
+
+## Table: `mlb_team_standings`
+
+Daily standings snapshot, one row per team per `as_of_date`. Unique on `(team_id, as_of_date)` — never overwritten across days, append-only time series (unlike `mlb_teams`, which is a live-state upsert).
+
+| column_name | data_type | notes |
+|-------------|-----------|-------|
+| id | integer | PK, auto-increment |
+| team_id | integer | FK → `mlb_teams.team_id` |
+| as_of_date | date | |
+| wins | integer | |
+| losses | integer | |
+| win_pct | numeric | |
+| division_rank | integer | |
+| games_back | numeric | ✅ plain non-negative magnitude, "-"/leader → `0.0`. No sign ambiguity — see reference-schema intro |
+| wcgb | numeric | ⚠️ SIGNED — see reference-schema intro above. Negative = holds a wildcard spot (displays as `+X.X`); positive = chasing one. Do not treat like `games_back`. |
+| runs_scored | integer | |
+| runs_allowed | integer | |
+| run_diff | integer | |
+| streak | text | raw `streakCode`, e.g. `'W2'`, `'L1'` |
+| created_at | timestamptz | |
+
+---
+
+## Table: `mlb_team_standings_splits`
+
+Split records (home/away, vs.-hand, day/night, etc.), one row per team per split type per `as_of_date`. Unique on `(team_id, as_of_date, split_type)`.
+
+| column_name | data_type | notes |
+|-------------|-----------|-------|
+| id | integer | PK, auto-increment |
+| team_id | integer | FK → `mlb_teams.team_id` |
+| as_of_date | date | |
+| split_type | text | free text, not an enum. Values populated by the current backfill: `home`, `away`, `vs_lhp`, `vs_rhp`, `last_ten`, `extra_innings`, `one_run`, `day`, `night`, `grass`, `turf`, `vs_east`, `vs_central`, `vs_west`, `vs_al`, `vs_nl` — 16 rows/team/day as of Session 22 (`30 teams × 16 = 480`, confirmed on every snapshot run). `vs_east`/`vs_central`/`vs_west` are derived by matching the raw API's `divisionRecords` division name against an `East`/`Central`/`West` string suffix — works regardless of whether the team itself is AL or NL. `vs_al`/`vs_nl` show the OTHER league's record relative to the team (an AL team's meaningful cross-league number is its NL record, and vice versa) — matches MLB.com's single "AL/NL" column convention. |
+| wins | integer | |
+| losses | integer | |
+| pct | numeric | |
+| created_at | timestamptz | |
+
+---
+
+## Table: `mlb_player_season_batting_stats`
+
+Daily time series, one row per player per `season` per `as_of_date` — **never overwritten across days** (unlike the game-log tables' natural key, this is intentionally append-only so historical qualification-day snapshots are preserved). Unique on `(player_id, season, as_of_date)`. **Qualified Players only** — see reference-schema intro above.
+
+| column_name | data_type | notes |
+|-------------|-----------|-------|
+| id | integer | PK, auto-increment |
+| player_id | integer | FK → `mlb_players.player_id` |
+| team_id | integer | FK → `mlb_teams.team_id`, nullable |
+| season | integer | |
+| as_of_date | date | |
+| games | integer | |
+| at_bats | integer | |
+| plate_appearances | integer | Added Session 22 (was missing from the schema as originally applied) — see Schema Change Log below. Needed as the correct denominator for K%/BB% (NOT `at_bats`, which runs ~10-15% below PA and would inflate both). |
+| runs | integer | |
+| hits | integer | |
+| doubles | integer | |
+| triples | integer | |
+| home_runs | integer | |
+| rbi | integer | |
+| walks | integer | |
+| strikeouts | integer | |
+| stolen_bases | integer | |
+| caught_stealing | integer | |
+| avg | numeric | |
+| obp | numeric | |
+| slg | numeric | |
+| ops | numeric | |
+| created_at | timestamptz | |
+
+---
+
+## Table: `mlb_player_season_pitching_stats`
+
+Same daily-time-series pattern as `mlb_player_season_batting_stats`, for pitchers. Unique on `(player_id, season, as_of_date)`. **Qualified Players only.**
+
+| column_name | data_type | notes |
+|-------------|-----------|-------|
+| id | integer | PK, auto-increment |
+| player_id | integer | FK → `mlb_players.player_id` |
+| team_id | integer | FK → `mlb_teams.team_id`, nullable |
+| season | integer | |
+| as_of_date | date | |
+| wins | integer | |
+| losses | integer | |
+| era | numeric | |
+| games | integer | reads the API's `gamesPitched`, falling back to `gamesPlayed` if absent |
+| games_started | integer | |
+| complete_games | integer | |
+| shutouts | integer | |
+| saves | integer | |
+| save_opportunities | integer | |
+| innings_pitched | numeric | stored as the API's own decimal representation (e.g. `120.0`, `133.1`) — ⚠️ NOTE this is the MLB "innings.outs" convention (`.1`/`.2` = ⅓/⅔ innings, NOT true decimal tenths), same convention as everywhere else in this codebase, unlike `mlb_player_pitching_logs.innings_pitched` which IS true-decimal-parsed. Don't average or sum this column directly without converting first. |
+| hits_allowed | integer | maps from the API's `hits` field (pitching context) |
+| runs_allowed | integer | maps from the API's `runs` field (pitching context) |
+| earned_runs | integer | |
+| home_runs_allowed | integer | maps from the API's `homeRuns` field (pitching context) |
+| hit_batters | integer | maps from the API's `hitBatsmen` field |
+| walks | integer | maps from the API's `baseOnBalls` field |
+| strikeouts | integer | |
+| whip | numeric | |
+| avg_against | numeric | maps from the API's `avg` field (pitching context — opponents' batting average) |
+| created_at | timestamptz | |
+
+**k9 is NOT a stored column** — `dashboard_api/leaderboards.py`/`season_stats.py` compute it on read as `strikeouts / innings_pitched * 9` rather than storing a separate value that could drift out of sync with the other two.
+
+---
+
+## Table: `mlb_prop_legs_history`
+
+Full, non-qualified-filtered prop-line + game-line capture — an isolated ground-up-rebuild calibration dataset, explicitly separate from `mlb_scored_legs` and NOT read by any production/shadow scoring or win-rate query. Append-once ledger, populated as of Session 23 (2026-07-29) by `src/pipelines/prop_legs_capture.py`, called from `main.py`'s 9 AM-only pipeline path. Resolved daily by `resolve_prop_legs_history()`, chained into `scripts/daily_reference_refresh.py`.
+
+| column_name | data_type | notes |
+|-------------|-----------|-------|
+| id | integer | PK, auto-increment |
+| player_id | integer | ⚠️ NULLABLE as of Session 23 (was NOT NULL). FK → `mlb_players.player_id`. NULL for `market_scope='game'` rows (moneyline/spread/total have no associated player) — enforced by a CHECK constraint requiring `player_id IS NOT NULL` iff `market_scope='player'`. |
+| game_pk | integer | FK → `mlb_games.game_pk` |
+| stat | text | Player-scope: `'hits'`/`'strikeouts'`/`'totalBases'`. Game-scope: `'moneyline'`/`'spread'`/`'total'`. |
+| line | real | For `stat='moneyline'`, this is a placeholder `0.0` (moneyline has no numeric line) — not a real value, don't aggregate/average it. |
+| direction | text | Player-scope: `'over'`/`'under'` (batter strikeouts captured Over-only, per design). Game-scope moneyline/spread: `'home'`/`'away'`. Game-scope total: `'over'`/`'under'`. |
+| sportsbook | text | Always `'draftkings'` as of Session 23 — matches the rest of the codebase's DK-only convention. |
+| market_scope | text | ⚠️ NEW Session 23. NOT NULL. `'player'` or `'game'`. CHECK-constrained to stay consistent with `player_id` (see above). |
+| player_role | text | ⚠️ NEW Session 23. `'batter'`/`'pitcher'`/NULL (NULL for `market_scope='game'` rows). Disambiguates the SAME `stat='strikeouts'` value between a pitcher's own strikeout total and a batter's strikeouts-against line — these are NOT distinguishable from `stat`/`line` alone (pitcher lines run 4.5+, batter lines run 0.5, but nothing in this table's own columns encodes which is which without this column). Derived from the raw SGO `batting_`/`pitching_` statID prefix at capture time, independently of `get_player_props()`'s own normalization (which discards that prefix) — see `ARCHITECTURE_DECISIONS.md` §34. |
+| first_seen_odds | integer | |
+| first_seen_at | timestamptz | |
+| last_recorded_odds | integer | |
+| last_recorded_at | timestamptz | |
+| odds_history | jsonb | default `'[]'`. Appended to (not overwritten) on each capture run that still sees the same leg — `mlb_prop_legs_history.odds_history \|\| EXCLUDED.odds_history` via jsonb array concatenation. Confirmed live: a leg captured across two runs had 2 entries with correct timestamps. |
+| result | text | default `'pending'`. Set by `resolve_prop_legs_history()`: `'won'`/`'lost'`/`'void'` (void = push, or player didn't appear in the box score for that game). ⚠️ Same `'won'`/`'lost'`/`'void'`/`'pending'` convention as `mlb_scored_legs`, NOT the `'hit'`/`'miss'` convention `mlb_training_data` uses — don't confuse the two when writing a query that touches both. |
+| actual_value | real | Player-scope: the actual stat value from `mlb_player_batting_logs`/`_pitching_logs`. Game-scope total: combined score. Game-scope moneyline: always NULL (win/lose is binary, no natural "value"). Game-scope spread: the actual margin (signed, from the leg's own side's perspective). |
+| resolved_at | timestamptz | |
+| created_at | timestamptz | |
+| updated_at | timestamptz | |
+
+**⚠️ Unique constraints — TWO, not one, as of Session 23:**
+- `(player_id, game_pk, stat, line, direction, sportsbook)` — the original constraint, covers `market_scope='player'` rows (`player_id` present).
+- `mlb_prop_legs_history_game_scope_key`: a **partial** unique index on `(game_pk, stat, line, direction, sportsbook) WHERE player_id IS NULL` — covers `market_scope='game'` rows. Required because Postgres treats every `NULL` as distinct for `UNIQUE` purposes; without this, game-scope rows would never dedupe across repeated capture runs, silently accumulating duplicates instead of upserting. **When writing an `INSERT ... ON CONFLICT` against this table, the conflict target for a game-scope row MUST restate `WHERE player_id IS NULL`** — Postgres only matches `ON CONFLICT` against a partial index if the predicate is repeated in the conflict clause itself, not inferred from the column list. Confirmed live: omitting it raises `there is no unique or exclusion constraint matching the ON CONFLICT specification` on every single game-scope upsert. See `src/pipelines/prop_legs_capture.py`'s `_upsert_leg()` for the working pattern.
 
 ---
 
@@ -536,6 +910,9 @@ ORDER BY legs DESC;
 | 2026-07-08 | *(none — no migrations this session)* | Session 18 added a new **value** (`'manual_pick'`) to the existing `mlb_parlay_recommendations_v2.source` free-text column — not a schema change, no migration needed. `num_legs` on both `_v2` and `_enriched` recommendation tables now legitimately ranges 4-6 (was always 4) — also not a schema change, that column was always a plain integer. |
 | 2026-07-10 | *(none — no migrations this session)* | Session 19 changes are application-layer only: scratch handler rewrite (logic changes in `lineup_confirmation.py` only, no new DB columns), shadow scorer rebuild (enriched scorer reads existing `pitcher_era`/`pitcher_whip`/`pitcher_k9` raw values from `mlb_scored_legs` — confirmed present since May 12 with 11k+ rows — and adds in-memory batter stats from the MLB-StatsAPI gameLog; no new DB columns). |
 | 2026-07-10 | `mlb_scored_legs_enriched` | Added 5 matchup debug columns: `matchup_adj`, `matchup_era_adj`, `matchup_whip_adj`, `matchup_k9_adj`, `matchup_batter_adj` (all NUMERIC). Migration: `sql/matchup_debug_columns_migration.sql`. Session 19 follow-up — these were computed in-memory since Session 19 but silently dropped before the INSERT (column list never updated). Now persisted to enable per-factor attribution analysis. |
+| *(before Session 22, exact date unrecorded)* | `mlb_teams`, `mlb_players`, `mlb_games`, `mlb_player_batting_logs`, `mlb_player_pitching_logs`, `mlb_team_standings`, `mlb_team_standings_splits`, `mlb_player_season_batting_stats`, `mlb_player_season_pitching_stats`, `mlb_prop_legs_history` | New reference-data schema created, applied directly to the live database — no repo migration file, tables existed empty when Session 22 started. Full documentation added this session, see the new "Reference Data Schema" section above. |
+| 2026-07-29 | `mlb_player_season_batting_stats` | Session 22 — added `plate_appearances` (INTEGER, nullable). Missing from the schema as originally applied; needed as the correct K%/BB% denominator for `dashboard_api/season_stats.py`'s reworked version (using `at_bats` instead would have inflated both). Additive, backfilled for the existing 2026-07-29 snapshot row via a re-run of `scripts/backfill_reference_snapshots.py` after the migration. |
+| 2026-07-29 | `mlb_prop_legs_history` | Session 23 — `player_id` made nullable; added `market_scope` (TEXT NOT NULL, `'player'`/`'game'`) and `player_role` (TEXT, `'batter'`/`'pitcher'`/NULL) with CHECK constraints enforcing they stay consistent with `player_id`/each other. Also added a **partial unique index** `mlb_prop_legs_history_game_scope_key` on `(game_pk, stat, line, direction, sportsbook) WHERE player_id IS NULL` — the original single UNIQUE constraint never would have deduped game-scope rows across runs (Postgres treats every NULL as distinct). Both applied live, no repo migration file, same pattern as the reference schema's own application. |
 
 ---
 
@@ -566,15 +943,35 @@ ORDER BY game_pk;
 
 Zero rows is the expected healthy result. If any rows appear, run `scripts/fix_game_start_time_contamination.py` to investigate and remediate.
 
+### mlb_scored_legs.game_pk vs. mlb_games.game_pk (new, Session 22)
+Found 8 mismatches (out of 1,320 checked, ~0.6%) on the very first run of this check — `game_pk` values in `mlb_scored_legs` that actually belong to a different, future/unplayed game than the one that was happening on that leg's `run_date`. Confirmed directly against the live API for each one (officialDate in Aug/Sep 2026, status `Scheduled`). Root cause not investigated — flagged, not fixed, out of scope for the read-only backfill work that found it. Worth periodically re-running to see if this is growing, static, or an isolated historical batch:
+
+```sql
+SELECT sl.game_pk, sl.run_date, COUNT(*) AS legs
+FROM mlb_scored_legs sl
+LEFT JOIN mlb_games g ON g.game_pk = sl.game_pk
+WHERE sl.game_pk IS NOT NULL
+  AND sl.run_date < CURRENT_DATE::text  -- exclude today's not-yet-Final games, which are expected to be absent from mlb_games
+  AND g.game_pk IS NULL
+GROUP BY sl.game_pk, sl.run_date
+ORDER BY sl.run_date;
+```
+
+Any row returned by this query is worth spot-checking directly against `https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live` (look at `gameData.datetime.officialDate` and `gameData.status.detailedState`) before assuming it's the same bug — confirm it's actually a future/wrong game, not just a legitimate gap in the reference-schema backfill's own coverage.
+
 ---
 
 ## Schema Last Verified
 - `mlb_scored_legs`: 2026-07-10 (Session 19 — no changes; confirmed `pitcher_era`/`pitcher_whip`/`pitcher_k9` raw NUMERIC columns populated since May 12; MLB-StatsAPI gameLog batter field names confirmed: `atBats`, `hits`, `baseOnBalls`, `strikeOuts`, `plateAppearances`, `hitByPitch` — these are transient/in-memory, not stored in DB)
 - `mlb_scored_legs_enriched`: 2026-07-10 (Session 19 follow-up — 5 matchup debug columns added and confirmed present: `matchup_adj`, `matchup_era_adj`, `matchup_whip_adj`, `matchup_k9_adj`, `matchup_batter_adj` — all NUMERIC, written by `_log_enriched_legs()`, NULL when not applicable to the prop type. Decimal coercion note: `float(value)` applied inside `_linear_adj()` to handle psycopg2 returning NUMERIC columns as Python `Decimal`.)
-- `mlb_parlay_recommendations_v2`: 2026-07-08 (Session 18 — `source` values documented including `'manual_pick'`; `num_legs`/`total_odds` behavior note added)
+- `mlb_parlay_recommendations_v2`: 2026-07-29 (Session 23 — `source` documented values CORRECTED: actual production values are `'auto_9am'`/`'midday'`/`'evening'`, not `'auto_9am'`/`'auto_12pm'`/`'auto_530pm'` as previously documented since Session 18; also added `'dashboard_pick'`, missing since Session 22)
 - `mlb_parlay_legs_v2`: 2026-07-10 (Session 19 — `outcome='void'` now applied to individual scratched legs when the reduce-path is taken; they remain as rows, not deleted, so `num_legs`/`total_odds` can be recalculated off survivors)
 - `mlb_parlay_recommendations_enriched`: 2026-07-08 (Session 18 — `num_legs` behavior note added)
 - `mlb_parlay_legs_enriched`: 2026-07-08 (Session 18 — row-count inflation gotcha cross-referenced)
 - `mlb_pending_lineup_checks`: 2026-07-10 (Session 19 — `result_note` field: now only counts parlays actually rebuilt or reduced-and-kept, not voided-with-nothing; `superseded_by_batch_id` stays NULL on no-rebuild paths, `superseded_reason` set to `'SCRATCHED_NO_REBUILD'` or `'THIN_POOL_NO_REBUILD'`)
 - `ballpark_factors`: 2026-06-13
 - `mlb_sgo_request_log` / `sgo_request_log`: 2026-07-07
+- `mlb_teams` / `mlb_players` / `mlb_games` / `mlb_player_batting_logs` / `mlb_player_pitching_logs`: 2026-07-29 (Session 22 — full documentation added; backfilled season-to-date 2026-03-25–2026-07-29, validated via 3 live spot-checks; `plate_appearances`/`hit_by_pitch` confirmed always-NULL on the batting-logs table via live API inspection, not assumed)
+- `mlb_team_standings` / `mlb_team_standings_splits`: 2026-07-29 (Session 22 — full documentation added; `wcgb` sign convention found and fixed this session, documented above; 480 splits rows/day = 30 teams × 16 split types, confirmed on every snapshot run)
+- `mlb_player_season_batting_stats` / `mlb_player_season_pitching_stats`: 2026-07-29 (Session 22 — full documentation added; `plate_appearances` column added to the batting table this session, see Schema Change Log; confirmed QUALIFIED-only via live `playerPool=QUALIFIED` inspection)
+- `mlb_prop_legs_history`: 2026-07-29 (Session 23 — now populated: `market_scope`/`player_role` columns added and documented, partial unique index for game-scope dedup added and documented, `ON CONFLICT` gotcha documented after being confirmed live. No longer empty as of this session — first live capture run wrote 158 rows across game lines and player props.)

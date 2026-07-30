@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Diamond Line — Standings</title>
+<link rel="stylesheet" href="styles.css">
+<style>
+  body { min-height: 100vh; }
+  .standings-wrap { padding: var(--space-4); max-width: 1400px; margin: 0 auto; }
+  .division-block { margin-bottom: var(--space-6); }
+  .division-title {
+    font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--color-accent); margin-bottom: var(--space-2);
+  }
+  .table-scroll { overflow-x: auto; border: 1px solid var(--color-divider); }
+  .standings-table th, .standings-table td { white-space: nowrap; }
+  .standings-table td.team-cell { white-space: normal; font-weight: 500; }
+  .as-of { font-size: 12px; opacity: 0.65; margin-bottom: var(--space-4); }
+  .state-msg { padding: var(--space-6); text-align: center; opacity: 0.7; }
+</style>
+</head>
+<body>
+
+<div class="nav" style="background:var(--color-surface); border-bottom:1px solid var(--color-divider);">
+  <div class="nav-brand">DIAMOND LINE</div>
+  <a href="/">Matchup / Batters / Pitchers</a>
+  <a href="/standings.html" aria-current="page">Standings</a>
+  <a href="/leaderboards.html">Leaderboards</a>
+  <span class="tag tag-outline" id="asOfTag" style="margin-left:auto;"></span>
+</div>
+
+<div class="standings-wrap">
+  <div id="content"><div class="state-msg">Loading…</div></div>
+</div>
+
+<div id="authBackdrop" class="dialog-backdrop" style="z-index:100; display:none;">
+  <div class="dialog">
+    <div class="dialog-title">Diamond Line</div>
+    <div class="dialog-body">Enter the password to load standings.</div>
+    <input class="input" type="password" id="authInput" placeholder="Password" autocomplete="current-password">
+    <div id="authError" style="color:var(--color-accent-700); font-size:12px; display:none;"></div>
+    <div class="dialog-actions">
+      <button class="btn btn-primary" id="authBtn">Unlock</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  const PW_KEY = "diamondline_pw";
+
+  const COLUMNS = [
+    ["W", "wins"], ["L", "losses"], ["PCT", "pct"], ["GB", "gb"], ["WCGB", "wcgb"],
+    ["XTRA", "xtra"], ["1 RUN", "oneRun"], ["DAY", "day"], ["NIGHT", "night"],
+    ["GRASS", "grass"], ["TURF", "turf"], ["EAST", "east"], ["CENTRAL", "central"],
+    ["WEST", "west"], ["AL/NL", "alNl"], ["VS.R", "vsR"], ["VS.L", "vsL"],
+  ];
+
+  function fmtPct(p) {
+    if (p === null || p === undefined) return "-";
+    return p.toFixed(3).replace(/^0/, "");
+  }
+
+  function renderDivisions(divisions) {
+    return divisions.map(function (div) {
+      const rows = div.teams.map(function (t) {
+        const cells = COLUMNS.map(function (col) {
+          const key = col[1];
+          const val = key === "pct" ? fmtPct(t.pct) : t[key];
+          return "<td>" + (val === null || val === undefined ? "-" : val) + "</td>";
+        }).join("");
+        return "<tr><td class=\"team-cell\">" + t.name + "</td>" + cells + "</tr>";
+      }).join("");
+
+      const headerCells = COLUMNS.map(function (col) { return "<th>" + col[0] + "</th>"; }).join("");
+
+      return (
+        "<div class=\"division-block\">" +
+          "<div class=\"division-title\">" + div.name + "</div>" +
+          "<div class=\"table-scroll\">" +
+            "<table class=\"table standings-table\">" +
+              "<thead><tr><th>Team</th>" + headerCells + "</tr></thead>" +
+              "<tbody>" + rows + "</tbody>" +
+            "</table>" +
+          "</div>" +
+        "</div>"
+      );
+    }).join("");
+  }
+
+  function showAuthDialog(onSubmit) {
+    const backdrop = document.getElementById("authBackdrop");
+    const input = document.getElementById("authInput");
+    const err = document.getElementById("authError");
+    const btn = document.getElementById("authBtn");
+    backdrop.style.display = "grid";
+    function submit() {
+      err.style.display = "none";
+      onSubmit(input.value, function (message) {
+        err.textContent = message;
+        err.style.display = "block";
+      }, function () {
+        backdrop.style.display = "none";
+      });
+    }
+    btn.onclick = submit;
+    input.onkeydown = function (e) { if (e.key === "Enter") submit(); };
+    input.focus();
+  }
+
+  function load(password) {
+    const url = "/api/standings" + (password ? "?password=" + encodeURIComponent(password) : "");
+    fetch(url).then(function (res) {
+      if (res.status === 401) {
+        showAuthDialog(function (pw, showError, close) {
+          fetch("/api/standings?password=" + encodeURIComponent(pw)).then(function (r) {
+            if (r.status === 401) { showError("Incorrect password."); return; }
+            if (!r.ok) { showError("Error " + r.status); return; }
+            localStorage.setItem(PW_KEY, pw);
+            close();
+            r.json().then(render);
+          }).catch(function () { showError("Network error."); });
+        });
+        return;
+      }
+      if (!res.ok) {
+        document.getElementById("content").innerHTML =
+          "<div class=\"state-msg\">Error loading standings (" + res.status + ")</div>";
+        return;
+      }
+      res.json().then(render);
+    }).catch(function () {
+      document.getElementById("content").innerHTML = "<div class=\"state-msg\">Network error.</div>";
+    });
+  }
+
+  function render(data) {
+    if (!data.divisions || !data.divisions.length) {
+      document.getElementById("content").innerHTML = "<div class=\"state-msg\">No standings data yet.</div>";
+      return;
+    }
+    document.getElementById("asOfTag").textContent = "As of " + data.as_of_date;
+    document.getElementById("content").innerHTML = renderDivisions(data.divisions);
+  }
+
+  load(localStorage.getItem(PW_KEY) || "");
+})();
+</script>
+
+</body>
+</html>

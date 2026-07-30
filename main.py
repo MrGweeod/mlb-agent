@@ -30,6 +30,7 @@ from src.apis.mlb_stats import (
 )
 from src.apis.pitcher_stats import get_pitcher_ranks, get_starter_ranks_for_today
 from src.apis.sportsgameodds import get_todays_games, get_player_props
+from src.pipelines.prop_legs_capture import capture_full_prop_lines
 from src.apis.team_stats import get_team_offensive_ranks
 from src.engine.coverage import calculate_coverage, PROP_STAT_MAP
 from src.engine.parlay_builder import build_parlays, _tier_params
@@ -647,6 +648,20 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
         print("  No props returned. Exiting.")
         return [], ""
 
+    # Full prop-line capture into mlb_prop_legs_history — 9 AM morning run
+    # only (skip_resolution=False), reusing this same already-fetched
+    # sgo_games/all_sgo_props/schedule, zero new SGO API calls. Runs on the
+    # UNFILTERED all_sgo_props (before _filter_useless_props narrows it to
+    # the production betting pool) — full capture, not qualified-players- or
+    # coverage-gated, is the point of this table. Isolated from everything
+    # below: writes only to mlb_prop_legs_history/mlb_teams/mlb_players/
+    # mlb_games, never touches mlb_scored_legs or the recommendation tables.
+    if not skip_resolution:
+        try:
+            capture_full_prop_lines(sgo_games, all_sgo_props, schedule)
+        except Exception as _capture_err:
+            print(f"  [prop_legs_capture] failed (non-fatal, production pipeline continues): {_capture_err}")
+
     all_sgo_props = _filter_useless_props(all_sgo_props)
 
     # ── Step 4: Coverage Gate ─────────────────────────────────────────────────
@@ -1131,7 +1146,9 @@ def run_morning_pipeline(source: str | None = None) -> None:
       1. Resolve yesterday's outcomes and update training data.
       2. Run the full pipeline to fetch props, score legs, and build parlays for today.
 
-    This ensures today's scored legs are in the DB before the 12 PM targeted refresh runs.
+    This ensures today's scored legs are in the DB before the 5:30 PM refresh runs
+    (the 12 PM slot this comment used to reference was dropped — schedule cut
+    from 3 runs/day to 2 ahead of the 2026-08-01 SGO tier downgrade).
 
     Args:
         source: Optional source label for saved recommendations (e.g. 'manual').

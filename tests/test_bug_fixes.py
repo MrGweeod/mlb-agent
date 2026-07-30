@@ -337,3 +337,50 @@ class TestCoverageRecent10Floor:
         assert isinstance(result["coverage_recent_10"], (int, float)), (
             f"Pitcher coverage_recent_10 should be numeric, got {type(result['coverage_recent_10'])}"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FIX 4: db.py — opposing_pitcher_id (as opp_pitcher_id) in log_training_data_legs INSERT
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestOppPitcherIdTrainingDataInsert:
+    """Verify that opp_pitcher_id is included in log_training_data_legs INSERT.
+
+    enrich_legs.py attaches opposing_pitcher_id to each leg dict, and
+    log_scored_legs() already persists it correctly — this was silently
+    dropped before log_training_data_legs()'s INSERT into mlb_training_data.
+    """
+
+    def test_log_training_data_legs_includes_opp_pitcher_id_column(self):
+        """The INSERT statement must list opp_pitcher_id in columns."""
+        from src.utils import db
+        import inspect
+
+        source = inspect.getsource(db.log_training_data_legs)
+
+        assert "opp_pitcher_id" in source, (
+            "opp_pitcher_id must appear in the INSERT INTO mlb_training_data ... (columns...) list"
+        )
+
+    def test_log_training_data_legs_includes_opposing_pitcher_id_value(self):
+        """The values tuple must extract leg.get('opposing_pitcher_id')."""
+        from src.utils import db
+        import inspect
+
+        source = inspect.getsource(db.log_training_data_legs)
+
+        assert 'leg["opposing_pitcher_id"]' in source or 'leg.get("opposing_pitcher_id")' in source, (
+            "Values tuple must extract opposing_pitcher_id from the leg dict"
+        )
+
+    def test_log_training_data_legs_single_insert_statement(self):
+        """opp_pitcher_id must appear in both the column list and values tuple
+        of the single INSERT INTO mlb_training_data statement in the file."""
+        from src.utils import db
+        import inspect
+
+        source = inspect.getsource(db.log_training_data_legs)
+
+        assert source.count("INSERT INTO mlb_training_data") == 1, (
+            "Expected exactly one INSERT INTO mlb_training_data statement in log_training_data_legs"
+        )

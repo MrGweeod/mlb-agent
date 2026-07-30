@@ -1,7 +1,7 @@
 # MLB Parlay Agent — Build Status
-**Last Updated:** July 20, 2026 (Session 21 — Post-Break Investigation: Builder Leg-Count Revert + lineup_consistency Persistence Fix + coverage_recent_10 Sample Floor + Pitcher ERA Signal Audit)
+**Last Updated:** July 30, 2026 (Session 24 — opposing_pitcher_id capture fixed forward into mlb_training_data; point-in-time batter/pitcher stat backfill built and run against production; coverage-threshold-vs-matchup-quality analysis completed, re-run scheduled 2026-08-06)
 
-## Overall System Status: ✅ OPERATIONAL — SESSION 21 FIXES ON BRANCH, PENDING MERGE/DEPLOY
+## Overall System Status: ✅ OPERATIONAL — SESSIONS 22+23+24 WORK COMPLETE LOCALLY, ABOUT TO BE COMMITTED
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────┐
@@ -17,7 +17,8 @@
 │                                    72.0% WR at 75-79.7%, 62.3% at 80-84.6%   │
 │ Coverage Ceiling (SO/over):     ✅ NO CEILING — monotonic through 84%+       │
 ├────────────────────────────────────────────────────────────────────────────────┤
-│ PARLAY BUILDER — REVERTED TO FIXED 4 LEGS (Session 21, branch pending merge)   │
+│ PARLAY BUILDER — REVERTED TO FIXED 4 LEGS (Session 21, CONFIRMED MERGED/LIVE   │
+│ as of commit 65ce276 — corrected Session 24, see note below)                   │
 │ Structure (Session 18, superseded):❌ 4-6 LEGS, +400 FLOOR ONLY, NO CEILING  │
 │                                    Confirmed -EV: -$0.42 to -$0.66 per $1    │
 │                                    staked vs. old structure's +$0.128        │
@@ -49,9 +50,11 @@
 │                                    committed Session 21, covering leg-count  │
 │                                    boundary behavior alongside the other two │
 │                                    fixes. 76/76 total tests passing.         │
-│ Live-data performance validation:⚠️  PENDING — revert not yet deployed as   │
-│                                    of this doc update. Watch parlay win rate │
-│                                    over the next 1-2 weeks post-deploy.      │
+│ Live-data performance validation:⚠️  Revert IS deployed (confirmed merged   │
+│                                    Session 24 — corrects this doc's prior    │
+│                                    "pending deploy" status). Whether it     │
+│                                    fully restored the pre-redesign EV is    │
+│                                    still not separately re-measured.        │
 ├────────────────────────────────────────────────────────────────────────────────┤
 │ SCORING — PRODUCTION (simple_scorer.py) — logic unchanged, upstream fixes    │
 │                                    below affect whether adjustments fire     │
@@ -148,9 +151,70 @@
 │ CLV TRACKING LAYER — UNCHANGED THIS SESSION                                    │
 │ (Removed Session 17 — see prior version)                                      │
 ├────────────────────────────────────────────────────────────────────────────────┤
-│ SPORTSGAMEODDS API USAGE — UNCHANGED THIS SESSION                              │
+│ SPORTSGAMEODDS API USAGE — REVISED Session 23                                  │
+│ Billing model:                   ✅ CONFIRMED PER-EVENT, empirically —       │
+│                                    /account/usage delta = 18 for 18 events    │
+│                                    returned (ratio 1.00), vs. 25,486 total    │
+│                                    markets in those same events (ratio        │
+│                                    0.0007). Prior evidence (local event-count │
+│                                    logging) could NOT have distinguished      │
+│                                    per-event from per-market billing — this   │
+│                                    session ran the actual account-counter     │
+│                                    test instead of trusting it further.       │
+│ Pipeline schedule:                ✅ CUT 3→2 runs/day (9 AM + 5:30 PM only,  │
+│                                    12 PM dropped) — src/web/server.py's       │
+│                                    _PIPELINE_SCHEDULE. Real 7-day usage data: │
+│                                    12 PM slot averaged 14.6/39.4 objects/day  │
+│                                    (~37%). Post-cut projection: ~744/month,   │
+│                                    vs. the 2,500/month Amateur-tier cap       │
+│                                    taking effect 2026-08-01.                  │
 │ Account downgrade status:       🔲 STILL NOT CONFIRMED — carried multiple    │
-│                                    sessions, user action pending             │
+│                                    sessions, user action pending, deadline    │
+│                                    2026-08-01. Watch usage the first few days │
+│                                    after downgrade to confirm the projection. │
+├────────────────────────────────────────────────────────────────────────────────┤
+│ PROP-LINE CAPTURE (mlb_prop_legs_history) — NEW Session 23                     │
+│ Purpose:                         Full, non-qualified-filtered prop-line +    │
+│                                    game-line capture — an isolated           │
+│                                    calibration dataset for a ground-up       │
+│                                    rebuild, NOT a production/shadow signal.  │
+│ Capture module:                  ✅ src/pipelines/prop_legs_capture.py,     │
+│                                    wired into main.py's 9 AM-only path       │
+│                                    (skip_resolution=False gate) — reuses     │
+│                                    that run's already-fetched sgo_games/     │
+│                                    all_sgo_props/schedule, ZERO new SGO      │
+│                                    API calls.                                │
+│ Markets captured:                 Game lines (moneyline/spread/total,       │
+│                                    market_scope='game') + batter hits/       │
+│                                    strikeouts(over-only)/totalBases +        │
+│                                    pitcher strikeouts (market_scope=         │
+│                                    'player', player_role disambiguated       │
+│                                    independently of get_player_props()'s     │
+│                                    own normalization — see architecture doc) │
+│ Schema fixes (live migration):   ✅ player_id nullable, market_scope +      │
+│                                    player_role columns + CHECK constraints,  │
+│                                    plus a partial unique index for the       │
+│                                    game-scope (player_id IS NULL) case —     │
+│                                    without it, game-level rows would never   │
+│                                    have deduped across runs (Postgres        │
+│                                    treats every NULL as distinct).           │
+│ Resolution:                       ✅ resolve_prop_legs_history(), chained   │
+│                                    into daily_reference_refresh.py right     │
+│                                    after it backfills yesterday's game logs  │
+│                                    — reads its own uncommitted same-         │
+│                                    transaction writes. Isolated — writes     │
+│                                    ONLY to mlb_prop_legs_history.            │
+│ Validation:                       ✅ Resolution: 7/7 synthetic test cases   │
+│                                    passed against a real completed game     │
+│                                    with known outcomes. Capture: validated   │
+│                                    via isolated test script, 2 real bugs     │
+│                                    found and fixed (ON CONFLICT partial-     │
+│                                    index target, Athletics team-abbrev       │
+│                                    mismatch) — see DIAGNOSTIC / LOGGING      │
+│                                    GAPS below and ARCHITECTURE_DECISIONS.md. │
+│ Production wiring status:        ⚠️  Tested via standalone scripts only —  │
+│                                    the real main.py run_pipeline() code     │
+│                                    path itself not yet exercised live.       │
 ├────────────────────────────────────────────────────────────────────────────────┤
 │ SHADOW PIPELINE                                                                │
 │ Shadow Pipeline:                ✅ RUNNING AFTER EVERY PRODUCTION RUN        │
@@ -166,7 +230,167 @@
 │                                    again without a rerun. Confirm before     │
 │                                    relying on them for a promotion decision. │
 ├────────────────────────────────────────────────────────────────────────────────┤
+│ POINT-IN-TIME STAT BACKFILL (mlb_training_data) — NEW Session 24               │
+│ Forward-going capture fix:      ✅ opp_pitcher_id added to                   │
+│                                    log_training_data_legs()'s INSERT in      │
+│                                    db.py — was silently dropped since        │
+│                                    project inception (same bug class as      │
+│                                    lineup_consistency, §27). Tested via      │
+│                                    source-inspection (no local pytest/DB).   │
+│ Cumulative tables:               ✅ mlb_player_batting_cumulative /          │
+│                                    _pitching_cumulative — incremental daily  │
+│                                    refresh built (scripts/backfill_point_    │
+│                                    in_time_stats.py), chained into           │
+│                                    daily_reference_refresh.py               │
+│ pt_role/pt_*/opp_pt_* fill:      ✅ Built + run once against production —   │
+│                                    pt_role 98.8% covered (0 new rows this    │
+│                                    run, matches historical rate); opp_pt_era │
+│                                    100% once structurally-unfillable rows    │
+│                                    (season-opener/pitcher-debut games, zero  │
+│                                    prior in-season data) excluded from the   │
+│                                    denominator                              │
+│ Bug caught before shipping:      ✅ First draft coupled the own-role fill   │
+│                                    and opp-pitcher fill together — would     │
+│                                    have silently skipped ~12,207 rows        │
+│                                    fillable in the future. Decoupled after   │
+│                                    live-data testing. See                    │
+│                                    ARCHITECTURE_DECISIONS.md §35.            │
+│ Production deploy status:        ⚠️  Code + one manual backfill run done — │
+│                                    nothing committed/pushed yet              │
+├────────────────────────────────────────────────────────────────────────────────┤
+│ COVERAGE-VS-MATCHUP ANALYSIS — NEW Session 24 (read-only, no scoring change)   │
+│ Question:                       Does opposing-pitcher matchup quality        │
+│                                    change win probability independent of/in  │
+│                                    interaction with coverage? Is there a     │
+│                                    real low-coverage+good-matchup >          │
+│                                    high-coverage+bad-matchup quadrant?       │
+│ Methodology finding #1:          ⚠️  coverage_overall hard-floors at 65%    │
+│                                    (over)/40% (under) BEFORE scoring         │
+│                                    (main.py Gate 1) — "low coverage" barely  │
+│                                    exists for hits/over + batter-K, making   │
+│                                    the operator's question untestable for    │
+│                                    those two bet types from this table.      │
+│ Methodology finding #2:          ⚠️  coverage_overall/composite_score only  │
+│                                    consistently defined 2026-06-09+ — a      │
+│                                    different scorer was in effect before.    │
+│                                    Baseline correlations (0.00-0.08) mixed   │
+│                                    both eras; restricted reanalysis raised   │
+│                                    measured win rates from 50-53% to 58-63%. │
+│ hits/over result:                ❌ No support — Q3 (low-cov+good-match)     │
+│                                    lost to Q2 by 8.4pp, interaction p=0.765  │
+│ totalBases result:                ✅ Real support — Q3 beat Q2 by 11.5pp /  │
+│                                    ~$0.21 EV per $1, adequate n — but        │
+│                                    totalBases is shadow-only, not live       │
+│ batter-K result:                 ⚠️  Directionally supportive (Q3 beat Q2   │
+│                                    by 10pp) but every relevant cell is under │
+│                                    this project's own n<50 reliability bar   │
+│ pitcher-K result:                Not testable — no opposing-matchup metric  │
+│                                    exists for a pitcher-role leg             │
+│ Recommendation:                  Don't loosen the hits/over gate on this    │
+│                                    evidence. Re-run 2026-08-06 once          │
+│                                    mlb_prop_legs_history has a week of       │
+│                                    ungated data (confirmed running, 1,014    │
+│                                    rows as of 7/30) — joined against the new │
+│                                    cumulative tables, no crosswalk needed.   │
+│ Full report:                     docs/COVERAGE_VS_MATCHUP_ANALYSIS.md;      │
+│                                    ARCHITECTURE_DECISIONS.md §36            │
+├────────────────────────────────────────────────────────────────────────────────┤
+│ REFERENCE DATA SCHEMA — NEW (Session 22)                                       │
+│ Tables:                          ✅ mlb_teams, mlb_players, mlb_games,       │
+│                                    mlb_player_batting_logs,                  │
+│                                    mlb_player_pitching_logs,                 │
+│                                    mlb_team_standings(+_splits),             │
+│                                    mlb_player_season_batting_stats/          │
+│                                    _pitching_stats — applied directly to     │
+│                                    Supabase before this session, no repo     │
+│                                    migration file. Additive only — does not  │
+│                                    touch mlb_scored_legs or any existing     │
+│                                    production table.                        │
+│ Season-to-date backfill:         ✅ COMPLETE — 124 game dates (2026-03-25   │
+│                                    season opener through 2026-07-29),        │
+│                                    1,613 games, ~34,100 batting-log rows,    │
+│                                    ~13,600 pitching-log rows, 1,335 players  │
+│ Data-integrity validation:       ✅ 3 independent box-score spot-checks     │
+│                                    matched the live API exactly;             │
+│                                    game_pk cross-check with mlb_scored_legs: │
+│                                    1,300/1,320 matched (remainder is a       │
+│                                    found-not-fixed mlb_scored_legs bug, see  │
+│                                    DIAGNOSTIC / LOGGING GAPS below)          │
+│ Season-stats/standings snapshot: ✅ scripts/backfill_reference_snapshots.py │
+│                                    (new) — relies on MLB's own              │
+│                                    playerPool=QUALIFIED filter rather than   │
+│                                    reimplementing the PA/IP threshold        │
+│                                    client-side (confirmed live to match)     │
+│ Daily refresh:                   ⚠️  scripts/daily_reference_refresh.py    │
+│                                    (new) written, dry-run validated, wired   │
+│                                    into server.py's scheduler (3 AM ET) —    │
+│                                    NOT YET DEPLOYED, nothing committed this  │
+│                                    session. Standings/leaderboard snapshots  │
+│                                    stay frozen at 2026-07-29 until pushed.   │
+├────────────────────────────────────────────────────────────────────────────────┤
+│ DIAMOND LINE DASHBOARD (dashboard_api/) — REWORK Session 22                    │
+│ Standings page:                  ✅ GET /api/standings + static/            │
+│                                    standings.html — validated field-for-     │
+│                                    field against the operator's own MLB.com  │
+│                                    screenshot, including a found-and-fixed   │
+│                                    WCGB sign bug (raw API returns literal    │
+│                                    '+7.0' for wildcard-holding teams, a      │
+│                                    naive float() cast was collapsing it)     │
+│ Leaderboard pages:                ✅ GET /api/leaderboards/hitting+pitching │
+│                                    + static/leaderboards.html, sortable —    │
+│                                    pitching output near-exact match on       │
+│                                    every column vs. operator's screenshot    │
+│ season_stats.py:                 ✅ Swapped from a live MLB API call per    │
+│                                    player per request to DB-first reads      │
+│                                    from the new reference tables, with a     │
+│                                    live-API fallback preserved for players   │
+│                                    not in the qualified-only reference       │
+│                                    tables (avoids a coverage regression)     │
+│ Frontend architecture finding:   ⚠️  static/support.js (68K) is a          │
+│                                    GENERATED file — no dc-runtime/ source    │
+│                                    exists anywhere in the repo. New pages    │
+│                                    built as separate static files instead    │
+│                                    of extending the existing bundle — see    │
+│                                    ARCHITECTURE_DECISIONS.md §31.            │
+│ Step 4 (drill-down cards):       🔲 DEFERRED — operator's choice, not       │
+│                                    blocked on anything found this session    │
+├────────────────────────────────────────────────────────────────────────────────┤
 │ DIAGNOSTIC / LOGGING GAPS                                                       │
+│ mlb_parlay_legs_v2 no new legs: ⚠️  NEW FINDING (Session 24) — zero legs     │
+│                                    for any run_date 2026-07-24 through       │
+│                                    2026-07-30 (last activity 2026-07-23),    │
+│                                    confirmed via direct query. Found while   │
+│                                    building the coverage-vs-matchup          │
+│                                    analysis dataset. NOT root-caused —       │
+│                                    out of scope for that read-only task.     │
+│ get_totals_props() key prefix:  ⚠️  NEW FINDING (Session 23) — searches for  │
+│                                    'runs-*' keys, live SGO responses use     │
+│                                    'points-*'. Confirmed dormant (never      │
+│                                    called elsewhere in the codebase, via     │
+│                                    grep) — not actively broken, just never   │
+│                                    correct. Not fixed (nothing depends on    │
+│                                    it); prop_legs_capture.py's own game-line │
+│                                    parsing uses the correct prefix directly. │
+│ source label inconsistency:     ⚠️  NEW FINDING (Session 23) —              │
+│                                    mlb_parlay_recommendations_v2.source is   │
+│                                    literally 'midday'/'evening' for those    │
+│                                    scheduled slots (raw scheduler label      │
+│                                    passed straight through), not             │
+│                                    'auto_12pm'/'auto_530pm' as documented in │
+│                                    SUPABASE_SCHEMA_REFERENCE.md. The 9 AM    │
+│                                    slot passes no explicit source and        │
+│                                    correctly falls through to an hour-based  │
+│                                    fallback; the other slots don't. Pre-     │
+│                                    existing, unrelated to this session's     │
+│                                    changes. Low priority now that 'midday'   │
+│                                    no longer fires post-schedule-cut.        │
+│ mlb_scored_legs.game_pk mismatch:⚠️  NEW FINDING (Session 22) — 8/1,320     │
+│                                    checked game_pks belong to future,        │
+│                                    unplayed games (confirmed live), not the  │
+│                                    game actually on that leg's run_date.     │
+│                                    Flagged, not root-caused or fixed —       │
+│                                    mlb_scored_legs wasn't touched this       │
+│                                    session per the read-only backfill scope │
 │ void_reason (mlb_scored_legs):  ❌ STILL NOT POPULATING — carried, no        │
 │                                    action taken Session 17 or 18             │
 │ Row-count inflation:            ⚠️  NEW FINDING (Session 18) — any leg       │
@@ -183,15 +407,35 @@
 │ Database Logging:               ✅ STABLE                                     │
 │ Web UI:                         ✅ FUNCTIONAL (+ new /manual route)          │
 │ Deployment:                     ✅ LIVE (Railway auto-deploy)                │
-│                                    Latest confirmed commit: c920f32 (Jul 8)  │
-│                                    Possible later unconfirmed commit — see   │
-│                                    sticky-header open item above            │
-│ Base commit at session start:    3d7aabc (Jul 7, previously undocumented —  │
-│                                    documented this session; also resolved   │
-│                                    the long-open "unknown commit 85b5bd5"    │
-│                                    mystery — confirmed docs-only, no code)   │
-│ pytest:                          ✅ INSTALLED and working as of Session 21 — │
-│                                    76 tests passing (62 original + 14 new)  │
+│                                    Latest confirmed commit: 65ce276 (Jul 23) │
+│                                    — dashboard_api Phase 1, confirmed via    │
+│                                    Session 24's git-history check to also   │
+│                                    include Session 21's fixes as ancestors   │
+│                                    (62a3c39 etc. — corrects the prior       │
+│                                    "Session 21 pending merge" status).       │
+│                                    Session 22's work (backfill scripts,      │
+│                                    dashboard additions, server.py scheduler  │
+│                                    wiring), Session 23's work (SGO billing   │
+│                                    verification, schedule cut, prop_legs_    │
+│                                    capture.py), AND Session 24's work        │
+│                                    (opp_pitcher_id fix, point-in-time stat   │
+│                                    backfill, coverage-vs-matchup analysis)   │
+│                                    are NOT yet committed or deployed —       │
+│                                    about to be, together.                    │
+│ Base commit at session start:    65ce276 (Jul 23) — confirmed via git log/  │
+│                                    git status at Session 24 start; no       │
+│                                    unpushed local commits, only uncommitted  │
+│                                    working-tree changes from Sessions 22-24  │
+│ pytest:                          ⚠️  NOT installed in this session's local  │
+│                                    .venv, and no local DATABASE_URL exists   │
+│                                    (Supabase creds live in Railway only) —   │
+│                                    Session 24's new test verified via direct │
+│                                    source-inspection instead of a live       │
+│                                    pytest run. Whichever environment ran the │
+│                                    76-passing suite through Session 21 is    │
+│                                    not this one; re-confirm pytest/env setup │
+│                                    before assuming the full suite still runs │
+│                                    clean end-to-end.                         │
 │ sklearn Version Warning:        ⚠️  1.7.2→1.8.0 mismatch (non-fatal, carried)│
 └────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -199,6 +443,38 @@
 ---
 
 ## Recent Deployments
+
+### 🔧 July 30, 2026 (Session 24): Opposing-Pitcher Capture Fixed Forward + Point-in-Time Stat Backfill + Coverage-vs-Matchup Analysis — NOT YET DEPLOYED
+
+**Work.** Two distinct handoffs the same day: (1) `opposing_pitcher_id` was being silently dropped before `mlb_training_data`'s INSERT (same bug class as Session 21's `lineup_consistency` fix) — fix it forward and build the point-in-time batter/pitcher stat backfill that depends on it; (2) answer the operator's direct question on whether the `composite_score >= 65` coverage-heavy gate is discarding good-matchup, lower-coverage legs. Full detail in `SESSION_HANDOFF.md`'s Session 24 entry.
+
+**Task 1.** Added `opp_pitcher_id` to `log_training_data_legs()`'s INSERT in `src/utils/db.py`. Built `scripts/backfill_point_in_time_stats.py` (cumulative batting/pitching tables + `mlb_training_data` `pt_*`/`opp_pt_*` fill), chained into `daily_reference_refresh.py`. Caught and fixed a real coupling bug via live-data testing (own-role and opposing-pitcher fills were incorrectly gated together — would have silently skipped ~12,207 rows fillable once their pitcher's next start happens). Ran once against production: `pt_role` 98.8% covered (0 new fills, matches historical rate), `opp_pt_era` 100% once structurally-unfillable rows (zero prior in-season data) are excluded.
+
+**Task 2.** Reproduced the handoff's baseline correlation table exactly before building anything new, which surfaced two methodological findings that reshaped the analysis: `coverage_overall` is hard-floored pre-scoring (65%/40%), and `coverage_overall`/`composite_score` only reflect the current pipeline from 2026-06-09 onward. Built the required banded grid → interaction model → quadrant comparison for all four bet types under the corrected, single-era population. hits/over showed no support for the operator's hypothesis; totalBases showed real support (shadow-only, not live); batter-K directionally supportive but thin-sampled; pitcher-K untestable. Full report: `docs/COVERAGE_VS_MATCHUP_ANALYSIS.md`. Side finding: `mlb_parlay_legs_v2` has had zero new legs since 2026-07-23 — flagged, not root-caused.
+
+**Not deployed.** Nothing from Sessions 22, 23, or 24 is committed as of this doc update — about to be, together.
+
+### 🔧 July 29, 2026 (Session 23): SGO Billing Verification + Schedule Cut + Full Prop-Line Capture — NOT YET DEPLOYED
+
+**Work.** Second, distinct handoff on the same day as Session 22: (1) empirically verify SGO's per-event vs. per-market billing before relying on it further, (2) cut the pipeline schedule from 3 runs/day to 2 ahead of the 2026-08-01 SGO Pro→Amateur downgrade, (3) build full prop-line capture into the (Session-22-created, still-empty) `mlb_prop_legs_history` table as an isolated ground-up-rebuild calibration dataset. Full detail in `SESSION_HANDOFF.md`'s Session 23 entry.
+
+**Task 1.** Built a real test (`scripts/verify_sgo_billing.py`) hitting SGO's own `/account/usage` counter before/after one `/events` call — delta of 18 matched 18 events returned exactly, vs. 25,486 total markets in those events. Per-event billing confirmed unambiguously. Also found (not fixed) that `get_totals_props()` searches the wrong key prefix — dormant/unused code, not live-broken.
+
+**Task 2.** Removed the 12 PM slot from `src/web/server.py`'s `_PIPELINE_SCHEDULE`. Verified against real 7-day usage data (not just projection): 12 PM averaged ~37% of daily SGO usage; post-cut projects to ~744/month, well under the 2,500 cap.
+
+**Task 3.** Fixed `mlb_prop_legs_history`'s schema via live migration (nullable `player_id`, new `market_scope`/`player_role` columns, a partial unique index for game-scope dedup that the literal spec would have missed). Built `src/pipelines/prop_legs_capture.py` (capture, wired into `main.py`'s 9 AM path, zero new SGO calls; resolution, chained into `daily_reference_refresh.py`). Validated live: resolution 7/7 test cases passed; capture found and fixed two real bugs (an `ON CONFLICT` partial-index target bug, and an Athletics-relocation team-abbreviation bug) before landing clean (36 game lines + 176 then 60 more player legs captured across two runs, natural-key upsert-and-append confirmed working).
+
+**Not deployed.** Nothing from Session 22 or 23 is committed as of this doc update — about to be, together.
+
+### 🔧 July 29, 2026 (Session 22): Reference-Data Schema Backfill + Diamond Line Dashboard Rework — NOT YET DEPLOYED
+
+**Work.** Two-part handoff: (1) get an already-drafted, never-run reference-data backfill script working and run it season-to-date, plus write the season-stats/standings snapshot and daily-refresh pieces that hadn't been drafted; (2) scope, then build, a rework of the Diamond Line dashboard (`dashboard_api/`) to surface the new reference data. Full detail (including every field-level validation performed) is in `SESSION_HANDOFF.md`'s Session 22 entry — this section is the compressed version.
+
+**Backfill.** Reviewed the draft script against LIVE `statsapi.mlb.com` responses before running it — found and fixed three real bugs (batting logs gated on a field that's never actually returned by `boxscore_data()`, so none would have inserted; `is_starter` gated on another field that's likewise never present; a real FK column, `opposing_pitcher_id`, never populated). Ran season-to-date: 124 game dates, 1,613 games, ~34,100 batting-log rows, ~13,600 pitching-log rows, 1,335 players. Wrote and ran the season-stats/standings snapshot script (discovered MLB's own API already does the qualified-players filtering the handoff asked to reimplement) and the daily-refresh script (wired into `server.py`'s scheduler, not yet deployed). Found, but did not fix (out of scope), a pre-existing data-quality bug in `mlb_scored_legs` — 8 of 1,320 checked `game_pk` values point at future, unplayed games.
+
+**Dashboard.** Presented a scoping plan before writing code — approved, then built steps 1-3 of the agreed 4-step sequence: Standings page, `season_stats.py` swapped off live per-request API calls (with a live fallback preserved for non-qualified players, to avoid a coverage regression), Hitting/Pitching leaderboard pages. All three validated against the operator's own MLB.com screenshots, field-for-field. Found `static/support.js` is a generated file with no committed source (`dc-runtime/` doesn't exist in the repo) — this changed the plan to build new pages as separate static files rather than extending the existing bundle.
+
+**Not deployed.** Nothing from this session is committed. All changes sit in the operator's WSL clone working tree as of this doc update.
 
 ### 🔧 July 20, 2026 (Session 21): Post-Break Investigation — Builder Leg-Count Revert + Two Signal-Pipeline Bug Fixes + Pitcher ERA Audit
 
@@ -289,13 +565,77 @@
 | hits/under | 65% floor | None | ⚠️ Very narrow eligible pool (1-3 players/day) — characterized Session 18, not a gate change |
 | TB/under (shadow) | 40% floor | ~75% (tentative) | ⚠️ Promotion analysis stale — rerun under new builder before deciding |
 
+### Reference Data Schema (mlb_teams, mlb_players, mlb_games, mlb_player_batting_logs/_pitching_logs, mlb_team_standings(+_splits), mlb_player_season_batting_stats/_pitching_stats) — NEW Session 22
+| Component | Status | Notes |
+|---|---|---|
+| Season-to-date backfill | ✅ Complete, validated | 124 dates, 1,613 games, ~34,100 batting rows, ~13,600 pitching rows, 1,335 players. 3 independent live spot-checks matched exactly. |
+| Season-stats/standings snapshot | ✅ Complete, validated | `scripts/backfill_reference_snapshots.py` — relies on MLB's own `playerPool=QUALIFIED` filter, confirmed to match the intended PA/IP threshold |
+| Daily refresh | ⚠️ Written, not deployed | `scripts/daily_reference_refresh.py`, wired into `server.py`'s scheduler (3 AM ET) — dry-run validated, now also resolves `mlb_prop_legs_history` (Session 23), but nothing committed/pushed yet |
+| mlb_scored_legs.game_pk integrity | ⚠️ 8/1,320 mismatches found | Pre-existing bug in `mlb_scored_legs`, unrelated to this backfill — flagged, not fixed (out of scope) |
+
+### SGO Cost Management — REVISED Session 23
+| Component | Status | Notes |
+|---|---|---|
+| Billing model | ✅ Confirmed per-event | `/account/usage` delta test: 18 delta = 18 events (ratio 1.00) vs. 25,486 markets (ratio 0.0007) |
+| Pipeline schedule | ✅ Cut 3→2 runs/day | `src/web/server.py` `_PIPELINE_SCHEDULE` — 12 PM slot removed |
+| Projected usage post-cut | ✅ ~744/month | Real 7-day data, not just projection; cap is 2,500/month starting 8/1 |
+| Tier downgrade | 🔲 Not yet confirmed | Deadline 2026-08-01, user action outside the codebase |
+
+### Prop-Line Capture (mlb_prop_legs_history) — NEW Session 23
+| Component | Status | Notes |
+|---|---|---|
+| Schema (player_id nullable, market_scope, player_role, partial unique index) | ✅ Applied live | Migration applied directly to Supabase, no repo migration file |
+| Capture (game lines + player props) | ✅ Built, validated via standalone test | `src/pipelines/prop_legs_capture.py`, zero new SGO calls, wired into `main.py`'s 9 AM path |
+| Resolution | ✅ Built, validated (7/7 test cases) | `resolve_prop_legs_history()`, chained into `daily_reference_refresh.py` |
+| Real production run_pipeline() exercise | ⚠️ Not yet done | Only tested via isolated scripts — watch the first live 9 AM run post-deploy |
+| Isolation from production/shadow | ✅ Confirmed by design | Writes only to `mlb_prop_legs_history`/`mlb_teams`/`mlb_players`/`mlb_games` |
+
+### Diamond Line Dashboard (dashboard_api/) — REWORK Session 22
+| Component | Status | Notes |
+|---|---|---|
+| Standings page | ✅ Working, validated | `GET /api/standings` + `static/standings.html` — field-for-field match against operator's screenshot, WCGB sign bug found and fixed |
+| Hitting/Pitching leaderboards | ✅ Working, validated | `GET /api/leaderboards/hitting`+`/pitching` + `static/leaderboards.html`, sortable — near-exact match on pitching, hitting matched with expected drift |
+| `season_stats.py` | ✅ Reworked, validated | DB-first from reference tables, live-API fallback preserved for non-qualified players (no coverage regression) |
+| Frontend (`support.js`) | ⚠️ Confirmed unmaintainable as-is | Generated file, no `dc-runtime/` source in repo — new pages built as separate static files instead, see `ARCHITECTURE_DECISIONS.md` §31 |
+| Player/team drill-down cards | 🔲 Not built (step 4) | Deferred by operator choice this session, not blocked |
+| Deploy status | ⚠️ Not deployed | Nothing from this session committed/pushed |
+
+### Point-in-Time Stat Backfill (mlb_player_batting_cumulative/_pitching_cumulative, mlb_training_data pt_*/opp_pt_*) — NEW Session 24
+| Component | Status | Notes |
+|---|---|---|
+| opp_pitcher_id forward-capture fix | ✅ Fixed, source-inspection tested | `src/utils/db.py`'s `log_training_data_legs()` — was silently dropped since project inception |
+| Cumulative tables refresh | ✅ Built | `scripts/backfill_point_in_time_stats.py`, chained into `daily_reference_refresh.py` after the games/logs step |
+| `mlb_training_data` pt_*/opp_pt_* fill | ✅ Built, run once against production | `pt_role` 98.8% (0 new fills), `opp_pt_era` 100% excluding structurally-unfillable rows — see analysis in `ARCHITECTURE_DECISIONS.md` §35 |
+| Coupling bug (own-role vs. opp-pitcher fill) | ✅ Found via live-data testing, fixed | Would have silently skipped ~12,207 future-fillable rows if shipped as first drafted |
+| Deploy status | ⚠️ Not deployed | Code + one manual production run done; nothing committed/pushed |
+
+### Coverage-vs-Matchup Analysis — NEW Session 24 (read-only, no scoring change)
+| Component | Status | Notes |
+|---|---|---|
+| Baseline reproduction | ✅ Exact match confirmed | n and win% matched the handoff's own baseline table before any new analysis was built |
+| Range-restriction finding | ⚠️ coverage_overall hard-floored pre-scoring | 65%/40% gate in `main.py` — hits/over and batter-K's "low coverage" question is untestable from this table |
+| Scoring-era finding | ⚠️ Two non-comparable eras in mlb_training_data | Analysis restricted to post-2026-06-09 data for internal consistency |
+| hits/over | ❌ No support for the operator's hypothesis | Q3 lost to Q2 by 8.4pp, interaction p=0.765 |
+| totalBases | ✅ Real support | Q3 beat Q2 by 11.5pp / ~$0.21 EV per $1 — but shadow-only, not live production |
+| batter-K | ⚠️ Directionally supportive, thin sample | Every relevant cell under this project's n<50 bar |
+| pitcher-K | 🔲 Not testable | No opposing-matchup metric exists for pitcher-role legs |
+| Re-run scheduled | 🔲 2026-08-06 | Once `mlb_prop_legs_history` has ~1 week of ungated data |
+
 ---
 
 ## Pending Code Changes
 
 | Item | File | Priority |
 |---|---|---|
-| Merge Session 21 branch to master and deploy | `fix/leg-cap-lineup-consistency-streak-floor` | **High — Session 22, first thing. Blocks everything below needing live data.** |
+| Commit and push Sessions 22+23+24's work | `scripts/`, `dashboard_api/`, `src/pipelines/prop_legs_capture.py`, `src/web/server.py`, `main.py`, `src/utils/db.py`, `docs/` | **High — being done now. Daily reference-data refresh, prop-line capture, and the point-in-time stat backfill are all inert until this happens.** |
+| Re-run coverage-vs-matchup analysis | analysis only, target 2026-08-06 | **High — new Session 24, needs `mlb_prop_legs_history` to accumulate ~1 week of data first** |
+| Investigate mlb_parlay_legs_v2 no-new-legs gap since 7/23 | production tables (not yet touched) | **High — new Session 24, found via direct query, not root-caused** |
+| Watch first live 9 AM prop-line capture run | — (verification only) | **High — new Session 23, real `run_pipeline()` wiring not yet exercised live** |
+| Confirm SGO tier downgrade lands cleanly 8/1 | — (verification only) | **High — new Session 23, deadline 2026-08-01** |
+| Build Diamond Line dashboard step 4 (drill-down cards) | `dashboard_api/` (new) | Medium — deferred by operator choice Session 22, not blocked |
+| Root-cause the mlb_scored_legs game_pk mismatch | `mlb_scored_legs` (production table, not touched Session 22) | Medium — new Session 22, found via live cross-check, 8/1,320 affected |
+| Fix source labeling inconsistency ('midday'/'evening' vs. documented 'auto_12pm'/'auto_530pm') | `main.py` `run_pipeline()` | Low — new Session 23, pre-existing, 'midday' no longer fires post-schedule-cut |
+| Fix get_totals_props() wrong key prefix | `src/apis/sportsgameodds.py` | Low — new Session 23, confirmed dormant/unused |
 | Confirm lineup_consistency Step 5b filter is actually executing | — (verification only, check Railway logs) | **High — new Session 21** |
 | Watch leg-cap revert live EV over 1-2 weeks | — (verification only) | **High — new Session 21** |
 | Build + backtest pitcher ERA signal rebuild (recent-starts ERA) | `src/apis/matchup.py` (new `get_pitcher_game_log()`), `simple_scorer.py` | **High — scoped Session 21, explicitly deferred, not started** |
@@ -313,6 +653,6 @@
 
 ---
 
-**Build Status:** ✅ HEALTHY — Session 21 fixes verified line-by-line and ready, pending merge/deploy
-**Last Deployment:** July 8, 2026 (Session 18) is still the last *deployed* change — Session 21's fixes are committed to a branch but not yet merged/deployed as of this doc update
-**Next Review:** Merge and deploy the Session 21 branch first thing / confirm lineup_consistency filter via Railway logs / watch leg-cap-revert live EV over 1-2 weeks / then return to the carried Session 19 items (sticky-header confirmation, manual-pick end-to-end test) that have now gone unconfirmed for three sessions
+**Build Status:** ✅ HEALTHY — Sessions 22, 23, and 24's work (reference-data backfill, Diamond Line dashboard, SGO billing verification + schedule cut, full prop-line capture, opposing-pitcher/point-in-time-stat backfill, coverage-vs-matchup analysis) validated and ready, about to be committed together. Session 21's fixes are confirmed merged and deployed as of `65ce276` — corrects this doc's own prior "unmerged branch" status, verified via `git merge-base --is-ancestor` this session.
+**Last Deployment:** July 23, 2026 (`65ce276`, dashboard_api Phase 1 — previously undocumented, see Session 22 note in `SESSION_HANDOFF.md`; confirmed this session to also include Session 21's fixes as ancestors) is still the last *deployed* change. Sessions 22, 23, and 24's combined work is committed nowhere yet as of this doc update.
+**Next Review:** Commit and push Sessions 22+23+24's work first thing (nothing daily-refreshes, captures prop lines, or backfills point-in-time stats until this happens) / watch the first live 9 AM capture run and the 8/1 SGO tier downgrade / re-run the coverage-vs-matchup analysis 2026-08-06 / root-cause the mlb_parlay_legs_v2 no-new-legs gap / decide whether to build dashboard step 4 next or return to the remaining Session-21-era queue (confirm lineup_consistency filter via Railway logs, watch leg-cap-revert live EV, pitcher ERA rebuild, manual-pick end-to-end test — all carried, now behind two sessions' worth of newer work)
