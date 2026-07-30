@@ -1216,13 +1216,17 @@ def create_app() -> web.Application:
 
 
 _ET = ZoneInfo("America/New_York")
-# Three daily pipeline runs (label, time-ET, function):
+# Two daily pipeline runs (label, time-ET, function):
 #   morning  9:00 AM — resolve yesterday + full fetch/score/build for today (run_morning_pipeline)
-#   midday  12:00 PM — full fresh props fetch, no resolution (run_full_refresh_pipeline)
 #   evening  5:30 PM — full fresh props fetch, no resolution (run_full_refresh_pipeline)
+# Cut from 3 runs/day to 2 (the 12 PM "midday" slot was dropped) ahead of the
+# 2026-08-01 SportsGameOdds Pro->Amateur tier downgrade (2,500 objects/month
+# cap) — verified live that SGO bills per-event (one object per game returned
+# by /events, confirmed via /account/usage delta, independent of the ~1,400
+# markets nested inside each event), so this cut is purely about call COUNT,
+# not about the per-call object cost changing.
 _PIPELINE_SCHEDULE = [
     (dtime(9,  0),  "morning"),   # 9:00 AM ET — resolution + full fetch/score/build
-    (dtime(12, 0),  "midday"),    # 12:00 PM ET — full fresh props, skip resolution
     (dtime(17, 30), "evening"),   # 5:30 PM ET — full fresh props, skip resolution
 ]
 
@@ -1232,11 +1236,17 @@ _CATCHUP_WINDOW_MINS = 120
 
 async def _pipeline_scheduler() -> None:
     """
-    Background task that runs scheduled pipelines at 9 AM, 12 PM, and 5:30 PM ET.
+    Background task that runs scheduled pipelines at 9 AM and 5:30 PM ET.
 
     9 AM    → run_morning_pipeline()      (resolve yesterday + full fetch/score/build for today)
-    12 PM   → run_full_refresh_pipeline() (full fresh props fetch, skip resolution)
     5:30 PM → run_full_refresh_pipeline() (full fresh props fetch, skip resolution)
+
+    Cut from 3 runs/day (9 AM/12 PM/5:30 PM) to 2 — the 12 PM "midday" slot
+    was dropped ahead of the 2026-08-01 SGO tier downgrade. See
+    ARCHITECTURE_DECISIONS.md for the SGO billing verification that
+    confirmed this cut actually reduces monthly object usage (per-event
+    billing means fewer /events calls per day = fewer billed objects,
+    independent of market count per call).
 
     On startup, if we're within _CATCHUP_WINDOW_MINS of a missed slot, runs
     that slot's pipeline immediately (Railway redeploy recovery).
@@ -1244,7 +1254,6 @@ async def _pipeline_scheduler() -> None:
     from main import run_morning_pipeline, run_full_refresh_pipeline
 
     print("[scheduler] Morning pipeline scheduled at 9:00 AM ET (resolution + full fetch/score/build)")
-    print("[scheduler] Midday pipeline scheduled at 12:00 PM ET (full fresh props, skip resolution)")
     print("[scheduler] Evening pipeline scheduled at 5:30 PM ET (full fresh props, skip resolution)")
 
     # ── Startup catch-up ──────────────────────────────────────────────────────
@@ -1331,6 +1340,59 @@ async def _lineup_drain_scheduler() -> None:
             print(f"[lineup_drain] drain error (non-fatal): {exc}")
 
 
+_REFERENCE_REFRESH_TIME = dtime(3, 0)  # 3:00 AM ET — after all games are Final, before the 9 AM pipeline
+
+
+async def _reference_data_scheduler() -> None:
+    """
+    Background task that runs scripts.daily_reference_refresh once a day at
+    3:00 AM ET (yesterday's game/box-score logs are guaranteed Final by then,
+    well ahead of the 9 AM production pipeline run).
+
+    Same one-daily-slot pattern as _pipeline_scheduler() above, just with a
+    single time instead of three. Keeps mlb_games/mlb_player_batting_logs/
+    mlb_player_pitching_logs/mlb_player_season_batting_stats/
+    mlb_player_season_pitching_stats/mlb_team_standings/
+    mlb_team_standings_splits current for the Diamond Line dashboard's
+    Standings and Leaderboards pages — see scripts/daily_reference_refresh.py.
+    """
+    from scripts.daily_reference_refresh import run_daily_reference_refresh
+
+    print(f"[ref_data_scheduler] Reference-data refresh scheduled at {_REFERENCE_REFRESH_TIME.strftime('%H:%M')} ET")
+
+    now_startup = datetime.now(_ET)
+    startup_total_mins = now_startup.hour * 60 + now_startup.minute
+    slot_mins = _REFERENCE_REFRESH_TIME.hour * 60 + _REFERENCE_REFRESH_TIME.minute
+    if slot_mins <= startup_total_mins < slot_mins + _CATCHUP_WINDOW_MINS:
+        print(f"[ref_data_scheduler] Startup at {now_startup.strftime('%H:%M ET')} — within catch-up window, running now...")
+        try:
+            loop = asyncio.get_event_loop()
+            summary = await loop.run_in_executor(None, run_daily_reference_refresh)
+            print(f"[ref_data_scheduler] Startup catch-up complete: {summary}")
+        except Exception as exc:
+            print(f"[ref_data_scheduler] Startup catch-up error: {exc}")
+
+    while True:
+        now = datetime.now(_ET)
+        today = now.date()
+        candidate = datetime.combine(today, _REFERENCE_REFRESH_TIME, tzinfo=_ET)
+        if candidate <= now:
+            import datetime as _dt
+            candidate = datetime.combine(today + _dt.timedelta(days=1), _REFERENCE_REFRESH_TIME, tzinfo=_ET)
+
+        sleep_secs = (candidate - datetime.now(_ET)).total_seconds()
+        print(f"[ref_data_scheduler] next refresh at {candidate.strftime('%Y-%m-%d %H:%M ET')} (in {sleep_secs / 3600:.1f}h)")
+        await asyncio.sleep(max(sleep_secs, 1))
+
+        print(f"[ref_data_scheduler] running reference-data refresh at {datetime.now(_ET).strftime('%H:%M ET')}")
+        try:
+            loop = asyncio.get_event_loop()
+            summary = await loop.run_in_executor(None, run_daily_reference_refresh)
+            print(f"[ref_data_scheduler] refresh complete: {summary}")
+        except Exception as exc:
+            print(f"[ref_data_scheduler] refresh error (non-fatal): {exc}")
+
+
 async def start_server() -> web.AppRunner:
     """
     Start the aiohttp server and pipeline scheduler.
@@ -1346,11 +1408,15 @@ async def start_server() -> web.AppRunner:
 
     # Start the background pipeline scheduler
     asyncio.ensure_future(_pipeline_scheduler())
-    print("[web] Pipeline scheduler started (9 AM resolution + full fetch, 12 PM + 5:30 PM full refresh, skip resolution)")
+    print("[web] Pipeline scheduler started (9 AM resolution + full fetch, 5:30 PM full refresh, skip resolution — 12 PM slot dropped for SGO cost)")
 
     # Start the lineup-confirmation drain cron (event-driven, every 1 min)
     asyncio.ensure_future(_lineup_drain_scheduler())
     print("[web] Lineup drain cron started (polls mlb_pending_lineup_checks every 1 min)")
+
+    # Start the reference-data refresh cron (once daily, 3 AM ET)
+    asyncio.ensure_future(_reference_data_scheduler())
+    print("[web] Reference-data refresh cron started (once daily, 3 AM ET)")
 
     return runner
 
