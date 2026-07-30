@@ -36,6 +36,8 @@
   <sc-if value="{{ contentUnlocked }}" hint-placeholder-val="{{ false }}">
   <div class="nav" style="background:var(--color-surface); border-bottom:1px solid var(--color-divider);">
     <div class="nav-brand">DIAMOND LINE</div>
+    <a href="/standings.html">Standings</a>
+    <a href="/leaderboards.html">Leaderboards</a>
     <div style="display:flex; align-items:center; gap:8px; background:var(--color-bg); border:1px solid var(--color-divider); padding:6px 10px; border-radius:var(--radius-md); width:300px;">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
       <input class="input" style="border:none; background:transparent; padding:0; min-height:auto;" placeholder="Search player, team, pitcher…" aria-label="Search" value="{{ search }}" onChange="{{ setSearch }}">

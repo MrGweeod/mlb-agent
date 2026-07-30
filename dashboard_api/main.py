@@ -24,6 +24,8 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from dashboard_api.shape import build_dashboard
+from dashboard_api.standings import get_standings
+from dashboard_api.leaderboards import get_hitting_leaderboard, get_pitching_leaderboard
 from dashboard_api.db import get_legs_by_odd_ids, save_dashboard_parlay
 from src.utils.odds_math import american_to_decimal
 
@@ -89,6 +91,61 @@ def force_refresh(request: Request):
         raise HTTPException(status_code=401, detail="Unauthorized")
     _cache.update(date=None, data=None, fetched_at=0.0)
     return get_dashboard(request)
+
+
+_standings_cache: dict = {"as_of_date": None, "data": None, "fetched_at": 0.0}
+
+
+@app.get("/api/standings")
+def api_standings(request: Request):
+    if not _check_auth(request):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    now = time.time()
+    # Standings only change once/day (daily_reference_refresh.py) — a longer,
+    # date-keyed cache is safe and avoids a DB round trip on every page load.
+    if _standings_cache["data"] is not None and (now - _standings_cache["fetched_at"]) < _CACHE_TTL_SECONDS:
+        return _standings_cache["data"]
+    try:
+        data = get_standings()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"standings query failed: {e}")
+    _standings_cache.update(as_of_date=data.get("as_of_date"), data=data, fetched_at=now)
+    return data
+
+
+_leaderboard_cache: dict = {"hitting": None, "pitching": None, "fetched_at": 0.0}
+
+
+@app.get("/api/leaderboards/hitting")
+def api_leaderboard_hitting(request: Request):
+    if not _check_auth(request):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    now = time.time()
+    if _leaderboard_cache["hitting"] is not None and (now - _leaderboard_cache["fetched_at"]) < _CACHE_TTL_SECONDS:
+        return _leaderboard_cache["hitting"]
+    try:
+        data = get_hitting_leaderboard(date.today().year)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"hitting leaderboard query failed: {e}")
+    _leaderboard_cache["hitting"] = data
+    _leaderboard_cache["fetched_at"] = now
+    return data
+
+
+@app.get("/api/leaderboards/pitching")
+def api_leaderboard_pitching(request: Request):
+    if not _check_auth(request):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    now = time.time()
+    if _leaderboard_cache["pitching"] is not None and (now - _leaderboard_cache["fetched_at"]) < _CACHE_TTL_SECONDS:
+        return _leaderboard_cache["pitching"]
+    try:
+        data = get_pitching_leaderboard(date.today().year)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"pitching leaderboard query failed: {e}")
+    _leaderboard_cache["pitching"] = data
+    _leaderboard_cache["fetched_at"] = now
+    return data
 
 
 @app.get("/health")
