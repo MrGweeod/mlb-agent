@@ -19,6 +19,7 @@ import datetime
 import statsapi
 
 from src.apis.mlb_stats import get_schedule
+from src.utils.net import call_with_timeout
 from src.apis.pitcher_stats import get_pitcher_ranks, get_starter_ranks_for_today
 from src.engine import enriched_scorer
 from src.engine.enriched_scorer import (
@@ -122,7 +123,13 @@ def _build_team_maps() -> tuple[dict, dict]:
     """
     team_id_to_abbr: dict[int, str] = {}
     try:
-        for t in statsapi.get("teams", {"sportId": 1}).get("teams", []):
+        data = call_with_timeout(
+            statsapi.get, "teams", {"sportId": 1},
+            timeout=15, label="statsapi.get(teams)",
+        )
+        if data is None:
+            raise RuntimeError("statsapi.get(teams) timed out or failed")
+        for t in data.get("teams", []):
             team_id_to_abbr[t["id"]] = t["abbreviation"]
     except Exception as e:
         print(f"[ENRICHED PIPELINE] Failed to load team map: {e}")

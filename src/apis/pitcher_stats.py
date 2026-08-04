@@ -11,6 +11,11 @@ import time
 
 import statsapi
 
+from src.utils.net import call_with_timeout
+
+_STATSAPI_TIMEOUT = 15          # seconds per statsapi call
+_RANKS_LOOP_DEADLINE = 90       # seconds — overall cap on the pitcher-ranks fetch loop
+
 # ── In-memory cache ───────────────────────────────────────────────────────────
 
 _ranks_cache: dict[int, dict] = {}          # season → ranks dict
@@ -41,9 +46,14 @@ def get_pitcher_stats(pitcher_id: int, season: int) -> dict | None:
         {"era": 2.85, "k9": 11.2, "whip": 1.05} or None on failure.
     """
     try:
-        data = statsapi.player_stat_data(
-            pitcher_id, group="pitching", type="season", sportId=1
+        data = call_with_timeout(
+            statsapi.player_stat_data,
+            pitcher_id, group="pitching", type="season", sportId=1,
+            timeout=_STATSAPI_TIMEOUT,
+            label=f"player_stat_data(pitcher={pitcher_id})",
         )
+        if data is None:
+            return None
         stats_list = data.get("stats", [])
         if not stats_list:
             return None
@@ -79,23 +89,32 @@ def get_pitcher_ranks(season: int) -> dict:
         return _ranks_cache[season]
 
     print(f"  [pitcher_stats] Fetching pitcher ranks for {season}...")
-    try:
-        # Fetch all pitchers' season stats via the team roster approach
-        # statsapi.get with season stats endpoint
-        data = statsapi.get(
-            "sports_players",
-            {"season": season, "gameType": "R", "sportId": 1},
-        )
-        players = data.get("people", [])
-    except Exception as e:
-        print(f"  [pitcher_stats] Error fetching players: {e}")
+    # Fetch all pitchers' season stats via the team roster approach
+    # statsapi.get with season stats endpoint
+    data = call_with_timeout(
+        statsapi.get,
+        "sports_players", {"season": season, "gameType": "R", "sportId": 1},
+        timeout=_STATSAPI_TIMEOUT,
+        label="statsapi.get(sports_players)",
+    )
+    if data is None:
         _ranks_cache[season] = {}
         _ranks_cache_ts[season] = now
         return {}
+    players = data.get("people", [])
 
     pitcher_data: list[dict] = []
+    loop_start = time.time()
 
     for p in players:
+        if time.time() - loop_start > _RANKS_LOOP_DEADLINE:
+            print(
+                f"  [pitcher_stats] Ranks loop hit {_RANKS_LOOP_DEADLINE}s deadline "
+                f"after {len(pitcher_data)}/{len(players)} pitchers — continuing with partial ranks",
+                flush=True,
+            )
+            break
+
         pos = p.get("primaryPosition", {}).get("abbreviation", "")
         if pos not in {"P", "SP", "RP", "TWP"}:
             continue
@@ -107,14 +126,16 @@ def get_pitcher_ranks(season: int) -> dict:
             continue
         # Approximate IP from K9 — we need actual IP for the 50-IP filter.
         # Re-fetch raw stats for IP.
-        try:
-            raw = statsapi.player_stat_data(
-                pid, group="pitching", type="season", sportId=1
-            )
-            raw_s = (raw.get("stats") or [{}])[0].get("stats", {})
-            ip = _parse_ip(raw_s.get("inningsPitched", "0"))
-        except Exception:
+        raw = call_with_timeout(
+            statsapi.player_stat_data,
+            pid, group="pitching", type="season", sportId=1,
+            timeout=_STATSAPI_TIMEOUT,
+            label=f"player_stat_data(pitcher={pid})",
+        )
+        if raw is None:
             continue
+        raw_s = (raw.get("stats") or [{}])[0].get("stats", {})
+        ip = _parse_ip(raw_s.get("inningsPitched", "0"))
         starts = int(raw_s.get("gamesStarted") or 0)
         if starts < 3:
             continue

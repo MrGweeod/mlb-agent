@@ -32,12 +32,18 @@ import datetime
 import statsapi
 
 from src.apis.matchup import get_pitcher_matchup_profile
+from src.utils.net import call_with_timeout
 
 
 def get_game_start_time(game_pk: int) -> str | None:
     """Fetch game start time from MLB-StatsAPI. Returns UTC ISO timestamp string."""
     try:
-        game_data = statsapi.get('game', {'gamePk': game_pk})
+        game_data = call_with_timeout(
+            statsapi.get, 'game', {'gamePk': game_pk},
+            timeout=15, label=f"statsapi.get(game, gamePk={game_pk})",
+        )
+        if game_data is None:
+            return None
         game_datetime = game_data['gameData']['datetime']['dateTime']
         utc_time = datetime.datetime.fromisoformat(game_datetime.replace('Z', '+00:00'))
         return utc_time.isoformat()
@@ -51,7 +57,10 @@ def get_pitcher_handedness(player_id: int, position: str) -> str | None:
     if position not in ('SP', 'RP', 'P'):
         return None
     try:
-        player_data = statsapi.lookup_player(player_id)
+        player_data = call_with_timeout(
+            statsapi.lookup_player, player_id,
+            timeout=15, label=f"statsapi.lookup_player({player_id})",
+        )
         if player_data:
             pitch_hand = player_data[0].get('pitchHand', {}).get('code')
             if pitch_hand == 'R':
@@ -176,7 +185,10 @@ def enrich_legs(
     for pid in sorted(pid for pid in unique_pitcher_ids if pid is not None):
         profiles[pid] = get_pitcher_matchup_profile(pid, season)
         try:
-            data = statsapi.lookup_player(pid)
+            data = call_with_timeout(
+                statsapi.lookup_player, pid,
+                timeout=15, label=f"statsapi.lookup_player({pid})",
+            )
             pitcher_names[pid] = data[0]["fullName"] if data else None
         except Exception:
             pitcher_names[pid] = None

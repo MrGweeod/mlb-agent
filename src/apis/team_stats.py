@@ -10,6 +10,10 @@ import time
 
 import statsapi
 
+from src.utils.net import call_with_timeout
+
+_STATSAPI_TIMEOUT = 15  # seconds per statsapi call
+
 # ── In-memory cache ───────────────────────────────────────────────────────────
 
 _ranks_cache: dict[int, dict] = {}        # season → ranks dict
@@ -27,7 +31,8 @@ def get_team_offensive_stats(team_id: int, season: int) -> dict | None:
         {"k_pct": 25.8, "batting_avg": 0.230, "runs_per_game": 3.8} or None.
     """
     try:
-        data = statsapi.get(
+        data = call_with_timeout(
+            statsapi.get,
             "team_stats",
             {
                 "teamId": team_id,
@@ -36,7 +41,11 @@ def get_team_offensive_stats(team_id: int, season: int) -> dict | None:
                 "group": "hitting",
                 "sportId": 1,
             },
+            timeout=_STATSAPI_TIMEOUT,
+            label=f"statsapi.get(team_stats, team={team_id})",
         )
+        if data is None:
+            return None
         splits = (
             data.get("stats", [{}])[0]
                 .get("splits", [])
@@ -84,14 +93,17 @@ def get_team_offensive_ranks(season: int) -> dict:
         return _ranks_cache[season]
 
     print(f"  [team_stats] Fetching team offensive ranks for {season}...")
-    try:
-        data = statsapi.get("teams", {"sportId": 1, "season": season})
-        teams = data.get("teams", [])
-    except Exception as e:
-        print(f"  [team_stats] Error fetching teams: {e}")
+    data = call_with_timeout(
+        statsapi.get,
+        "teams", {"sportId": 1, "season": season},
+        timeout=_STATSAPI_TIMEOUT,
+        label="statsapi.get(teams)",
+    )
+    if data is None:
         _ranks_cache[season] = {}
         _ranks_cache_ts[season] = now
         return {}
+    teams = data.get("teams", [])
 
     team_data: list[dict] = []
     for t in teams:

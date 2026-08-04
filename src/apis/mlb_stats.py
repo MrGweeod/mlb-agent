@@ -22,7 +22,11 @@ import time
 import requests
 import statsapi
 
+from src.utils.net import call_with_timeout
+
 BASE_URL = "https://statsapi.mlb.com/api/v1"
+
+_STATSAPI_TIMEOUT = 15  # seconds per statsapi.* call (that library has no built-in timeout)
 
 # ── In-memory cache ──────────────────────────────────────────────────────────
 
@@ -78,7 +82,14 @@ def get_schedule(date: str) -> list[dict]:
         return cached
 
     try:
-        games = statsapi.schedule(date=date, sportId=1)
+        games = call_with_timeout(
+            statsapi.schedule,
+            date=date, sportId=1,
+            timeout=_STATSAPI_TIMEOUT,
+            label=f"statsapi.schedule({date})",
+        )
+        if games is None:
+            return []
         # Filter to regular season and postseason games only
         games = [g for g in games if g.get("game_type") in ("R", "F", "D", "L", "W", "C")]
         _set(key, games)
@@ -107,7 +118,14 @@ def get_standings(season: int) -> dict[int, str]:
         return cached
 
     try:
-        divisions = statsapi.standings_data(leagueId="103,104", season=season)
+        divisions = call_with_timeout(
+            statsapi.standings_data,
+            leagueId="103,104", season=season,
+            timeout=_STATSAPI_TIMEOUT,
+            label=f"statsapi.standings_data({season})",
+        )
+        if divisions is None:
+            return {}
         records: dict[int, str] = {}
         for div in divisions.values():
             for t in div.get("teams", []):
@@ -275,7 +293,14 @@ def get_box_score(game_pk: int) -> dict | None:
         )
         is_final = state in ("Final",)
 
-        data = statsapi.boxscore_data(game_pk)
+        data = call_with_timeout(
+            statsapi.boxscore_data,
+            game_pk,
+            timeout=_STATSAPI_TIMEOUT,
+            label=f"statsapi.boxscore_data({game_pk})",
+        )
+        if data is None:
+            return None
         _set(key, data, final=is_final)
         return data
     except Exception as e:
@@ -314,7 +339,21 @@ def get_lineup(game_pk: int) -> dict:
         return cached  # frozen once both lineups are confirmed
 
     try:
-        result = statsapi.get("game", params={"gamePk": game_pk})
+        result = call_with_timeout(
+            statsapi.get,
+            "game", params={"gamePk": game_pk},
+            timeout=_STATSAPI_TIMEOUT,
+            label=f"statsapi.get(game, gamePk={game_pk})",
+        )
+        if result is None:
+            return {
+                "home_batting_order": [],
+                "away_batting_order": [],
+                "home_pitcher": {},
+                "away_pitcher": {},
+                "status": "unknown",
+                "confirmed": False,
+            }
         game_data = result.get("gameData", {})
         live_data = result.get("liveData", {})
 

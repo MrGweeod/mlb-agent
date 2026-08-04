@@ -21,6 +21,7 @@ from typing import Any
 import statsapi
 
 from src.utils.db import get_conn
+from src.utils.net import call_with_timeout
 
 
 # ABR aliases at the API boundary (per project architecture rule)
@@ -133,7 +134,12 @@ def run_lineup_check(row: dict) -> str:
 
     for game_pk in game_pks:
         try:
-            resp = statsapi.get("game", {"gamePk": game_pk, "hydrate": "lineups"})
+            resp = call_with_timeout(
+                statsapi.get, "game", {"gamePk": game_pk, "hydrate": "lineups"},
+                timeout=15, label=f"statsapi.get(game, gamePk={game_pk})",
+            )
+            if resp is None:
+                raise RuntimeError("statsapi.get(game) timed out or failed")
             boxscore = resp.get("liveData", {}).get("boxscore", {})
             teams    = boxscore.get("teams", {})
 

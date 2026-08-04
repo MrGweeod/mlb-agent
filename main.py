@@ -16,6 +16,7 @@ Called by:
 """
 from __future__ import annotations
 
+import time
 from datetime import date, datetime, timedelta, timezone
 
 import statsapi
@@ -37,6 +38,7 @@ from src.engine.parlay_builder import build_parlays, _tier_params
 from src.pipelines.enrich_legs import enrich_legs
 from src.pipelines.trend_analysis import get_trend_signal
 from src.utils.db import log_scored_legs, log_training_data_legs, save_parlay_recommendation, save_parlay_recommendations_v2, set_player_position
+from src.utils.net import call_with_timeout
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -130,11 +132,15 @@ def _load_team_abbr_map() -> dict[int, str]:
     """
     if _team_abbr_cache:
         return _team_abbr_cache
-    try:
-        for t in statsapi.get("teams", {"sportId": 1}).get("teams", []):
+    data = call_with_timeout(
+        statsapi.get,
+        "teams", {"sportId": 1},
+        timeout=15,
+        label="statsapi.get(teams)",
+    )
+    if data is not None:
+        for t in data.get("teams", []):
             _team_abbr_cache[t["id"]] = t["abbreviation"]
-    except Exception as e:
-        print(f"  [main] statsapi.get(teams) error: {e}")
     return _team_abbr_cache
 
 
@@ -147,8 +153,12 @@ def _lookup_player_id(name: str) -> int | None:
     """
     if name in _player_id_cache:
         return _player_id_cache[name]
+    matches = call_with_timeout(
+        statsapi.lookup_player, name,
+        timeout=15,
+        label=f"statsapi.lookup_player({name})",
+    )
     try:
-        matches = statsapi.lookup_player(name)
         pid = int(matches[0]["id"]) if matches else None
     except Exception:
         pid = None
@@ -480,13 +490,32 @@ def _attach_pitcher_rank_signals(
         leg["opponent_rpg_rank"]   = opp_ranks.get("rpg_rank")
 
 
+_TREND_SIGNALS_DEADLINE = 90  # seconds — overall cap on the trend-signals loop
+
+
 def _attach_trend_signals(legs: list[dict], season: int) -> None:
     """
     Compute trend signals for each leg and merge them into the leg dict in-place.
 
     Trend signals are sourced from the player's game log (cached 24h).
+
+    get_batter_game_log() already bounds each individual call to 15s
+    (src/apis/mlb_stats.py), but this loop still has no bound on its own —
+    a run of N legs that each hit their per-call timeout could still take
+    N*15s. _TREND_SIGNALS_DEADLINE caps the whole loop so a bad run fails
+    loudly and continues with partial trend signals rather than stalling
+    the pipeline indefinitely.
     """
+    loop_start = time.time()
     for i, leg in enumerate(legs):
+        if time.time() - loop_start > _TREND_SIGNALS_DEADLINE:
+            print(
+                f"  [trend_signals] Loop hit {_TREND_SIGNALS_DEADLINE}s deadline "
+                f"after {i}/{len(legs)} legs — continuing with partial trend signals",
+                flush=True,
+            )
+            break
+
         player_id = leg.get("player_id")
         stat      = leg.get("stat", "")
         line      = leg.get("best_line")
@@ -499,9 +528,9 @@ def _attach_trend_signals(legs: list[dict], season: int) -> None:
         if is_pitcher_k:
             continue
 
-        print(f"  [trend_debug] ({i+1}/{len(legs)}) fetching game log player={player_id}...", flush=True)
+        if i % 25 == 0:
+            print(f"  [trend_signals] ({i+1}/{len(legs)}) fetching game logs...", flush=True)
         game_log = get_batter_game_log(int(player_id), season)
-        print(f"  [trend_debug] ({i+1}/{len(legs)}) got {len(game_log)} game(s) player={player_id}", flush=True)
         if not game_log:
             continue
 
@@ -1379,7 +1408,10 @@ def run_targeted_pipeline(buffer_minutes: int = 15, source: str = "auto") -> Non
             # Slow path — statsapi (only for genuinely new players not in DB)
             if name not in _statsapi_id_cache:
                 try:
-                    results = statsapi.lookup_player(name)
+                    results = call_with_timeout(
+                        statsapi.lookup_player, name,
+                        timeout=15, label=f"statsapi.lookup_player({name})",
+                    )
                     _statsapi_id_cache[name] = results[0]["id"] if results else None
                 except Exception as _e:
                     _statsapi_id_cache[name] = None
@@ -1436,7 +1468,12 @@ def run_targeted_pipeline(buffer_minutes: int = 15, source: str = "auto") -> Non
     scratched_count = 0
     for game_pk, game_legs in by_game.items():
         try:
-            boxscore = _statsapi.boxscore_data(game_pk)
+            boxscore = call_with_timeout(
+                _statsapi.boxscore_data, game_pk,
+                timeout=15, label=f"statsapi.boxscore_data({game_pk})",
+            )
+            if boxscore is None:
+                raise RuntimeError("statsapi.boxscore_data timed out or failed")
             starters: set[int] = set()
             for side in ("away", "home"):
                 team_data = boxscore.get(side, {})
