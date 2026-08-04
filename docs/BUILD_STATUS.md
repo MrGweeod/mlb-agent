@@ -1,7 +1,7 @@
 # MLB Parlay Agent — Build Status
-**Last Updated:** August 4, 2026 (Session 25 — fixed the silent pipeline stall that had blocked ALL parlay recommendations, production and shadow both, since 2026-07-23; confirmed deployed and verified live)
+**Last Updated:** August 4, 2026 (Session 26 — fixed the parlay builder's zero-recovery-on-missed-floor bug; live-verified writing 5 real parlays to the database)
 
-## Overall System Status: ✅ OPERATIONAL — PARLAY PIPELINE STALL FIXED AND VERIFIED LIVE (Session 25)
+## Overall System Status: ✅ OPERATIONAL — PIPELINE STALL (Session 25) AND PARLAY-BUILDER FLOOR-RECOVERY (Session 26) FIXES BOTH DEPLOYED AND LIVE-VERIFIED
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────┐
@@ -46,10 +46,22 @@
 │ Player diversity (cross-parlay): ✅ MAX 2 PARLAY APPEARANCES/PLAYER/DAY      │
 │                                    (unchanged)                               │
 │ Odds cap (per-leg pool):         ✅ -250 TO +150 (unchanged)                 │
-│ Regression test coverage:        ✅ 14 new tests (tests/test_bug_fixes.py)   │
-│                                    committed Session 21, covering leg-count  │
-│                                    boundary behavior alongside the other two │
-│                                    fixes. 76/76 total tests passing.         │
+│ Zero-recovery-on-missed-floor:  ✅ FIXED Session 26 — greedy top-4-by-score  │
+│                                    pick checked the floor only after 4 legs  │
+│                                    were locked in, and gave up entirely (all │
+│                                    remaining parlay slots too) on a miss.    │
+│                                    Reproduced live: +337/+342/+332 misses,   │
+│                                    0 parlays despite 30-40 eligible legs.    │
+│                                    Fixed via bounded single-leg-swap search  │
+│                                    (_attempt_swap_recovery) — see            │
+│                                    ARCHITECTURE_DECISIONS.md §38.            │
+│ Regression test coverage:        ✅ 14 tests (test_bug_fixes.py, Session 21) │
+│                                    + 10 new (test_parlay_builder.py,         │
+│                                    Session 26) covering clean-pass,          │
+│                                    swap-recovery (incl. the real "good odds, │
+│                                    low score" gap found via live-data        │
+│                                    testing), constraint rejection, and the   │
+│                                    genuine-failure/no-hang case.             │
 │ Live-data performance validation:⚠️  Revert IS deployed (confirmed merged   │
 │                                    Session 24 — corrects this doc's prior    │
 │                                    "pending deploy" status). Whether it     │
@@ -410,7 +422,9 @@
 │ Database Logging:               ✅ STABLE                                     │
 │ Web UI:                         ✅ FUNCTIONAL (+ new /manual route)          │
 │ Deployment:                     ✅ LIVE (Railway auto-deploy)                │
-│                                    Latest confirmed commit: cf23e94 (Aug 4)  │
+│                                    Latest confirmed commit: e094a0f (Aug 4)  │
+│                                    — Session 26's parlay-builder floor-      │
+│                                    recovery fix.                             │
 │                                    — the Session 25 pipeline-stall fix.      │
 │                                    CORRECTION to this doc's prior entry:     │
 │                                    Sessions 22/23/24's combined work (which  │
@@ -458,6 +472,18 @@
 ---
 
 ## Recent Deployments
+
+### 🔧 August 4, 2026 (Session 26): Parlay Builder Zero-Recovery Bug — Fixed — ✅ DEPLOYED, VERIFIED LIVE (5 real parlays written)
+
+**Work.** Immediately following Session 25's stall fix, the pipeline ran cleanly but still produced 0 parlays every trigger — top-4-by-score picks kept missing the +400 floor by a small margin and `build_parlays()` gave up entirely (all remaining parlay slots too) rather than trying an alternative combination. Full detail: `ARCHITECTURE_DECISIONS.md` §38, `SESSION_HANDOFF.md`'s Session 26 entry.
+
+**Fix.** New `_attempt_swap_recovery()` in `src/engine/parlay_builder.py` — when the top-4 pick misses the floor, tries single-leg swaps against eligible alternatives in the pool (respecting all existing constraints), keeping the floor-clearing swap with the highest total `composite_score`. Bounded, never unbounded; each outcome logged explicitly.
+
+**A real gap found via live-data testing before trusting the first version.** The initial implementation capped swap candidates to the next 10 best-*scored* alternatives (the task's own suggested shape). A live trigger on this version still produced 0 parlays. Pulling today's actual eligible pool and checking by hand found a real floor-clearing combination (+725) that ranked 18th-33rd by score — well outside a top-10 cutoff, since odds and composite_score aren't correlated. Widened `SWAP_CANDIDATE_LIMIT` from 10 to 200 (a safety cap, not a score cutoff) before shipping.
+
+**Verified against real data twice before calling it done.** First, replayed today's actual 39-leg pool (pulled from `mlb_scored_legs`) through the fixed `build_parlays()` locally — 5 valid parlays, all recovered via swap. Second, triggered the real `run_morning_pipeline()` on the deployed fix and confirmed via direct SQL query: **5 parlays written to `mlb_parlay_recommendations_v2`/`mlb_parlay_legs_v2`** for `run_date = 2026-08-04` (+450, +402, +421, +413, +427), hitting the top of the 3-5 target.
+
+**tests/test_parlay_builder.py** (new, 10 tests): clean top-4 pass unchanged, swap recovery picks the highest-total-score valid swap, each constraint correctly rejects a candidate, genuinely unrecoverable pool reports failure cleanly without hanging, and a regression test locking in the good-odds/low-score gap found above.
 
 ### 🔧 August 4, 2026 (Session 25): Silent Parlay-Pipeline Stall — Root-Caused and Fixed — ✅ DEPLOYED, VERIFIED LIVE
 
@@ -656,7 +682,7 @@
 
 | Item | File | Priority |
 |---|---|---|
-| Watch the next real scheduled run (9 AM/5:30 PM ET) confirm parlays get built once odds clear +400 again | — (verification only) | Medium — Session 25's fix is confirmed live and non-hanging; today's 0-parlay outcome was a separate, legitimate odds-threshold miss (+337/+342 vs +400), not the stall bug, but hasn't yet been observed producing a saved recommendation post-fix |
+| Watch the next real scheduled run (9 AM/5:30 PM ET, not a manual trigger) confirm parlays get built and saved end-to-end | — (verification only) | Medium — Session 26's manual trigger already wrote 5 real parlays to the DB, confirming the fix works; only the fully-unattended scheduled-trigger path remains unobserved |
 | Re-run coverage-vs-matchup analysis | analysis only, target 2026-08-06 | **High — Session 24, needs `mlb_prop_legs_history` to accumulate ~1 week of data first** |
 | Watch first live 9 AM prop-line capture run | — (verification only) | **High — Session 23, real `run_pipeline()` wiring not yet exercised live** |
 | Confirm SGO tier downgrade lands cleanly 8/1 | — (verification only) | **High — new Session 23, deadline 2026-08-01** |
@@ -681,6 +707,6 @@
 
 ---
 
-**Build Status:** ✅ HEALTHY — the 12-day silent parlay-pipeline stall (production and shadow both, since 2026-07-23) is root-caused, fixed, deployed, and confirmed live via two forced full-pipeline runs (Session 25). Sessions 22, 23, and 24's work was already live as of commit `1db8918` (2026-07-31) — this doc's prior "about to be committed together" status was stale and is corrected above.
-**Last Deployment:** August 4, 2026 (`cf23e94`, Session 25's pipeline-stall fix) — confirmed live on both `mlb-agent` and `dashboard-api` Railway services.
-**Next Review:** Watch the next real scheduled run (9 AM/5:30 PM ET) produce a saved recommendation once the odds pool clears +400 again, closing the loop on today's unrelated 0-parlay outcome / watch the first live 9 AM prop-line capture run and the 8/1 SGO tier downgrade / re-run the coverage-vs-matchup analysis 2026-08-06 / decide whether to build dashboard step 4 next or return to the remaining Session-21-era queue (confirm lineup_consistency filter via Railway logs, watch leg-cap-revert live EV, pitcher ERA rebuild, manual-pick end-to-end test — all carried, now behind several sessions' worth of newer work)
+**Build Status:** ✅ HEALTHY — both the 12-day silent parlay-pipeline stall (Session 25) and the parlay builder's zero-recovery-on-missed-floor bug (Session 26) are root-caused, fixed, deployed, and confirmed live. Session 26's live trigger wrote 5 real parlays to the database, confirmed via direct SQL query. Sessions 22, 23, and 24's work was already live as of commit `1db8918` (2026-07-31) — this doc's prior "about to be committed together" status was stale and is corrected above.
+**Last Deployment:** August 4, 2026 (`e094a0f`, Session 26's parlay-builder floor-recovery fix) — confirmed live on both `mlb-agent` and `dashboard-api` Railway services.
+**Next Review:** Watch the next real scheduled run (9 AM/5:30 PM ET, not a manual trigger) confirm parlays get built and saved end-to-end without intervention — the one verification step neither Session 25 nor 26 could perform directly / watch the first live 9 AM prop-line capture run and the 8/1 SGO tier downgrade / re-run the coverage-vs-matchup analysis 2026-08-06 / decide whether to build dashboard step 4 next or return to the remaining Session-21-era queue (confirm lineup_consistency filter via Railway logs, watch leg-cap-revert live EV, pitcher ERA rebuild, manual-pick end-to-end test — all carried, now behind several sessions' worth of newer work)
