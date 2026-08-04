@@ -486,7 +486,7 @@ def _attach_trend_signals(legs: list[dict], season: int) -> None:
 
     Trend signals are sourced from the player's game log (cached 24h).
     """
-    for leg in legs:
+    for i, leg in enumerate(legs):
         player_id = leg.get("player_id")
         stat      = leg.get("stat", "")
         line      = leg.get("best_line")
@@ -499,7 +499,9 @@ def _attach_trend_signals(legs: list[dict], season: int) -> None:
         if is_pitcher_k:
             continue
 
+        print(f"  [trend_debug] ({i+1}/{len(legs)}) fetching game log player={player_id}...", flush=True)
         game_log = get_batter_game_log(int(player_id), season)
+        print(f"  [trend_debug] ({i+1}/{len(legs)}) got {len(game_log)} game(s) player={player_id}", flush=True)
         if not game_log:
             continue
 
