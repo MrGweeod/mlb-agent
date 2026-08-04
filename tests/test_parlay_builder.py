@@ -128,6 +128,40 @@ class TestSwapRecovery:
         new_ids = {l["player_id"] for l in new_legs}
         assert new_ids == {1, 2, 3, 6}
 
+    def test_recovery_finds_good_odds_leg_ranked_far_down_by_score(self):
+        """
+        Regression for a real gap found via live-data testing on 2026-08-04:
+        an early version of the swap search only considered the next 10
+        best-SCORED alternatives, which missed a real floor-clearing
+        combination because the legs with the best (least negative) odds
+        were ranked 18th-33rd by score, not in the top 10 — composite_score
+        and odds are not correlated. The search must consider the full
+        remaining pool, not just a score-sorted top-N slice.
+        """
+        top4 = [
+            _leg(1, 83, -222, game_pk=101),
+            _leg(2, 79, -244, game_pk=102),
+            _leg(3, 77, -229, game_pk=103),
+            _leg(4, 77, -201, game_pk=104),
+        ]
+        # 20 mediocre-odds "filler" legs ranked between the top 4 and the
+        # real rescue leg, none of which can individually clear the floor
+        # when swapped in (all short odds, same as the top 4).
+        filler = [
+            _leg(10 + i, 76 - i, -220, game_pk=200 + i)
+            for i in range(20)
+        ]
+        # The actual rescue: modest score (67, ranked ~25th overall) but
+        # much longer odds (-123) than everything else in the pool.
+        rescue = _leg(999, 67, -123, game_pk=999)
+
+        pool = top4 + filler + [rescue]
+        result = build_parlays(pool, top_n=1, num_games=15)
+
+        assert len(result) == 1, "a real floor-clearing swap exists deep in the pool and must be found"
+        picked_ids = {l["player_id"] for l in result[0]["legs"]}
+        assert 999 in picked_ids, "the good-odds leg ranked far down by score must be part of the recovered parlay"
+
     def test_swap_candidate_sharing_player_is_rejected(self):
         """A candidate for the same player as an unswapped leg must never be
         accepted, even if it would clear the floor and score higher."""

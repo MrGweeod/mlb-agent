@@ -18,10 +18,12 @@ If MIN_LEGS legs are selected but floor not cleared, continues up to MAX_LEGS.
 
 If the pure top-N-by-score pick doesn't clear +400, a bounded single-leg-swap
 recovery search runs before giving up: each of the selected legs is tried
-against the next best-scored eligible alternatives still in the pool, and the
-best floor-clearing swap (by total composite_score) is kept. Only if no swap
-within that bounded search clears the floor does the parlay slot produce
-nothing. See _attempt_swap_recovery().
+against every other eligible alternative still in the pool (not just the
+next-best-scored ones — odds and composite_score aren't correlated, so a
+good-odds leg can rank far down by score), and the best floor-clearing swap
+(by total composite_score) is kept. Only if no swap within that bounded
+search clears the floor does the parlay slot produce nothing. See
+_attempt_swap_recovery().
 
 Public API: build_parlays(...), build_hybrid_parlays(...), _tier_params(...).
 """
@@ -44,9 +46,19 @@ POOL_MAX_ODDS      = 150
 MAX_LEGS_PER_GAME  = 2
 
 # Floor-recovery: when the top-N-by-score pick misses MIN_PARLAY_ODDS, try
-# swapping each selected leg against at most this many next-best-scored
-# alternatives before accepting a genuine "no valid parlay" outcome.
-SWAP_CANDIDATE_LIMIT = 10
+# swapping each selected leg against at most this many alternatives before
+# accepting a genuine "no valid parlay" outcome.
+#
+# This is NOT restricted to the next-best-scored alternatives — live-data
+# testing on 2026-08-04 found a real floor-clearing combination (+725) that
+# a top-10-by-score-only search missed entirely, because composite_score and
+# odds aren't correlated: the legs with the best (least negative) odds
+# ranked 18th-33rd by score, well outside a top-10 cutoff. Eligible pools in
+# this system run ~30-180 legs, so scanning the full remaining pool per
+# position (4 * ~180 = ~720 checks worst case) stays cheap and bounded —
+# nowhere near "unbounded search" — while actually finding the swap the
+# single-swap search is capable of finding.
+SWAP_CANDIDATE_LIMIT = 200
 
 
 def filter_already_used_players(legs: list, run_date: str) -> list:
@@ -179,10 +191,12 @@ def _attempt_swap_recovery(legs: list, pool: list, min_decimal: float) -> tuple[
     When `legs` (the greedy top-N-by-score pick) doesn't clear `min_decimal`,
     search for a single-leg swap that does.
 
-    For each position in `legs`, tries replacing it with each of the next
-    SWAP_CANDIDATE_LIMIT best-scored eligible alternatives in `pool` not
-    already selected, checking constraints and the odds floor. Bounded to
-    len(legs) * SWAP_CANDIDATE_LIMIT attempts — never an unbounded search.
+    For each position in `legs`, tries replacing it with each eligible
+    alternative in `pool` not already selected (up to SWAP_CANDIDATE_LIMIT of
+    them — a safety cap, not a score-based cutoff, since a good-odds leg can
+    rank far down the pool by score), checking constraints and the odds
+    floor. Bounded to len(legs) * SWAP_CANDIDATE_LIMIT attempts — never an
+    unbounded search.
 
     Score-first intent is preserved even when a swap is required: among all
     swaps that clear the floor, the one with the highest total
