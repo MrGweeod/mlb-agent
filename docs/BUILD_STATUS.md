@@ -1,7 +1,7 @@
 # MLB Parlay Agent — Build Status
-**Last Updated:** July 30, 2026 (Session 24 — opposing_pitcher_id capture fixed forward into mlb_training_data; point-in-time batter/pitcher stat backfill built and run against production; coverage-threshold-vs-matchup-quality analysis completed, re-run scheduled 2026-08-06)
+**Last Updated:** August 4, 2026 (Session 25 — fixed the silent pipeline stall that had blocked ALL parlay recommendations, production and shadow both, since 2026-07-23; confirmed deployed and verified live)
 
-## Overall System Status: ✅ OPERATIONAL — SESSIONS 22+23+24 WORK COMPLETE LOCALLY, ABOUT TO BE COMMITTED
+## Overall System Status: ✅ OPERATIONAL — PARLAY PIPELINE STALL FIXED AND VERIFIED LIVE (Session 25)
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────┐
@@ -356,13 +356,16 @@
 │                                    blocked on anything found this session    │
 ├────────────────────────────────────────────────────────────────────────────────┤
 │ DIAGNOSTIC / LOGGING GAPS                                                       │
-│ mlb_parlay_legs_v2 no new legs: ⚠️  NEW FINDING (Session 24) — zero legs     │
-│                                    for any run_date 2026-07-24 through       │
-│                                    2026-07-30 (last activity 2026-07-23),    │
-│                                    confirmed via direct query. Found while   │
-│                                    building the coverage-vs-matchup          │
-│                                    analysis dataset. NOT root-caused —       │
-│                                    out of scope for that read-only task.     │
+│ mlb_parlay_legs_v2 no new legs: ✅ ROOT-CAUSED AND FIXED (Session 25) —      │
+│                                    the underlying stall (both prod AND       │
+│                                    shadow pipelines, [7/8] Computing trend   │
+│                                    signals... then silent) traced to        │
+│                                    ~20 statsapi.* calls across the pipeline  │
+│                                    with NO network timeout at all — see     │
+│                                    ARCHITECTURE_DECISIONS.md §37. Fixed via  │
+│                                    src/utils/net.py::call_with_timeout(),   │
+│                                    deployed, confirmed live via two forced   │
+│                                    full-pipeline runs completing cleanly.    │
 │ get_totals_props() key prefix:  ⚠️  NEW FINDING (Session 23) — searches for  │
 │                                    'runs-*' keys, live SGO responses use     │
 │                                    'points-*'. Confirmed dormant (never      │
@@ -407,35 +410,47 @@
 │ Database Logging:               ✅ STABLE                                     │
 │ Web UI:                         ✅ FUNCTIONAL (+ new /manual route)          │
 │ Deployment:                     ✅ LIVE (Railway auto-deploy)                │
-│                                    Latest confirmed commit: 65ce276 (Jul 23) │
-│                                    — dashboard_api Phase 1, confirmed via    │
-│                                    Session 24's git-history check to also   │
-│                                    include Session 21's fixes as ancestors   │
-│                                    (62a3c39 etc. — corrects the prior       │
-│                                    "Session 21 pending merge" status).       │
-│                                    Session 22's work (backfill scripts,      │
-│                                    dashboard additions, server.py scheduler  │
-│                                    wiring), Session 23's work (SGO billing   │
-│                                    verification, schedule cut, prop_legs_    │
-│                                    capture.py), AND Session 24's work        │
-│                                    (opp_pitcher_id fix, point-in-time stat   │
-│                                    backfill, coverage-vs-matchup analysis)   │
-│                                    are NOT yet committed or deployed —       │
-│                                    about to be, together.                    │
-│ Base commit at session start:    65ce276 (Jul 23) — confirmed via git log/  │
-│                                    git status at Session 24 start; no       │
-│                                    unpushed local commits, only uncommitted  │
-│                                    working-tree changes from Sessions 22-24  │
-│ pytest:                          ⚠️  NOT installed in this session's local  │
-│                                    .venv, and no local DATABASE_URL exists   │
-│                                    (Supabase creds live in Railway only) —   │
-│                                    Session 24's new test verified via direct │
-│                                    source-inspection instead of a live       │
-│                                    pytest run. Whichever environment ran the │
-│                                    76-passing suite through Session 21 is    │
-│                                    not this one; re-confirm pytest/env setup │
-│                                    before assuming the full suite still runs │
-│                                    clean end-to-end.                         │
+│                                    Latest confirmed commit: cf23e94 (Aug 4)  │
+│                                    — the Session 25 pipeline-stall fix.      │
+│                                    CORRECTION to this doc's prior entry:     │
+│                                    Sessions 22/23/24's combined work (which  │
+│                                    this doc previously described as "about  │
+│                                    to be committed together") was in fact   │
+│                                    already committed and deployed as commit  │
+│                                    1db8918 on 2026-07-31, before Session 25  │
+│                                    began — confirmed via git log at Session  │
+│                                    25's Step 0 check. That status line had   │
+│                                    gone stale without being re-verified —    │
+│                                    same pattern flagged in                   │
+│                                    ARCHITECTURE_DECISIONS.md's Session 24    │
+│                                    entry for a different stale claim; worth  │
+│                                    re-checking git state at the start of     │
+│                                    every session rather than trusting the    │
+│                                    prior doc update, which this project's    │
+│                                    own workflow rules already require.       │
+│                                    Both mlb-agent and dashboard-api Railway  │
+│                                    services confirmed on commit cf23e94.     │
+│ Base commit at session start:    1db8918 (Jul 31) — confirmed via git       │
+│                                    status/git log -1 at Session 25 start     │
+│                                    (clean working tree, matched origin/     │
+│                                    master and Railway's live deployment)     │
+│ pytest:                          ⚠️  Installed into the local .venv this    │
+│                                    session (was missing). Still no local     │
+│                                    DATABASE_URL (Supabase creds live in      │
+│                                    Railway only) — 3 of 6 test files import  │
+│                                    src/utils/db.py, which connects to        │
+│                                    Postgres at module load time, so they     │
+│                                    can't collect locally without it.         │
+│                                    tests/test_time_utils.py (12) +           │
+│                                    tests/test_net_timeout.py (5, new this    │
+│                                    session) = 17/17 ran and passed locally.  │
+│                                    test_bug_fixes.py/test_enriched_scorer.py/│
+│                                    test_lineup_confirmation.py NOT verified   │
+│                                    this session — needs a DATABASE_URL to    │
+│                                    even collect. Whichever environment ran   │
+│                                    the 76-passing suite through Session 21   │
+│                                    is not this one; re-confirm before        │
+│                                    assuming the full suite still runs clean. │
 │ sklearn Version Warning:        ⚠️  1.7.2→1.8.0 mismatch (non-fatal, carried)│
 └────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -444,7 +459,21 @@
 
 ## Recent Deployments
 
-### 🔧 July 30, 2026 (Session 24): Opposing-Pitcher Capture Fixed Forward + Point-in-Time Stat Backfill + Coverage-vs-Matchup Analysis — NOT YET DEPLOYED
+### 🔧 August 4, 2026 (Session 25): Silent Parlay-Pipeline Stall — Root-Caused and Fixed — ✅ DEPLOYED, VERIFIED LIVE
+
+**Work.** Both the production and shadow parlay pipelines had written zero new recommendation rows since 2026-07-23 — the exact gap Session 24 had found and flagged but not root-caused (`mlb_parlay_legs_v2`, see that session's entry below). Every affected run logged `[7/8] Computing trend signals...` and then went completely silent — no exception, no further output, no DB write — while `mlb_scored_legs` stayed fully healthy the whole time. Full detail: `ARCHITECTURE_DECISIONS.md` §37, `SESSION_HANDOFF.md`'s Session 25 entry.
+
+**Step 0 — verified local state before trusting anything.** Confirmed the local clone matched `origin/master` and Railway's live deployed commit (`1db8918`, from 2026-07-31) before treating any of Session 24's "not yet deployed" claims as current — they weren't; see the correction note in the Infrastructure table above.
+
+**Investigation — the leading hypothesis was wrong, disproven with live evidence before writing any fix.** The obvious read (the trend-signals loop's sequential `get_batter_game_log()` calls hanging) was tested directly: added flush-forced per-call logging, deployed it, triggered a live run — it processed all 162 legs cleanly in under a second. Tracing forward from where the run actually stopped led to `get_pitcher_ranks()`/`get_team_offensive_ranks()`, which loop over ~245 pitchers/30 teams calling the third-party `statsapi` package. Reading that package's source directly showed its wrapper functions call `requests.get()` with no timeout and, for most of them, no way to pass one in — a defect confirmed present at ~20 call sites across both pipelines, explaining why prod and shadow stalled together (shared code, not two bugs).
+
+**Fix.** New `src/utils/net.py::call_with_timeout()` — runs any call in its own daemon thread with a wall-clock deadline, since most `statsapi` wrappers don't expose a timeout parameter to set directly. Applied at every live-pipeline `statsapi.*` call site (15s each), plus an overall 90s deadline on the three long per-item loops so a worst-case run still fails loudly instead of hanging for up to an hour.
+
+**Verified, not just deployed.** `tests/test_net_timeout.py` (new, 5/5 passing) proves a hanging call is bounded correctly. Deployed to both Railway services, confirmed live via `list-deployments`. Then — rather than wait for the next scheduled 5:30 PM ET run — force-triggered the real `run_morning_pipeline()` (the exact function the scheduler calls) twice via the admin API: both completed all 8/9 steps cleanly in ~3 minutes each, sailing through the step that had hung every single day for 12 days. Zero new parlay rows landed on either verification run, but for an unrelated, confirmed-legitimate reason (best 4-leg combo only reached +337/+342 odds vs. the +400 minimum) — same result pre- and post-fix, so not a symptom of this bug.
+
+**Side notes from this session, not otherwise in scope to fix:** `git push` failed locally on an SSL cert error (`unable to get local issuer certificate`) — same class of issue Session 22 hit and worked around; this session set `git config --global http.sslBackend schannel` (confirmed with the operator first) to use the Windows-native cert store, which resolved it. `pytest` was not installed locally; installed it this session. Local test collection is still blocked for 3 of 6 test files by the lack of a local `DATABASE_URL` (`src/utils/db.py` connects at import time) — not resolved, same gap Session 24 hit.
+
+### 🔧 July 30, 2026 (Session 24): Opposing-Pitcher Capture Fixed Forward + Point-in-Time Stat Backfill + Coverage-vs-Matchup Analysis — ✅ DEPLOYED (corrected Session 25 — see note below; was live as of commit 1db8918, 2026-07-31)
 
 **Work.** Two distinct handoffs the same day: (1) `opposing_pitcher_id` was being silently dropped before `mlb_training_data`'s INSERT (same bug class as Session 21's `lineup_consistency` fix) — fix it forward and build the point-in-time batter/pitcher stat backfill that depends on it; (2) answer the operator's direct question on whether the `composite_score >= 65` coverage-heavy gate is discarding good-matchup, lower-coverage legs. Full detail in `SESSION_HANDOFF.md`'s Session 24 entry.
 
@@ -627,10 +656,9 @@
 
 | Item | File | Priority |
 |---|---|---|
-| Commit and push Sessions 22+23+24's work | `scripts/`, `dashboard_api/`, `src/pipelines/prop_legs_capture.py`, `src/web/server.py`, `main.py`, `src/utils/db.py`, `docs/` | **High — being done now. Daily reference-data refresh, prop-line capture, and the point-in-time stat backfill are all inert until this happens.** |
-| Re-run coverage-vs-matchup analysis | analysis only, target 2026-08-06 | **High — new Session 24, needs `mlb_prop_legs_history` to accumulate ~1 week of data first** |
-| Investigate mlb_parlay_legs_v2 no-new-legs gap since 7/23 | production tables (not yet touched) | **High — new Session 24, found via direct query, not root-caused** |
-| Watch first live 9 AM prop-line capture run | — (verification only) | **High — new Session 23, real `run_pipeline()` wiring not yet exercised live** |
+| Watch the next real scheduled run (9 AM/5:30 PM ET) confirm parlays get built once odds clear +400 again | — (verification only) | Medium — Session 25's fix is confirmed live and non-hanging; today's 0-parlay outcome was a separate, legitimate odds-threshold miss (+337/+342 vs +400), not the stall bug, but hasn't yet been observed producing a saved recommendation post-fix |
+| Re-run coverage-vs-matchup analysis | analysis only, target 2026-08-06 | **High — Session 24, needs `mlb_prop_legs_history` to accumulate ~1 week of data first** |
+| Watch first live 9 AM prop-line capture run | — (verification only) | **High — Session 23, real `run_pipeline()` wiring not yet exercised live** |
 | Confirm SGO tier downgrade lands cleanly 8/1 | — (verification only) | **High — new Session 23, deadline 2026-08-01** |
 | Build Diamond Line dashboard step 4 (drill-down cards) | `dashboard_api/` (new) | Medium — deferred by operator choice Session 22, not blocked |
 | Root-cause the mlb_scored_legs game_pk mismatch | `mlb_scored_legs` (production table, not touched Session 22) | Medium — new Session 22, found via live cross-check, 8/1,320 affected |
@@ -653,6 +681,6 @@
 
 ---
 
-**Build Status:** ✅ HEALTHY — Sessions 22, 23, and 24's work (reference-data backfill, Diamond Line dashboard, SGO billing verification + schedule cut, full prop-line capture, opposing-pitcher/point-in-time-stat backfill, coverage-vs-matchup analysis) validated and ready, about to be committed together. Session 21's fixes are confirmed merged and deployed as of `65ce276` — corrects this doc's own prior "unmerged branch" status, verified via `git merge-base --is-ancestor` this session.
-**Last Deployment:** July 23, 2026 (`65ce276`, dashboard_api Phase 1 — previously undocumented, see Session 22 note in `SESSION_HANDOFF.md`; confirmed this session to also include Session 21's fixes as ancestors) is still the last *deployed* change. Sessions 22, 23, and 24's combined work is committed nowhere yet as of this doc update.
-**Next Review:** Commit and push Sessions 22+23+24's work first thing (nothing daily-refreshes, captures prop lines, or backfills point-in-time stats until this happens) / watch the first live 9 AM capture run and the 8/1 SGO tier downgrade / re-run the coverage-vs-matchup analysis 2026-08-06 / root-cause the mlb_parlay_legs_v2 no-new-legs gap / decide whether to build dashboard step 4 next or return to the remaining Session-21-era queue (confirm lineup_consistency filter via Railway logs, watch leg-cap-revert live EV, pitcher ERA rebuild, manual-pick end-to-end test — all carried, now behind two sessions' worth of newer work)
+**Build Status:** ✅ HEALTHY — the 12-day silent parlay-pipeline stall (production and shadow both, since 2026-07-23) is root-caused, fixed, deployed, and confirmed live via two forced full-pipeline runs (Session 25). Sessions 22, 23, and 24's work was already live as of commit `1db8918` (2026-07-31) — this doc's prior "about to be committed together" status was stale and is corrected above.
+**Last Deployment:** August 4, 2026 (`cf23e94`, Session 25's pipeline-stall fix) — confirmed live on both `mlb-agent` and `dashboard-api` Railway services.
+**Next Review:** Watch the next real scheduled run (9 AM/5:30 PM ET) produce a saved recommendation once the odds pool clears +400 again, closing the loop on today's unrelated 0-parlay outcome / watch the first live 9 AM prop-line capture run and the 8/1 SGO tier downgrade / re-run the coverage-vs-matchup analysis 2026-08-06 / decide whether to build dashboard step 4 next or return to the remaining Session-21-era queue (confirm lineup_consistency filter via Railway logs, watch leg-cap-revert live EV, pitcher ERA rebuild, manual-pick end-to-end test — all carried, now behind several sessions' worth of newer work)
