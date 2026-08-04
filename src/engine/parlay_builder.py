@@ -15,7 +15,13 @@ Constraints:
 Selection: greedy by composite_score (highest first). Walks sorted filtered pool,
 respects constraints, stops as soon as MIN_LEGS selected and combined odds >= +400.
 If MIN_LEGS legs are selected but floor not cleared, continues up to MAX_LEGS.
-If MAX_LEGS reached without clearing floor, the parlay slot produces nothing.
+
+If the pure top-N-by-score pick doesn't clear +400, a bounded single-leg-swap
+recovery search runs before giving up: each of the selected legs is tried
+against the next best-scored eligible alternatives still in the pool, and the
+best floor-clearing swap (by total composite_score) is kept. Only if no swap
+within that bounded search clears the floor does the parlay slot produce
+nothing. See _attempt_swap_recovery().
 
 Public API: build_parlays(...), build_hybrid_parlays(...), _tier_params(...).
 """
@@ -36,6 +42,11 @@ MIN_COV_POOL_UNDER = 65.0  # hits/under gate raised from 40% to 65% (Jun 25, 202
 POOL_MIN_ODDS      = -250
 POOL_MAX_ODDS      = 150
 MAX_LEGS_PER_GAME  = 2
+
+# Floor-recovery: when the top-N-by-score pick misses MIN_PARLAY_ODDS, try
+# swapping each selected leg against at most this many next-best-scored
+# alternatives before accepting a genuine "no valid parlay" outcome.
+SWAP_CANDIDATE_LIMIT = 10
 
 
 def filter_already_used_players(legs: list, run_date: str) -> list:
@@ -126,6 +137,90 @@ def _tier_params(num_games: int) -> dict | None:
         return dict(tier=3)
     else:
         return None
+
+
+def _combined_decimal(legs: list) -> float:
+    """Product of each leg's stamped decimal odds (`_dec`)."""
+    dec = 1.0
+    for l in legs:
+        dec *= l["_dec"]
+    return dec
+
+
+def _leg_fits(candidate: dict, other_legs: list) -> bool:
+    """
+    True if `candidate` can join `other_legs` without violating the max-1-
+    batter-leg-per-player, MAX_LEGS_PER_GAME, or no-duplicate-odd_id
+    constraints — the same rules the greedy selection loop enforces.
+    """
+    odd_id = candidate.get("odd_id")
+    if odd_id is not None and any(l.get("odd_id") == odd_id for l in other_legs):
+        return False
+
+    is_pitcher = candidate.get("position", "") in _PITCHER_POSITIONS
+    if not is_pitcher:
+        pid = candidate.get("player_id") or candidate.get("player_name", "")
+        for l in other_legs:
+            other_is_pitcher = l.get("position", "") in _PITCHER_POSITIONS
+            other_pid = l.get("player_id") or l.get("player_name", "")
+            if not other_is_pitcher and other_pid == pid:
+                return False
+
+    gk = candidate.get("game_pk") or candidate.get("team", "")
+    game_count = sum(1 for l in other_legs if (l.get("game_pk") or l.get("team", "")) == gk)
+    if game_count >= MAX_LEGS_PER_GAME:
+        return False
+
+    return True
+
+
+def _attempt_swap_recovery(legs: list, pool: list, min_decimal: float) -> tuple[list | None, int]:
+    """
+    When `legs` (the greedy top-N-by-score pick) doesn't clear `min_decimal`,
+    search for a single-leg swap that does.
+
+    For each position in `legs`, tries replacing it with each of the next
+    SWAP_CANDIDATE_LIMIT best-scored eligible alternatives in `pool` not
+    already selected, checking constraints and the odds floor. Bounded to
+    len(legs) * SWAP_CANDIDATE_LIMIT attempts — never an unbounded search.
+
+    Score-first intent is preserved even when a swap is required: among all
+    swaps that clear the floor, the one with the highest total
+    composite_score across all 4 legs is returned, not just the first found.
+
+    Returns:
+        (new_legs, attempts) if a valid floor-clearing swap was found,
+        else (None, attempts).
+    """
+    selected_ids = {id(l) for l in legs}
+    alternatives = sorted(
+        (l for l in pool if id(l) not in selected_ids),
+        key=lambda l: l.get("composite_score", 0),
+        reverse=True,
+    )[:SWAP_CANDIDATE_LIMIT]
+
+    best_legs: list | None = None
+    best_score = -1.0
+    attempts = 0
+
+    for pos in range(len(legs)):
+        other_legs = legs[:pos] + legs[pos + 1:]
+
+        for candidate in alternatives:
+            attempts += 1
+            if not _leg_fits(candidate, other_legs):
+                continue
+
+            trial_legs = other_legs + [candidate]
+            if _combined_decimal(trial_legs) < min_decimal:
+                continue
+
+            total_score = sum(l.get("composite_score", 0.0) for l in trial_legs)
+            if total_score > best_score:
+                best_score = total_score
+                best_legs = trial_legs
+
+    return best_legs, attempts
 
 
 def build_parlays(
@@ -250,16 +345,36 @@ def build_parlays(
             if len(legs) >= MIN_LEGS and combined_dec >= MIN_DECIMAL:
                 break
 
+        # ── Floor-recovery: pure top-N-by-score missed +400 — try single-leg
+        # swaps against progressively lower-scored alternatives before giving up ──
+        if len(legs) < MIN_LEGS:
+            recovery_status = f"insufficient pool — only {len(legs)} constraint-eligible leg(s)"
+        elif combined_dec >= MIN_DECIMAL:
+            recovery_status = "clean top-4 pass"
+        else:
+            recovery_status = None  # set below by the swap attempt
+
+        if len(legs) >= MIN_LEGS and combined_dec < MIN_DECIMAL:
+            swapped_legs, swap_attempts = _attempt_swap_recovery(legs, pool_sorted, MIN_DECIMAL)
+            if swapped_legs is not None:
+                legs = swapped_legs
+                combined_dec = _combined_decimal(legs)
+                recovery_status = f"recovered via swap — {swap_attempts} attempt(s)"
+            else:
+                recovery_status = f"no combination found — {swap_attempts} attempt(s)"
+
         # Parlay is valid only if it meets both the leg count and odds floor
         if len(legs) < MIN_LEGS or combined_dec < MIN_DECIMAL:
             odds_val = int((combined_dec - 1) * 100)
             print(
-                f"  [parlay_builder] ⚠  Parlay {rank} failed: "
+                f"  [parlay_builder] ⚠  Parlay {rank} failed ({recovery_status}): "
                 f"{len(legs)} legs, +{odds_val} odds "
                 f"(need >= {MIN_LEGS} legs and >= +{MIN_PARLAY_ODDS}). "
                 f"Stopping at {len(diverse)} parlays."
             )
             break
+
+        print(f"  [parlay_builder] Parlay {rank} selection: {recovery_status}")
 
         odds_val = int((combined_dec - 1) * 100)
         avg_cov  = sum(l["coverage_pct"] for l in legs) / len(legs)
