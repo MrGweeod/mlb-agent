@@ -1,7 +1,7 @@
 # MLB Parlay Agent — Build Status
-**Last Updated:** August 4, 2026 (Session 26 — fixed the parlay builder's zero-recovery-on-missed-floor bug; live-verified writing 5 real parlays to the database)
+**Last Updated:** August 5, 2026 (Session 27 — leg-scoring redesign: composite_score back-tested at AUC 0.48-0.49; shipped evidence-backed fixes per-component (totalBases promoted to live pool, hits/over exposure-weighted ERA, scorer_version instrumentation) rather than wait on full validation for every signal)
 
-## Overall System Status: ✅ OPERATIONAL — PIPELINE STALL (Session 25) AND PARLAY-BUILDER FLOOR-RECOVERY (Session 26) FIXES BOTH DEPLOYED AND LIVE-VERIFIED
+## Overall System Status: ✅ OPERATIONAL — SCORING REDESIGN v2_2026-08-05 DEPLOYED (SESSION 27); LIVE-RUN VERIFICATION PENDING NEXT SCHEDULED TRIGGER
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────┐
@@ -473,6 +473,24 @@
 
 ## Recent Deployments
 
+### 🔧 August 5, 2026 (Session 27): Leg-Scoring Redesign v2_2026-08-05 — ✅ DEPLOYED, LIVE-RUN VERIFICATION PENDING
+
+**Work.** `composite_score` back-tested at AUC 0.48-0.49 (no better than random). Rather than wait for full validation on every component, shipped what's evidence-backed today with `scorer_version` instrumentation as the substitute safety net. Full detail: `ARCHITECTURE_DECISIONS.md` §39, `SESSION_HANDOFF.md`'s Session 27 entry.
+
+**Gate 1 (`main.py`).** hits/over floor 65%→55% (coverage_overall showed ~0 correlation with outcomes at 65% in every test this session). strikeouts/over unchanged at 65% (no evidence either direction). totalBases/over: new sample-size-only gate (games ≥ 5 in `mlb_player_batting_cumulative`, point-in-time) since no coverage_overall has ever been computed for that direction.
+
+**totalBases promoted to the live pool (`main.py`).** Both directions now flow through to the parlay builder — `over` is new to the pipeline entirely; `under` had 5,000+ resolved legs of real history but was hardcoded shadow-only, that restriction removed. On the 2026-08-05 9 AM run, 112/175 scored legs (64%) were totalBases legs structurally barred from parlays — the whitelist, not the coverage gate, was the dominant bottleneck.
+
+**hits/over exposure-weighted ERA/WHIP (`enrich_legs.py`, `simple_scorer.py`).** New `effective_era`/`effective_whip`, blending the opposing starter's raw stat with a league-average fallback weighted by rolling 5-start average innings pitched. Fixes a confirmed-backwards raw-ERA signal (weak-tier starters pulled early, batter faces the bullpen instead) — validated via exposure-split testing (weak+short-outing 52.8% WR vs. weak+goes-deep 60.9%, n=36/23). `hits/over` only; `under` unchanged.
+
+**totalBases/over + strikeouts scoring (`simple_scorer.py`).** totalBases/over scores via percentile rank of `pt_tb_rate` within the day's pool, bypassing every other signal. Strikeout scoring byte-for-byte unchanged (no validated fix exists).
+
+**scorer_version instrumentation.** `'v2_2026-08-05'` stamped on every scored leg and parlay recommendation. Migration (`sql/scorer_v2_2026_08_05_migration.sql`) applied directly via Supabase MCP: `scorer_version`/`pt_tb_rate`/`effective_era`/`effective_whip`/`exposure_weight` added to `mlb_scored_legs`; `scorer_version` added to `mlb_parlay_recommendations_v2`/`mlb_parlay_legs_v2`, with indexes on both for queryability.
+
+**Tested.** 32 new unit tests, 59/59 collectible tests passing (3 pre-existing files can't collect in this sandbox — confirmed identical against baseline via `git stash`, a sandbox `DATABASE_URL` gap, not a regression).
+
+**Deployed, live-run verification pending.** Both Railway services (`mlb-agent`, `dashboard-api`) redeployed `SUCCESS`. Live confirmation of real-run output (totalBases legs in the pool, `effective_era` populated, `scorer_version` on real rows) is queued for the next scheduled trigger — this session's Railway MCP connector redacted `WEB_APP_PASSWORD`, so the admin trigger endpoint couldn't be called directly.
+
 ### 🔧 August 4, 2026 (Session 26): Parlay Builder Zero-Recovery Bug — Fixed — ✅ DEPLOYED, VERIFIED LIVE (5 real parlays written)
 
 **Work.** Immediately following Session 25's stall fix, the pipeline ran cleanly but still produced 0 parlays every trigger — top-4-by-score picks kept missing the +400 floor by a small margin and `build_parlays()` gave up entirely (all remaining parlay slots too) rather than trying an alternative combination. Full detail: `ARCHITECTURE_DECISIONS.md` §38, `SESSION_HANDOFF.md`'s Session 26 entry.
@@ -604,21 +622,23 @@
 | Resolution | ✅ Confirmed via code, ❌ not tested live | No source filter in resolver — should just work |
 | Layout/sticky header | ⚠️ Fix shown, push unconfirmed | Verify Session 19 |
 
-### Scoring Signal Integrity (simple_scorer.py inputs) — AUDITED Session 21
+### Scoring Signal Integrity (simple_scorer.py inputs) — AUDITED Session 21, ERA FIX SHIPPED Session 27
 | Signal | Status | Notes |
 |---|---|---|
 | `lineup_consistency` | ⚠️ Persistence fixed, upstream filter unconfirmed | Was 100% NULL, all season — `db.py` INSERT fix Session 21. Whether the Step 5b filter itself has been executing needs a Railway log check. |
-| Pitcher ERA (hits props) | ❌ Confirmed inverted, not fixed | Same contaminated data source as removed WHIP signal. Rebuild scoped (`ARCHITECTURE_DECISIONS.md` §29), not implemented — still active, unchanged. |
-| K/9-rank (SO/over) | ⚠️ Same source risk, inconclusive evidence | Monitoring only, no action taken |
+| Pitcher ERA (hits/over) | ✅ FIXED Session 27 — exposure-weighted | Was confirmed inverted (Session 21) due to weak-tier starters getting pulled early; now blended with a league-average fallback weighted by rolling 5-start IP (`effective_era`). `hits/under` still uses raw `pitcher_era`, unvalidated for that direction — see `ARCHITECTURE_DECISIONS.md` §39. |
+| K/9-rank (SO/over) | ⚠️ Same source risk, inconclusive evidence | Monitoring only, no action taken — no validated fix as of Session 27 |
 | Streak/consistency gap | ✅ Sample floor added | `MIN_RECENT_GAMES = 5` in `coverage.py`, both hitter and pitcher paths |
+| `pt_tb_rate` percentile (totalBases/over) | ✅ NEW Session 27 — zero production track record | r=0.121 correlation, validated in 5-fold CV (~0.57 AUC) — this is its first live scoring pass, watch results closely |
 
-### Coverage Gates
+### Coverage Gates — REVISED Session 27
 | Prop / Direction | Gate | Ceiling | Status |
 |---|---|---|---|
-| hits/over | 65% floor | ~80% ceiling | ⚠️ Ceiling still pending, reconfirmed Session 18 |
-| SO/over | 65% floor | None | ✅ No ceiling confirmed |
+| hits/over | 55% floor (was 65%, Session 27) | ~80% ceiling | ⚠️ Ceiling still pending, reconfirmed Session 18. Floor lowered — `coverage_overall` showed ~0 correlation with outcomes at 65% |
+| SO/over | 65% floor, unchanged | None | ✅ No ceiling confirmed. No evidence to justify changing the floor either direction |
 | hits/under | 65% floor | None | ⚠️ Very narrow eligible pool (1-3 players/day) — characterized Session 18, not a gate change |
-| TB/under (shadow) | 40% floor | ~75% (tentative) | ⚠️ Promotion analysis stale — rerun under new builder before deciding |
+| totalBases/over | Sample-size only (games ≥ 5), NEW Session 27 | Unknown | 🆕 No coverage_overall gate — never computed for this direction. First live pass, no ceiling data yet |
+| totalBases/under | 40% floor, PROMOTED to live pool Session 27 | ~75% (tentative) | ✅ No longer shadow-only — 5,000+ resolved legs of real history now flow into parlays |
 
 ### Reference Data Schema (mlb_teams, mlb_players, mlb_games, mlb_player_batting_logs/_pitching_logs, mlb_team_standings(+_splits), mlb_player_season_batting_stats/_pitching_stats) — NEW Session 22
 | Component | Status | Notes |
