@@ -788,6 +788,11 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
             leg.get("opp_pitcher_k9_rank")  if leg.get("opp_pitcher_k9_rank")  is not None else leg.get("pitcher_k9_rank"),
             leg.get("opp_pitcher_whip_rank") if leg.get("opp_pitcher_whip_rank") is not None else leg.get("pitcher_whip_rank"),
             leg.get("lineup_consistency"),
+            leg.get("scorer_version"),
+            leg.get("pt_tb_rate"),
+            leg.get("effective_era"),
+            leg.get("effective_whip"),
+            leg.get("exposure_weight"),
         )
         for leg in legs
         if leg.get("stat") and leg.get("player_name") and leg.get("odd_id")
@@ -808,7 +813,8 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
              coverage_overall, coverage_vs_hand, coverage_recent_10,
              pitcher_id, pitcher_name, pitcher_team, pitcher_era, pitcher_k9, pitcher_whip,
              batter_hand, pitcher_vs_batter_hand_era,
-             pitcher_era_rank, pitcher_k9_rank, pitcher_whip_rank, lineup_consistency)
+             pitcher_era_rank, pitcher_k9_rank, pitcher_whip_rank, lineup_consistency,
+             scorer_version, pt_tb_rate, effective_era, effective_whip, exposure_weight)
         VALUES %s
         ON CONFLICT (run_date, odd_id) DO UPDATE
             SET composite_score             = COALESCE(mlb_scored_legs.composite_score,             EXCLUDED.composite_score),
@@ -828,7 +834,12 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
                 pitcher_era_rank            = COALESCE(mlb_scored_legs.pitcher_era_rank,            EXCLUDED.pitcher_era_rank),
                 pitcher_k9_rank             = COALESCE(mlb_scored_legs.pitcher_k9_rank,             EXCLUDED.pitcher_k9_rank),
                 pitcher_whip_rank           = COALESCE(mlb_scored_legs.pitcher_whip_rank,           EXCLUDED.pitcher_whip_rank),
-                lineup_consistency          = COALESCE(mlb_scored_legs.lineup_consistency,          EXCLUDED.lineup_consistency)
+                lineup_consistency          = COALESCE(mlb_scored_legs.lineup_consistency,          EXCLUDED.lineup_consistency),
+                scorer_version              = COALESCE(mlb_scored_legs.scorer_version,              EXCLUDED.scorer_version),
+                pt_tb_rate                  = COALESCE(mlb_scored_legs.pt_tb_rate,                  EXCLUDED.pt_tb_rate),
+                effective_era               = COALESCE(mlb_scored_legs.effective_era,               EXCLUDED.effective_era),
+                effective_whip              = COALESCE(mlb_scored_legs.effective_whip,              EXCLUDED.effective_whip),
+                exposure_weight             = COALESCE(mlb_scored_legs.exposure_weight,             EXCLUDED.exposure_weight)
         """,
         rows,
     )
@@ -1034,6 +1045,67 @@ def set_pitcher_profile(pitcher_id: str, team_id: str, era: float, era_rank: int
     conn.close()
 
 
+def get_batter_point_in_time_totals(player_id: str, before_date: str) -> dict | None:
+    """
+    Return a batter's most recent mlb_player_batting_cumulative row strictly
+    before `before_date` — {"games": float, "total_bases": float}.
+
+    Point-in-time, no lookahead, same discipline as scripts/backfill_point_in_time_stats.py's
+    pt_* fields. Returns None if the player has no cumulative row before that date
+    (e.g. season-opener, or a player with no prior games logged).
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT games, total_bases
+        FROM mlb_player_batting_cumulative
+        WHERE player_id = %s AND game_date < %s
+        ORDER BY game_date DESC
+        LIMIT 1
+        """,
+        (int(player_id), before_date),
+    )
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row or not row.get("games"):
+        return None
+    return {"games": float(row["games"]), "total_bases": float(row["total_bases"] or 0)}
+
+
+def get_starter_rolling_ip(pitcher_id: str, before_date: str, n: int = 5) -> float | None:
+    """
+    Return a starting pitcher's average innings_pitched over their last `n`
+    starts strictly before `before_date`.
+
+    Sourced from mlb_player_pitching_logs (is_starter=true only) joined to
+    mlb_games for game_date. Returns None if the pitcher has no starts logged
+    before that date.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT AVG(recent.ip) AS avg_ip FROM (
+            SELECT p.innings_pitched AS ip
+            FROM mlb_player_pitching_logs p
+            JOIN mlb_games g ON g.game_pk = p.game_pk
+            WHERE p.player_id = %s AND p.is_starter = true AND g.game_date < %s
+            ORDER BY g.game_date DESC
+            LIMIT %s
+        ) recent
+        """,
+        (int(pitcher_id), before_date, n),
+    )
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row or row.get("avg_ip") is None:
+        return None
+    return float(row["avg_ip"])
+
+
 def get_pending_lineup_legs(run_date: str) -> list[dict]:
     """
     Return today's scored legs where lineup_confirmed is FALSE and game_pk is set.
@@ -1046,7 +1118,8 @@ def get_pending_lineup_legs(run_date: str) -> list[dict]:
         """
         SELECT id, game_pk, player_id, player_name, team, stat, line, direction,
                opposing_pitcher_id, coverage_pct, p_over, ev_per_unit,
-               trend_score, opponent_adjustment, position, in_parlay
+               trend_score, opponent_adjustment, position, in_parlay,
+               composite_score, scorer_version
         FROM mlb_scored_legs
         WHERE run_date = %s
           AND lineup_confirmed = FALSE
@@ -1867,13 +1940,16 @@ def save_parlay_recommendations_v2(
         evs = [l.get("ev_per_unit") for l in legs if l.get("ev_per_unit") is not None]
         avg_coverage = round(sum(coverages) / len(coverages), 3) if coverages else None
         avg_ev = round(sum(evs) / len(evs), 4) if evs else None
+        # All legs in one recommendation come from the same score_legs() pass,
+        # so the first leg's scorer_version (if any) represents the whole parlay.
+        scorer_version = next((l.get("scorer_version") for l in legs if l.get("scorer_version")), None)
 
         cur.execute(
             """
             INSERT INTO mlb_parlay_recommendations_v2
                 (run_date, rank, total_odds, avg_coverage, avg_ev, num_legs,
-                 outcome, source, batch_id, edge_percent)
-            VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s)
+                 outcome, source, batch_id, edge_percent, scorer_version)
+            VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s)
             RETURNING id
             """,
             (
@@ -1886,6 +1962,7 @@ def save_parlay_recommendations_v2(
                 source,
                 batch_id,
                 rec.get("edge_pct"),
+                scorer_version,
             ),
         )
         row = cur.fetchone()
@@ -1905,8 +1982,8 @@ def save_parlay_recommendations_v2(
                     (parlay_id, player_id, player_name, team, stat, line,
                      direction, odds, composite_score, opponent_adjustment,
                      coverage, ev, game_id, opposing_pitcher_id,
-                     opposing_pitcher_name, outcome)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending')
+                     opposing_pitcher_name, outcome, scorer_version)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s)
                 """,
                 (
                     parlay_id,
@@ -1924,6 +2001,7 @@ def save_parlay_recommendations_v2(
                     leg.get("game_pk"),
                     leg.get("opposing_pitcher_id"),
                     leg.get("opposing_pitcher_name"),
+                    leg.get("scorer_version"),
                 ),
             )
 

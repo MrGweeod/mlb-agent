@@ -2,15 +2,52 @@
 Simple coverage-based leg scorer using existing database fields.
 No ML model required - uses contextual adjustments on validated coverage data.
 
-Validated prop scope: hits o/u 0.5, strikeouts o 0.5 (hitter only).
+Validated prop scope: hits o/u 0.5, strikeouts o 0.5 (hitter only),
+totalBases o/u 1.5 (over added 2026-08-05 — see scoring redesign notes below).
 
 Signals:
 - coverage_vs_hand (handedness-specific coverage)
 - coverage_overall (fallback if no handedness data)
 - coverage_recent_10 (hot/cold streaks)
-- pitcher_era (for hits props), pitcher_k9 (for hitter SO props)
+- effective_era (for hits/over; exposure-weighted opposing-starter ERA — see
+  src/pipelines/enrich_legs.py), pitcher_k9 (for hitter SO props)
 - lineup_consistency (playing time stability, 0-1 scale)
+- pt_tb_rate percentile rank within the day's pool (totalBases/over only —
+  everything else above is bypassed for this stat/direction; see
+  calculate_composite_score()'s early return)
+
+2026-08-05 scoring redesign confidence levels (see docs/ARCHITECTURE_DECISIONS.md
+for the full evidence writeup):
+  - hits/over effective_era: well-validated, two rounds of live-data testing
+  - totalBases/over pt_tb_rate: real correlation found (r=0.121) but zero
+    production track record — this is the first live scoring pass
+  - strikeouts: no validated improvement exists; scoring unchanged deliberately
 """
+
+SCORER_VERSION = "v2_2026-08-05"
+
+
+def _attach_totalbases_over_percentiles(legs):
+    """
+    Compute each totalBases/over leg's percentile rank of pt_tb_rate within
+    today's eligible pool and stash it as leg["tb_percentile_score"].
+
+    Percentile 1 = lowest pt_tb_rate in the pool, 100 = highest. Legs missing
+    pt_tb_rate (shouldn't happen — the Gate 1 qualification in main.py always
+    sets it for this stat/direction) are left unset and fall back to the
+    neutral default in calculate_composite_score().
+    """
+    pool = [
+        l for l in legs
+        if l.get("stat") == "totalBases" and l.get("direction") == "over"
+        and l.get("pt_tb_rate") is not None
+    ]
+    if not pool:
+        return
+    pool.sort(key=lambda l: l["pt_tb_rate"])
+    n = len(pool)
+    for i, leg in enumerate(pool):
+        leg["tb_percentile_score"] = round(((i + 1) / n) * 100.0, 1)
 
 
 def calculate_composite_score(leg):
@@ -23,6 +60,17 @@ def calculate_composite_score(leg):
     Returns:
         float: composite_score (5-95 range)
     """
+
+    # ============================================
+    # 0. TOTALBASES/OVER: percentile-rank scoring only (2026-08-05)
+    # ============================================
+    # No coverage_overall signal exists for this direction (see main.py Gate 1),
+    # and testing found the hits/over exposure feature has no effect here
+    # (deep 56.8% vs short 58.4%, flat/noisy) — so this bypasses every other
+    # signal below and scores purely on pt_tb_rate's percentile rank within
+    # the day's pool, set by _attach_totalbases_over_percentiles() in score_legs().
+    if leg.get("stat") == "totalBases" and leg.get("direction") == "over":
+        return max(5, min(95, leg.get("tb_percentile_score", 50)))
 
     # ============================================
     # 1. PRIMARY SIGNAL: Handedness-Aware Coverage
@@ -64,9 +112,18 @@ def calculate_composite_score(leg):
     stat      = leg.get("stat", "")
     direction = leg.get("direction", "")
 
-    # For hits props: adjust based on opposing pitcher ERA
+    # For hits props: adjust based on opposing pitcher ERA.
+    # hits/over uses effective_era (exposure-weighted, 2026-08-05 — see
+    # src/pipelines/enrich_legs.py) with a fallback to raw pitcher_era when no
+    # rolling-IP data exists yet (e.g. season-opener). hits/under is unchanged —
+    # the exposure fix was validated for overs only.
     if stat == "hits":
-        pitcher_era = leg.get("pitcher_era")
+        if direction == "over":
+            pitcher_era = leg.get("effective_era")
+            if pitcher_era is None:
+                pitcher_era = leg.get("pitcher_era")
+        else:
+            pitcher_era = leg.get("pitcher_era")
         if pitcher_era is not None:
             if pitcher_era > 5.0:   # Weak pitcher
                 score += 5 if direction == "over" else -5
@@ -134,6 +191,8 @@ def score_legs(legs):
     Returns:
         list: Same legs with composite_score added (mutated in-place)
     """
+    _attach_totalbases_over_percentiles(legs)
+
     for leg in legs:
         base = (
             leg.get("coverage_vs_hand")
@@ -142,6 +201,7 @@ def score_legs(legs):
         )
         score = calculate_composite_score(leg)
         leg["composite_score"] = score
+        leg["scorer_version"] = SCORER_VERSION
         leg["score_breakdown"] = {
             "base_coverage": base,
             "final_score": score,

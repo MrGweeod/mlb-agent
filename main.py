@@ -37,7 +37,11 @@ from src.engine.coverage import calculate_coverage, PROP_STAT_MAP
 from src.engine.parlay_builder import build_parlays, _tier_params
 from src.pipelines.enrich_legs import enrich_legs
 from src.pipelines.trend_analysis import get_trend_signal
-from src.utils.db import log_scored_legs, log_training_data_legs, save_parlay_recommendation, save_parlay_recommendations_v2, set_player_position
+from src.utils.db import (
+    log_scored_legs, log_training_data_legs, save_parlay_recommendation,
+    save_parlay_recommendations_v2, set_player_position,
+    get_batter_point_in_time_totals, get_starter_rolling_ip,
+)
 from src.utils.net import call_with_timeout
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -46,6 +50,12 @@ from src.utils.net import call_with_timeout
 POOL_MIN_COVERAGE = 65.0
 POOL_MIN_ODDS     = -250
 POOL_MAX_ODDS     = 150
+
+# TotalBases/over sample-size gate (2026-08-05 scoring redesign): no
+# coverage_overall has ever been computed for this direction, so it's gated
+# on raw sample size instead — matches the MIN_RECENT_GAMES=5 pattern already
+# used in src/engine/coverage.py.
+TOTAL_BASES_OVER_MIN_GAMES = 5
 
 # Transaction typeCodes that affect player availability.
 # SC = Status Change (IL placements/reinstatements)
@@ -259,20 +269,23 @@ def _find_qualifying_legs(
     team_abbr_to_game_pk: dict[str, int],
     pitcher_id_map: dict[str, int | None],
     season: int,
+    run_date: str,
 ) -> list[dict]:
     """
     Apply the coverage gate to all SGO props and return pool_legs.
 
-    Allowed props: hits o/u 0.5, strikeouts o 0.5 (hitter only).
+    Allowed props: hits o/u 0.5, strikeouts o 0.5 (hitter only), totalBases o/u 1.5.
 
     For each prop:
       1. Reject if not in ALLOWED_PROPS whitelist.
       2. Resolve player name → MLB person ID via statsapi.lookup_player().
       3. Get player's current team from get_player_info(). Skip all pitchers.
       4. Confirm the player's team is on today's schedule.
-      5. Call calculate_coverage().
-      6. Gate 1: coverage_overall >= 65%. Gate 2: hits under >= 70%.
-         Gate 3: odds in [-250, +150].
+      5. Gate 1: hits/over >= 55%, strikeouts/over >= 65%, hits+totalBases/under
+         >= 40%|65% via calculate_coverage(); totalBases/over instead gates on
+         sample size only (games >= 5 in mlb_player_batting_cumulative) since
+         no coverage_overall has ever been computed for that direction.
+      6. Gate 2 (odds): [-250, +150], applied uniformly across all props.
       7. All qualifying legs go into a single flat pool.
 
     Returns pool_qualifying ready for enrichment and parlay building.
@@ -284,7 +297,8 @@ def _find_qualifying_legs(
         ("hits",        "over",  0.5),
         ("hits",        "under", 0.5),
         ("strikeouts",  "over",  0.5),  # hitter K only — pitcher SO removed
-        ("totalBases",  "under", 1.5),  # shadow validation only — never enters production parlays
+        ("totalBases",  "under", 1.5),
+        ("totalBases",  "over",  1.5),
     }
 
     for prop in sgo_props:
@@ -340,44 +354,76 @@ def _find_qualifying_legs(
         if bats:
             set_player_position(str(mlb_player_id), position, bats=bats)
 
-        # Coverage calculation — all props route through calculate_coverage().
-        # Pitcher position is passed so pitcher props use game-log coverage.
-        coverage = calculate_coverage(
-            player_id=mlb_player_id,
-            prop_type=stat,
-            line=line,
-            opposing_pitcher_id=opposing_pitcher_id,
-            season=season,
-            position=position,
-            direction=prop.get("direction", "over"),
-        )
-        if coverage is None:
-            continue  # below seasonal minimum games threshold
+        pt_tb_rate = None
 
-        coverage_overall_raw = coverage.get("coverage_overall") or 0.0
-        coverage_pct = coverage.get("coverage_vs_hand") or coverage_overall_raw
+        if stat == "totalBases" and direction == "over":
+            # Sample-size-only gate (2026-08-05 scoring redesign): coverage_overall
+            # has never been computed for this direction, so don't gate on it.
+            # Still attempt calculate_coverage() below for the informational
+            # coverage_* fields logged to mlb_scored_legs, but qualification
+            # here is driven entirely by point-in-time games played.
+            pt_totals = get_batter_point_in_time_totals(str(mlb_player_id), run_date)
+            if pt_totals is None or pt_totals["games"] < TOTAL_BASES_OVER_MIN_GAMES:
+                continue
+            pt_tb_rate = round(pt_totals["total_bases"] / pt_totals["games"], 4)
 
-        # Gate 1: direction-aware coverage floor
-        # For overs: standard 65% minimum
-        # For unders: 40% minimum — a hitter going hitless 40%+ of games
-        #   corresponds to roughly a .240 batting average, targeting genuine
-        #   weak hitters. The 65% over gate is structurally impossible for
-        #   unders (no healthy MLB hitter is hitless 65%+ of the time).
-        if direction == "over" and coverage_overall_raw < 65.0:
-            continue
-        if direction == "under" and coverage_overall_raw < 40.0:
-            continue
+            coverage = calculate_coverage(
+                player_id=mlb_player_id,
+                prop_type=stat,
+                line=line,
+                opposing_pitcher_id=opposing_pitcher_id,
+                season=season,
+                position=position,
+                direction=direction,
+            )
+            coverage_overall_raw = (coverage or {}).get("coverage_overall") or 0.0
+            coverage_pct = (coverage or {}).get("coverage_vs_hand") or coverage_overall_raw
+            coverage = coverage or {}
+        else:
+            # Coverage calculation — all other props route through calculate_coverage().
+            # Pitcher position is passed so pitcher props use game-log coverage.
+            coverage = calculate_coverage(
+                player_id=mlb_player_id,
+                prop_type=stat,
+                line=line,
+                opposing_pitcher_id=opposing_pitcher_id,
+                season=season,
+                position=position,
+                direction=direction,
+            )
+            if coverage is None:
+                continue  # below seasonal minimum games threshold
 
-        # Gate 2: hits/under requires same 65% floor as overs.
-        # Data analysis (Jun 25, 2026): 411 hits/under legs at 40% gate averaged
-        # 48.8% coverage and 50.1% win rate vs 56.4% breakeven (−6.3pp edge).
-        # The 14 hits/under legs selected into parlays averaged 66.0% coverage
-        # and won at 57.1% — confirming the gate raise keeps the good legs.
-        if stat == "hits" and direction == "under":
-            if coverage_overall_raw < 65.0:
+            coverage_overall_raw = coverage.get("coverage_overall") or 0.0
+            coverage_pct = coverage.get("coverage_vs_hand") or coverage_overall_raw
+
+            # Gate 1: direction-aware coverage floor.
+            # hits/over: 55% (2026-08-05 — coverage_overall showed ~0 correlation
+            #   with hit/miss outcomes in every test this session; the 65% floor
+            #   wasn't selecting for anything outcome-relevant, so it's lowered
+            #   to widen the pool rather than removed outright).
+            # strikeouts/over: unchanged 65% — no validated fix exists for this prop.
+            # unders: 40% minimum — a hitter going hitless 40%+ of games
+            #   corresponds to roughly a .240 batting average, targeting genuine
+            #   weak hitters. The 65% over gate is structurally impossible for
+            #   unders (no healthy MLB hitter is hitless 65%+ of the time).
+            if direction == "over":
+                over_floor = 55.0 if stat == "hits" else 65.0
+                if coverage_overall_raw < over_floor:
+                    continue
+            if direction == "under" and coverage_overall_raw < 40.0:
                 continue
 
-        # Single pool check: odds in [-250, +150]
+            # Gate 2: hits/under requires same 65% floor as overs.
+            # Data analysis (Jun 25, 2026): 411 hits/under legs at 40% gate averaged
+            # 48.8% coverage and 50.1% win rate vs 56.4% breakeven (−6.3pp edge).
+            # The 14 hits/under legs selected into parlays averaged 66.0% coverage
+            # and won at 57.1% — confirming the gate raise keeps the good legs.
+            if stat == "hits" and direction == "under":
+                if coverage_overall_raw < 65.0:
+                    continue
+
+        # Odds gate, applied consistently across all three props: [-250, +150]
         try:
             odds_val = float(standard_odds)
         except (ValueError, TypeError):
@@ -410,6 +456,7 @@ def _find_qualifying_legs(
             "games_recent":        coverage.get("games_recent"),
             "pitcher_hand":        coverage.get("pitcher_hand"),
             "batter_hand":         coverage.get("batter_hand") or bats,
+            "pt_tb_rate":          pt_tb_rate,
             # Game context
             "game_pk":             game_pk,
             "opposing_pitcher_id": opposing_pitcher_id if opposing_pitcher_id else None,
@@ -703,6 +750,7 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
         team_abbr_to_game_pk,
         pitcher_id_map,
         season,
+        today,
     )
     print(f"  {len(qualifying_legs)} qualifying leg(s) in pool")
 
@@ -796,7 +844,7 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
 
     # ── Step 6: Opponent Enrichment (pitcher profiles) ────────────────────────
     print("\n[6/8] Enriching legs with pitcher matchup profiles...")
-    qualifying_legs = enrich_legs(qualifying_legs, pitcher_id_map, opponent_map, season)
+    qualifying_legs = enrich_legs(qualifying_legs, pitcher_id_map, opponent_map, season, run_date=today)
 
     # ── Filter: remove legs whose games have already started ─────────────────
     from src.utils.time_utils import now_et as _now_et_fn, parse_game_start_et as _parse_gst
@@ -896,21 +944,16 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
             print(f"[player_cap] {len(capped_players)} player(s) at 2-parlay cap — removed {removed} leg(s): {sorted(capped_players)}")
         else:
             print("[player_cap] No players at cap yet today")
-        # Fallback: if cap leaves production pool too thin, restore full pool.
-        # Must simulate TB exclusion here — TB/under legs are excluded from
-        # production parlays in Step 8, so checking total qualifying_legs is
-        # misleading (they looked healthy at 41 legs but 31 were TB/under).
-        production_eligible = [
-            l for l in qualifying_legs
-            if l.get("stat") != "totalBases"
-        ]
-        production_overs = [l for l in production_eligible if l.get("direction") == "over"]
-        if len(production_eligible) < 12 or len(production_overs) < 6:
+        # Fallback: if cap leaves the pool too thin, restore the full pool.
+        # totalBases legs are production-eligible as of 2026-08-05 (previously
+        # excluded here as shadow-only; see ARCHITECTURE_DECISIONS.md).
+        production_overs = [l for l in qualifying_legs if l.get("direction") == "over"]
+        if len(qualifying_legs) < 12 or len(production_overs) < 6:
             print(
                 f"[player_cap] Production pool too thin after cap "
-                f"({len(production_eligible)} non-TB legs, {len(production_overs)} overs) — restoring full pool"
+                f"({len(qualifying_legs)} legs, {len(production_overs)} overs) — restoring full pool"
             )
-            qualifying_legs = [l for l in orig_qualifying_legs if l.get("stat") != "totalBases"]
+            qualifying_legs = list(orig_qualifying_legs)
     except Exception as _cap_err:
         print(f"[player_cap] Could not apply player cap (non-fatal): {_cap_err}")
 
@@ -919,15 +962,10 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
     tier_label = f"Tier {tier_info['tier']}" if tier_info else "Tier 4 (thin slate)"
     print(f"\n[8/8] Building hybrid parlays ({len(schedule)} games → {tier_label})...")
 
-    # Exclude totalBases legs from production parlays — they are scored and
-    # logged for shadow validation but must never enter live parlays.
-    production_legs = [l for l in qualifying_legs if l.get("stat") != "totalBases"]
-    tb_shadow_count = len(qualifying_legs) - len(production_legs)
-    if tb_shadow_count:
-        print(f"  [{tb_shadow_count} totalBases leg(s) held for shadow — excluded from parlays]")
-
+    # totalBases (both directions) is production-eligible as of 2026-08-05 —
+    # previously excluded here and held to shadow validation only.
     parlays = build_parlays(
-        production_legs,
+        qualifying_legs,
         top_n=5,
         num_games=len(schedule),
     )

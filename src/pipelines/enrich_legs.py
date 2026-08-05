@@ -31,8 +31,22 @@ import datetime
 
 import statsapi
 
-from src.apis.matchup import get_pitcher_matchup_profile
+from src.apis.matchup import get_pitcher_matchup_profile, _ERA_MID, _WHIP_MID
+from src.utils.db import get_starter_rolling_ip
 from src.utils.net import call_with_timeout
+
+# Exposure-weighted starter quality (2026-08-05 scoring redesign, hits/over only).
+# Confirmed via two rounds of live-data testing: raw ERA/WHIP is a backwards
+# signal because weak-tier starters get pulled early (4.68 IP/start vs 5.39 for
+# strong-tier), so the batter disproportionately faces the bullpen instead.
+# effective_x blends the starter's raw stat with a league-average fallback,
+# weighted by how deep they typically go (rolling_avg_ip_last_5_starts / 6.0).
+# League-average constants: reused from matchup.py's own normalisation
+# midpoints (_ERA_MID=4.00, _WHIP_MID=1.25) rather than a fresh live aggregate —
+# those were already validated as reasonable season-average anchors there.
+_LEAGUE_AVG_ERA  = _ERA_MID
+_LEAGUE_AVG_WHIP = _WHIP_MID
+_EXPOSURE_FULL_IP = 6.0
 
 
 def get_game_start_time(game_pk: int) -> str | None:
@@ -149,6 +163,7 @@ def enrich_legs(
     pitcher_id_map: dict[str, int],
     opponent_map: dict[str, str],
     season: int | None = None,
+    run_date: str | None = None,
 ) -> list[dict]:
     """
     Attach ``opponent``, ``opposing_pitcher_id``, and ``opponent_adjustment``
@@ -158,6 +173,10 @@ def enrich_legs(
     pitcher_id_map, or legs where the pitcher profile cannot be fetched
     receive opponent_adjustment=0.0.
 
+    Also attaches ``exposure_weight``/``effective_era``/``effective_whip`` to
+    every hitter leg with a resolvable opposing starter (point-in-time rolling
+    IP, strictly before ``run_date`` — see module-level docstring above).
+
     Args:
         legs:           List of scored leg dicts (modified in-place).
         pitcher_id_map: {batter_team_abbr: opposing_pitcher_id}.
@@ -165,12 +184,16 @@ def enrich_legs(
         opponent_map:   {batter_team_abbr: opposing_team_abbr}.
                         Built alongside pitcher_id_map by main.py.
         season:         Season year; defaults to current calendar year.
+        run_date:       'YYYY-MM-DD' date string for the point-in-time rolling
+                        IP lookup; defaults to today.
 
     Returns:
-        The same list with three new fields on each leg.
+        The same list with new fields on each leg.
     """
     if season is None:
         season = datetime.datetime.now().year
+    if run_date is None:
+        run_date = datetime.datetime.now().strftime("%Y-%m-%d")
 
     print(
         f"  [enrich_legs] pitcher_id_map has {len(pitcher_id_map)} team(s): "
@@ -182,8 +205,14 @@ def enrich_legs(
     unique_pitcher_ids = set(pitcher_id_map.values())
     profiles: dict[int, dict | None] = {}
     pitcher_names: dict[int, str | None] = {}
+    rolling_ip: dict[int, float | None] = {}
     for pid in sorted(pid for pid in unique_pitcher_ids if pid is not None):
         profiles[pid] = get_pitcher_matchup_profile(pid, season)
+        try:
+            rolling_ip[pid] = get_starter_rolling_ip(str(pid), run_date)
+        except Exception as e:
+            print(f"  [enrich_legs] get_starter_rolling_ip({pid}) failed: {e}")
+            rolling_ip[pid] = None
         try:
             data = call_with_timeout(
                 statsapi.lookup_player, pid,
@@ -230,6 +259,9 @@ def enrich_legs(
             leg["pitcher_k9"] = None
             leg["pitcher_whip"] = None
             leg["pitcher_vs_batter_hand_era"] = None
+            leg["exposure_weight"] = None
+            leg["effective_era"] = None
+            leg["effective_whip"] = None
             continue
 
         if not pitcher_id:
@@ -241,6 +273,9 @@ def enrich_legs(
             leg["pitcher_k9"]   = None
             leg["pitcher_whip"] = None
             leg["pitcher_vs_batter_hand_era"] = None
+            leg["exposure_weight"] = None
+            leg["effective_era"] = None
+            leg["effective_whip"] = None
             continue
 
         profile = profiles.get(pitcher_id)
@@ -253,6 +288,9 @@ def enrich_legs(
             leg["pitcher_k9"]   = None
             leg["pitcher_whip"] = None
             leg["pitcher_vs_batter_hand_era"] = None
+            leg["exposure_weight"] = None
+            leg["effective_era"] = None
+            leg["effective_whip"] = None
             continue
 
         # Attach raw pitcher profile stats so they persist in mlb_scored_legs
@@ -261,6 +299,24 @@ def enrich_legs(
         leg["pitcher_era"]  = profile["era"]
         leg["pitcher_k9"]   = profile["k9"]
         leg["pitcher_whip"] = profile["whip"]
+
+        # Exposure-weighted starter quality (hits/over; see module docstring).
+        # rolling_ip is None when the starter has no logged starts before
+        # run_date (e.g. season-opener) — fall back to the raw season stat.
+        starter_ip = rolling_ip.get(pitcher_id)
+        if starter_ip is not None:
+            exposure_weight = min(starter_ip / _EXPOSURE_FULL_IP, 1.0)
+            leg["exposure_weight"] = round(exposure_weight, 4)
+            leg["effective_era"] = round(
+                profile["era"] * exposure_weight + _LEAGUE_AVG_ERA * (1 - exposure_weight), 3
+            )
+            leg["effective_whip"] = round(
+                profile["whip"] * exposure_weight + _LEAGUE_AVG_WHIP * (1 - exposure_weight), 3
+            )
+        else:
+            leg["exposure_weight"] = None
+            leg["effective_era"] = profile["era"]
+            leg["effective_whip"] = profile["whip"]
 
         leg["opponent_adjustment"] = _compute_adjustment(stat, profile, is_pitcher_prop_leg)
         enriched += 1
