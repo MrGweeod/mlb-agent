@@ -626,6 +626,166 @@ The historical resolution bug (`PARLAY_RESOLUTION_BUG_POSTMORTEM.md`, May 19 202
 
 ---
 
+## §40 — Session 28 (2026-08-07): totalBases/over calibration fix,
+composite_score audit, and two independent bugs found along the way
+
+### Fix shipped: totalBases/over win-rate calibration (v3)
+
+**Problem.** The percentile-rank scoring shipped in §39 scaled a leg's
+day-pool percentile linearly onto a 5-95 `composite_score` range, which
+implied a top-of-pool leg was ~95% likely to hit. Checked against 1,421
+resolved totalBases/over legs (`pt_tb_rate` percentile-ranked within each
+day's pool the same way the live scorer does): real win rate only ranges
+~21% (bottom of pool) to ~39% (top of pool). Confirmed live impact: 16 of
+8/6's top 17 scored legs were totalBases/over, and that day's parlays hit
+`edge_percent` values up to 1783.1%, overflowing
+`mlb_parlay_recommendations_v2.edge_percent` (`NUMERIC(6,3)`) and silently
+rolling back the entire save — zero parlays saved for 8/5 and 8/6's
+automated runs despite the pipeline completing normally.
+
+**Fix.** Direct linear regression of the same 1,421 legs' win/loss against
+day-pool percentile (leg-level, not bucket means): `win_prob = 0.2483 +
+0.001523 * percentile, r=0.0944, n=1421`. `composite_score` for
+totalBases/over is now this calibrated win rate (range ~24.8-40.1) instead
+of the old percentile-scaled 5-95 range. `SCORER_VERSION` bumped to
+`v3_2026-08-06`. `edge_percent`/`total_odds` columns widened
+(`NUMERIC(9,3)`/`NUMERIC(10,3)`) as a defensive overflow safety net,
+independent of the calibration fix.
+
+Investigated and ruled out opposing-starter WHIP/rolling-IP as an
+alternative signal first (r<0.03 for WHIP alone, IP alone, and their
+interaction, n=1352) before landing on the calibration fix.
+
+**Status: implemented, tested (16/16 passing), deployed
+(commit `e3cdc685051ab8cf362204b2b87200083fa048e8`, Railway deployment
+`16540661-c983-4403-a8fa-b374e43185d6`, confirmed `SUCCESS`). Live-verified
+same day: the first post-deploy manual run produced zero totalBases/over
+legs in any built parlay (composite_score for that stat/direction now caps
+~40, below hits/strikeouts' typical 65-88 selected range).**
+
+### Finding, not yet fixed: totalBases/under is weak but not miscalibrated
+
+Checked the same way as totalBases/over: 6,338 resolved legs, `coverage_overall`
+vs. outcome. `r = 0.0232` — real but weak. Bucketed win rate moves from
+53.8% (40-49.5 coverage) to 62.5% (80-86.4 coverage), a real but shallow
+trend; the two largest buckets (50-70 coverage, 84% of the sample) are
+tied at 58.4%. Unlike totalBases/over, there's no severe miscalibration
+gap — scores roughly track real outcomes, they just don't discriminate
+much. **Potential follow-up, not urgent** — logged here for future
+reference, no fix scoped or scheduled.
+
+### Finding, not yet fixed: strikeouts/over shows the same weak-signal
+pattern as totalBases/under
+
+`composite_score` vs. outcome for strikeouts/over: `r = 0.0713`, n=2,405.
+Comparable magnitude to totalBases/over's pre-fix r=0.0944 — a real,
+monotonic-ish signal (bucketed win rate rises from ~50% to ~66-68% across
+the score range) but not verified to be calibrated to true win probability
+the way totalBases/over now is. **Not fixed, not urgent — same category as
+totalBases/under above.**
+
+### Finding, not yet fixed: hits/over `composite_score` carries almost no
+real signal, and the mechanism is identified
+
+`composite_score` vs. outcome for hits/over: `r = 0.0116`, n=4,653 —
+effectively flat. Bucketed win rate stays in a 56-66% band across the
+entire 37-92 score range (a leg scored 87 wins *less* often than one
+scored 37, 56.3% vs. 61.3%). This is a materially different (and more
+concerning) result than totalBases/over or strikeouts/over: it's the
+*dominant* leg type (75% of all parlay legs over the last 30 days,
+459/611), and unlike totalBases/over it was previously described as
+"well-validated, two rounds of live-data testing" (§39).
+
+Checked each underlying component separately against real outcome:
+
+| signal | n | r |
+|---|---|---|
+| coverage_vs_hand | 4,842 | 0.1148 |
+| coverage_overall | 4,998 | 0.1034 |
+| coverage_recent_10 | 4,998 | 0.0968 |
+| effective_era | 161 | 0.0785 |
+| lineup_consistency | 745 | 0.0293 |
+| pitcher_era (raw) | 3,369 | -0.0039 |
+
+Every coverage-based component individually carries real signal — as good
+as or better than what got totalBases/over its calibration fix. The
+composite blend washing out to r=0.0116 traces to the ERA adjustment:
+`effective_era` (the validated, exposure-weighted signal from §39) is only
+populated on 161 of 4,998 hits/over legs (~3%) — the other 97% fall back to
+raw `pitcher_era`, which independently has ~zero correlation with outcome
+(r=-0.0039). Split by path:
+
+| ERA path | n | composite_score r |
+|---|---|---|
+| fell back to raw pitcher_era | 4,492 (90%) | 0.0115 |
+| used effective_era | 161 (3%) | 0.0654 |
+
+Legs that get the real `effective_era` signal show composite_score
+correlation ~6x higher than legs that fall back to raw ERA. This points at
+a **data-pipeline coverage gap** — `effective_era` not populating broadly,
+likely in `src/pipelines/enrich_legs.py` — rather than a scoring-formula
+problem like totalBases/over's was. The effective_era group's r=0.0654
+still doesn't fully recover the 0.10-0.11 seen in the coverage components
+alone, so the ERA fallback is evidenced as the dominant dilution source but
+not necessarily the only one. **Root cause identified, not yet fixed —
+needs a decision on scope/priority before any code change.**
+
+### Bug found: `edge_pct` formula doesn't match the standard EV formula
+
+`edge_pct = win_prob_pct * (combined_odds / 100) - 100`, computed in two
+duplicated places (`generate_recommendations()` in `main.py`, and
+copy-pasted inline inside `run_pipeline()` itself — the inline copy is the
+one that actually runs in production; `generate_recommendations()` is only
+reached via the secondary `/api/admin/run_pipeline` endpoint). The standard
+expected-return formula for American odds is `win_prob_pct * (1 +
+combined_odds/100) - 100` — the shipped version is missing the `+1` term
+(the stake being returned on a win), so the two formulas disagree by
+`win_prob_pct` percentage points on the same bet. Separately and worth
+stating plainly: `win_prob_pct` itself is not sourced from SGO or any
+market-implied probability — it's `composite_score`, an internal scoring
+signal never built or validated to function as a calibrated probability
+(see the hits/over finding above for direct evidence this doesn't hold for
+at least one stat). **Not fixed — flagging both the formula-level bug and
+the conceptual one it sits on top of for a future decision.**
+
+### Bug found: pipeline runs can be silently mislabeled as `auto_530pm`
+
+`_PIPELINE_SCHEDULE` in `src/web/server.py` only has two slots now —
+9:00 AM (`morning`) and 17:30 (`evening`); the 12 PM slot was deliberately
+dropped ahead of the 2026-08-01 SGO tier downgrade. `GET
+/api/build-parlays?refresh=true` (`handle_build_parlays`) calls
+`run_pipeline()` with no `source` argument. Inside `run_pipeline()`, a
+`None` source falls back to labeling by ET hour: `<11 → auto_9am`,
+`<14 → auto_12pm`, `else → auto_530pm`. Confirmed live on 2026-08-07: a
+force-refresh at 14:38 ET got saved with `source='auto_530pm'`, three hours
+before the real 5:30 PM scheduled run, indistinguishable from a genuine
+scheduled evening run in the `source` column without checking
+`created_at`. This compounds the pre-existing documented gap (§ note in
+`SUPABASE_SCHEMA_REFERENCE.md`, Session 23) that `source` values don't
+fully match their documented meaning. **Not fixed — noting the exact
+mechanism for whoever scopes a fix.**
+
+### Context, not a new finding: 30-day parlay win rate (9.0%) is explained
+by leg composition, not a hidden bug
+
+`mlb_parlay_recommendations_v2` over the last 30 days: 133 resolved, 12
+won, 9.0% win rate — all pre-dating today's fixes (`scorer_version` null).
+Checked whether this is explained by same-game correlation within losing
+parlays (it isn't — won parlays actually had *slightly more* same-game leg
+overlap than lost ones, 0.67 vs. 0.58 average) or by a gap between
+individual leg quality and parlay-level outcomes. It's fully explained by
+the latter, and the math is clean: real leg composition over the window
+was 75.1% hits/over (62.4% win rate), 23.6% strikeouts/over (54.3%), 1.3%
+hits/under (25%, thin sample) — no totalBases legs at all (too new to have
+a production track record yet). Blending those real rates gives an
+expected per-leg win probability of 60.0%; at the actual observed average
+of 4.6 legs/parlay (not a clean 4 — this window includes some parlays
+predating the fixed-4-leg revert), that predicts a 9.54% parlay win rate.
+Actual: 9.0%. **No additional finding here — logged for the record since it
+was checked, not because it surfaced anything new.**
+
+---
+
 ## Lessons Learned
 
 *(Items 1-54 unchanged from prior version — see full list in git history / prior document version.)*
@@ -732,4 +892,4 @@ No backtest — historical window too thin and was actively misleading in analys
 **Architecture Status:** ✅ OPERATIONAL — the leg-scoring redesign (§39) is deployed to both Railway services; live-run verification against real production output is the one open item, pending the next scheduled trigger (see `SESSION_HANDOFF.md` Pending Items §0). The silent pipeline stall (§37) and the parlay builder's zero-recovery-on-missed-floor bug (§38) remain fixed and confirmed live from prior sessions.
 **Last Major Change:** August 5, 2026 (Session 27) — leg-scoring redesign: `composite_score` back-tested at AUC 0.48-0.49 (no better than random); shipped evidence-backed fixes per-component rather than wait on full validation for every signal — totalBases (both directions) promoted to the live parlay pool (previously shadow-only/entirely absent), hits/over ERA now exposure-weighted by opposing-starter rolling IP (fixing a confirmed-backwards raw signal), totalBases/over scored via `pt_tb_rate` percentile rank, `scorer_version` instrumentation added as the substitute for the shadow-validation step being deliberately skipped this time (§39)
 **Prior Major Change:** August 4, 2026 (Session 26) — fixed the parlay builder giving up entirely (all remaining parlay slots too) when the top-4-by-score pick missed the +400 odds floor by a small margin. `_attempt_swap_recovery()` searches the full remaining eligible pool for a floor-clearing single-leg swap, bounded to `len(legs) * SWAP_CANDIDATE_LIMIT` attempts; a too-narrow first version (candidates limited to the next 10 best-scored alternatives) was caught via live-data testing and widened before shipping, since odds and composite_score aren't correlated in this system (§38)
-**Next Architecture Review:** Confirm the scoring redesign's real-run output once the next scheduled trigger fires (totalBases in the pool, effective_era populated, scorer_version present — §39) / re-run the coverage-vs-matchup analysis 2026-08-06 / investigate why `mlb_parlay_legs_v2` shows no new legs since 2026-07-23 (found during Session 24's analysis, not yet root-caused) / confirm lineup_consistency Step 5b filter is actually executing via Railway logs / build and backtest a pitcher-strikeouts reintroduction (SGO ingestion disambiguation + architecturally-batter-only qualifying-leg pipeline, both still open) / validate batter stat ranges after first shadow runs
+**Next Architecture Review:** Decide scope/priority on the hits/over `effective_era` population gap (§40 — only 3% of hits/over legs get the validated signal, 97% fall back to near-zero-correlation raw ERA, likely `src/pipelines/enrich_legs.py`) / decide on the `edge_pct` formula bug (§40 — missing `+1` term vs. standard EV formula, and the deeper issue that `win_prob_pct` is sourced from `composite_score` rather than any calibrated probability) / scope a fix for pipeline runs being silently mislabeled `auto_530pm` on early force-refreshes (§40 — `run_pipeline()`'s ET-hour fallback in the no-`source` case) / revisit the two logged-but-not-urgent weak-signal findings when time allows (§40 — totalBases/under r=0.0232, strikeouts/over r=0.0713, neither miscalibrated, both just weak)
