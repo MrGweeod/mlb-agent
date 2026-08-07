@@ -106,7 +106,53 @@ class TestTotalBasesOverPercentileScoring:
     def test_missing_pt_tb_rate_falls_back_to_neutral(self):
         leg = {"stat": "totalBases", "direction": "over"}  # no pt_tb_rate at all
         score = calculate_composite_score(leg)
-        assert score == 50  # neutral default, clamped range is a no-op here
+        # 2026-08-06 calibration fix: neutral percentile (50) now maps through
+        # the win-rate calibration, not a literal pass-through — 24.83 + 0.1523*50.
+        assert score == pytest.approx(32.4)
+
+
+class TestTotalBasesOverWinRateCalibration:
+    """
+    2026-08-06 fix: the old percentile->score mapping scaled linearly to a
+    5-95 range, implying a top-of-pool leg was ~95% likely to hit. Checked
+    against 1,421 resolved historical totalBases/over legs and the real win
+    rate only spans ~21-39%. Score is now win_prob = 0.2483 + 0.001523 *
+    percentile (fit via linear regression on leg-level outcomes, r=0.0944),
+    expressed on the same 0-100 scale as coverage_overall so it's finally
+    comparable to hits/strikeouts scores instead of an arbitrary rank.
+    """
+
+    def test_calibration_formula_exact(self):
+        cases = [
+            (0, 24.8),
+            (25, 28.6),
+            (50, 32.4),
+            (75, 36.3),
+            (100, 40.1),
+        ]
+        for percentile, expected in cases:
+            leg = {"stat": "totalBases", "direction": "over",
+                   "tb_percentile_score": percentile}
+            assert calculate_composite_score(leg) == pytest.approx(expected, abs=0.05)
+
+    def test_calibrated_range_sits_below_hits_and_strikeouts(self):
+        # Even a top-of-pool (percentile=100) totalBases/over leg should score
+        # well below a typical/mediocre hits or strikeouts leg — this is the
+        # whole point of the fix: totalBases can no longer dominate a greedy
+        # top-4-by-score sort purely because percentile ranking manufactures
+        # high numbers at the top of any distribution by construction.
+        tb_leg = {"stat": "totalBases", "direction": "over", "tb_percentile_score": 100}
+        hits_leg = {"stat": "hits", "direction": "over", "coverage_overall": 55.0}
+        assert calculate_composite_score(tb_leg) < calculate_composite_score(hits_leg)
+
+    def test_calibration_never_exceeds_old_clamp_bounds(self):
+        # Defensive: even a pathological out-of-range percentile shouldn't
+        # blow past the [5, 95] safety clamp.
+        for percentile in (-1000, 0, 100, 1000):
+            leg = {"stat": "totalBases", "direction": "over",
+                   "tb_percentile_score": percentile}
+            score = calculate_composite_score(leg)
+            assert 5 <= score <= 95
 
 
 class TestStrikeoutsScoringUnchanged:
@@ -148,7 +194,7 @@ class TestScorerVersionStamped:
         score_legs(legs)
         for leg in legs:
             assert leg["scorer_version"] == SCORER_VERSION
-        assert SCORER_VERSION == "v2_2026-08-05"
+        assert SCORER_VERSION == "v3_2026-08-06"
 
 
 class TestNoPitcherRoleStrikeoutProps:

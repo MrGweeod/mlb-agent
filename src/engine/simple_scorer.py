@@ -12,9 +12,10 @@ Signals:
 - effective_era (for hits/over; exposure-weighted opposing-starter ERA — see
   src/pipelines/enrich_legs.py), pitcher_k9 (for hitter SO props)
 - lineup_consistency (playing time stability, 0-1 scale)
-- pt_tb_rate percentile rank within the day's pool (totalBases/over only —
-  everything else above is bypassed for this stat/direction; see
-  calculate_composite_score()'s early return)
+- pt_tb_rate percentile rank within the day's pool, run through an empirical
+  win-rate calibration (totalBases/over only — everything else above is
+  bypassed for this stat/direction; see calculate_composite_score()'s early
+  return and _TB_CAL_INTERCEPT/_TB_CAL_SLOPE below)
 
 2026-08-05 scoring redesign confidence levels (see docs/ARCHITECTURE_DECISIONS.md
 for the full evidence writeup):
@@ -22,9 +23,39 @@ for the full evidence writeup):
   - totalBases/over pt_tb_rate: real correlation found (r=0.121) but zero
     production track record — this is the first live scoring pass
   - strikeouts: no validated improvement exists; scoring unchanged deliberately
+
+2026-08-06 totalBases/over calibration fix (v3): the original percentile
+mapping scaled the day-pool percentile rank linearly onto a 5-95 composite_score
+range, which implied a top-of-pool leg was ~95% likely to hit. Checked against
+real outcomes (1,421 resolved totalBases/over legs from mlb_prop_legs_history,
+joined to point-in-time pt_tb_rate via mlb_player_batting_cumulative, percentile-
+ranked within each day's pool the same way the live scorer does) and the actual
+win rate only ranges ~21% (bottom of pool) to ~39% (top of pool) — clearing 1.5
+total bases is a structurally harder outcome than hits/strikeouts props, so it
+should never have scored anywhere near their range. Fit via direct linear
+regression of win/loss against day-pool percentile (leg-level, not bucket
+means): win_prob = 0.2483 + 0.001523 * percentile, r=0.0944, n=1,421. This
+score is now on the same units as coverage_overall (an actual historical win
+rate, 0-100 scale) instead of an arbitrary within-pool rank — so totalBases/over
+legs will correctly sit below hits/strikeouts most days rather than dominating
+the top of a greedy composite_score sort purely because percentile ranking
+manufactures high numbers at the top of any distribution by construction.
+Investigated and ruled out (near-zero correlation, r<0.03 for all of: opposing
+starter WHIP alone, opposing starter rolling IP/start alone, their interaction)
+before landing on this fix — see chat 2026-08-06 for the full test.
 """
 
-SCORER_VERSION = "v2_2026-08-05"
+SCORER_VERSION = "v3_2026-08-06"
+
+# Empirical win-rate calibration for totalBases/over, fit 2026-08-06 — see
+# module docstring above for methodology and evidence. Score = intercept +
+# slope * day-pool percentile (0-100), expressed on the same 0-100 scale as
+# coverage_overall. Deliberately NOT re-fit inline from live data each run —
+# this is a fixed, versioned constant so scorer_version stays a meaningful
+# "which calibration produced this score" marker; re-fitting requires bumping
+# SCORER_VERSION again, same discipline as every other signal in this file.
+_TB_CAL_INTERCEPT = 24.83   # win rate (%) at the bottom of the day's pool
+_TB_CAL_SLOPE = 0.1523      # additional win rate (%) per percentile point
 
 
 def _attach_totalbases_over_percentiles(legs):
@@ -62,15 +93,23 @@ def calculate_composite_score(leg):
     """
 
     # ============================================
-    # 0. TOTALBASES/OVER: percentile-rank scoring only (2026-08-05)
+    # 0. TOTALBASES/OVER: win-rate-calibrated percentile scoring (2026-08-06)
     # ============================================
     # No coverage_overall signal exists for this direction (see main.py Gate 1),
     # and testing found the hits/over exposure feature has no effect here
     # (deep 56.8% vs short 58.4%, flat/noisy) — so this bypasses every other
-    # signal below and scores purely on pt_tb_rate's percentile rank within
-    # the day's pool, set by _attach_totalbases_over_percentiles() in score_legs().
+    # signal below and scores off pt_tb_rate's percentile rank within the
+    # day's pool, set by _attach_totalbases_over_percentiles() in score_legs().
+    # As of 2026-08-06 the raw percentile is run through an empirical win-rate
+    # calibration (_TB_CAL_INTERCEPT/_TB_CAL_SLOPE, see module docstring) rather
+    # than scaled linearly to a 5-95 range — the old version implied a top-of-
+    # pool leg was ~95% likely to hit; real historical win rate for this stat
+    # tops out around 39%. Clamp is defensive only; the fitted line stays
+    # within [24.83, 40.06] for percentile in [0, 100] under normal operation.
     if leg.get("stat") == "totalBases" and leg.get("direction") == "over":
-        return max(5, min(95, leg.get("tb_percentile_score", 50)))
+        percentile = leg.get("tb_percentile_score", 50)
+        calibrated = _TB_CAL_INTERCEPT + _TB_CAL_SLOPE * percentile
+        return round(max(5, min(95, calibrated)), 1)
 
     # ============================================
     # 1. PRIMARY SIGNAL: Handedness-Aware Coverage
