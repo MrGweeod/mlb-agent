@@ -1,7 +1,7 @@
 # MLB Parlay Agent — Build Status
-**Last Updated:** August 5, 2026 (Session 27 — leg-scoring redesign: composite_score back-tested at AUC 0.48-0.49; shipped evidence-backed fixes per-component (totalBases promoted to live pool, hits/over exposure-weighted ERA, scorer_version instrumentation) rather than wait on full validation for every signal)
+**Last Updated:** August 7, 2026 (Session 28 — totalBases/over win-rate calibration fix (v3) shipped, deployed, and live-verified; composite_score audit found hits/over's real-world signal is being diluted by an effective_era coverage gap; two independent bugs found — edge_pct formula, auto_530pm mislabeling)
 
-## Overall System Status: ✅ OPERATIONAL — SCORING REDESIGN v2_2026-08-05 DEPLOYED (SESSION 27); LIVE-RUN VERIFICATION PENDING NEXT SCHEDULED TRIGGER
+## Overall System Status: ✅ OPERATIONAL — totalBases/over CALIBRATION FIX (v3) DEPLOYED AND LIVE-VERIFIED (SESSION 28); FOUR OPEN ITEMS (effective_era GAP, edge_pct FORMULA, auto_530pm MISLABELING, TWO WEAK-SIGNAL FINDINGS) NOT YET FIXED
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────┐
@@ -622,14 +622,16 @@
 | Resolution | ✅ Confirmed via code, ❌ not tested live | No source filter in resolver — should just work |
 | Layout/sticky header | ⚠️ Fix shown, push unconfirmed | Verify Session 19 |
 
-### Scoring Signal Integrity (simple_scorer.py inputs) — AUDITED Session 21, ERA FIX SHIPPED Session 27
+### Scoring Signal Integrity (simple_scorer.py inputs) — AUDITED Session 21, ERA FIX SHIPPED Session 27, totalBases CALIBRATED + composite_score AUDITED Session 28
 | Signal | Status | Notes |
 |---|---|---|
 | `lineup_consistency` | ⚠️ Persistence fixed, upstream filter unconfirmed | Was 100% NULL, all season — `db.py` INSERT fix Session 21. Whether the Step 5b filter itself has been executing needs a Railway log check. |
 | Pitcher ERA (hits/over) | ✅ FIXED Session 27 — exposure-weighted | Was confirmed inverted (Session 21) due to weak-tier starters getting pulled early; now blended with a league-average fallback weighted by rolling 5-start IP (`effective_era`). `hits/under` still uses raw `pitcher_era`, unvalidated for that direction — see `ARCHITECTURE_DECISIONS.md` §39. |
 | K/9-rank (SO/over) | ⚠️ Same source risk, inconclusive evidence | Monitoring only, no action taken — no validated fix as of Session 27 |
 | Streak/consistency gap | ✅ Sample floor added | `MIN_RECENT_GAMES = 5` in `coverage.py`, both hitter and pitcher paths |
-| `pt_tb_rate` percentile (totalBases/over) | ✅ NEW Session 27 — zero production track record | r=0.121 correlation, validated in 5-fold CV (~0.57 AUC) — this is its first live scoring pass, watch results closely |
+| `pt_tb_rate` percentile (totalBases/over) | ✅ CALIBRATED Session 28 (v3) — was implying ~95% win prob at top of pool | Session 27's percentile-rank scaling (5-95 range) checked against 1,421 resolved legs: real win rate only ranges ~21-39%. Recalibrated to a direct regression fit: `win_prob = 0.2483 + 0.001523 * percentile` (r=0.0944, n=1,421). `SCORER_VERSION` → `v3_2026-08-06`. Live-verified: first post-deploy run produced zero totalBases/over legs in any built parlay. See `ARCHITECTURE_DECISIONS.md` §40. |
+| `composite_score` (hits/over) | ❌ NEW FINDING Session 28 — ~0 real signal despite valid components | r=0.0116 vs. outcome (n=4,653) — flat across the 37-92 score range. Every individual component correlates real (coverage_vs_hand r=0.1148, coverage_overall r=0.1034, coverage_recent_10 r=0.0968, effective_era r=0.0785); root-caused to `effective_era` only populating on 161/4,998 legs (~3%), the other 97% falling back to raw `pitcher_era` (r=-0.0039). Split-sample: effective_era-path legs show composite_score r=0.0654 vs. r=0.0115 on the raw-ERA-fallback path. Concerning specifically because hits/over is 75% of all parlay legs. Root cause identified (likely `src/pipelines/enrich_legs.py` coverage gap), not fixed. See `ARCHITECTURE_DECISIONS.md` §40. |
+| `composite_score` (strikeouts/over) | ⚠️ NEW FINDING Session 28 — weak-but-real, not verified calibrated | r=0.0713 (n=2,405) — comparable magnitude to totalBases/over's pre-fix r=0.0944. Bucketed win rate rises ~50%→66-68% across the score range but hasn't been checked for calibration the way totalBases/over now has. Not fixed, not urgent. See `ARCHITECTURE_DECISIONS.md` §40. |
 
 ### Coverage Gates — REVISED Session 27
 | Prop / Direction | Gate | Ceiling | Status |
@@ -696,12 +698,27 @@
 | pitcher-K | 🔲 Not testable | No opposing-matchup metric exists for pitcher-role legs |
 | Re-run scheduled | 🔲 2026-08-06 | Once `mlb_prop_legs_history` has ~1 week of ungated data |
 
+### edge_pct / win_probability calculation — AUDITED Session 28
+| Component | Status | Notes |
+|---|---|---|
+| `combined_odds` source | ✅ Real SGO leg odds | Comes from the actual per-leg odds selected by `parlay_builder.py` — not synthetic or estimated |
+| `win_probability` source | ❌ Never SGO, never validated as calibrated | Is `composite_score` — an internal scoring signal, not a market-implied or backtested probability. The hits/over finding above (r=0.0116 vs. real outcome) is direct evidence this doesn't hold as a true probability for at least one stat/direction. |
+| `edge_pct` formula | ❌ Missing the `+1` term standard American-odds EV math requires | `edge_pct = win_prob_pct * (combined_odds/100) - 100`, vs. the standard `win_prob_pct * (1 + combined_odds/100) - 100` — the two disagree by `win_prob_pct` percentage points on the same bet |
+| Duplicated locations | ❌ Two copies, only one runs in production | `generate_recommendations()` in `main.py` (reached only via the secondary `/api/admin/run_pipeline` endpoint) and an inline copy inside `run_pipeline()` itself — the inline copy is the one that actually runs in production |
+| Fix status | ❌ Not fixed | Flagging both the formula-level bug and the conceptual one underneath it (composite_score used as a probability) for a future decision — see `ARCHITECTURE_DECISIONS.md` §40 |
+
+### Pipeline run source labeling — auto_530pm mislabeling (NEW Session 28)
+`GET /api/build-parlays?refresh=true` (`handle_build_parlays`) calls `run_pipeline()` with no `source` argument. Inside `run_pipeline()`, a `None` source falls back to labeling by ET hour: `<11 → auto_9am`, `<14 → auto_12pm`, `else → auto_530pm`. Confirmed live 2026-08-07: a force-refresh at 14:38 ET was saved with `source='auto_530pm'`, three hours before the real 17:30 ET scheduled run — indistinguishable from a genuine scheduled evening run in the `source` column without checking `created_at`. Compounds the pre-existing `'midday'`/`'evening'` source-labeling gap documented above (Session 23). **Not fixed** — see `ARCHITECTURE_DECISIONS.md` §40.
+
 ---
 
 ## Pending Code Changes
 
 | Item | File | Priority |
 |---|---|---|
+| Fix hits/over `effective_era` population gap (only 3% of legs get the validated signal, 97% fall back to near-zero-correlation raw ERA) | `src/pipelines/enrich_legs.py` (likely) | **High — new Session 28, dominant leg type's real-world signal is being diluted, root cause identified, not scoped/started** |
+| Fix `edge_pct` formula (missing `+1` term vs. standard EV formula) | `main.py` (`generate_recommendations()` + inline copy in `run_pipeline()`) | Medium — new Session 28, affects every parlay's edge calculation but downstream of the composite_score-as-probability question, likely wants to be scoped together |
+| Fix `auto_530pm` mislabeling on early force-refreshes | `src/web/server.py` (`handle_build_parlays()`) / `main.py` (`run_pipeline()`) | Low — new Session 28, data-labeling only, not affecting parlay construction |
 | Watch the next real scheduled run (9 AM/5:30 PM ET, not a manual trigger) confirm parlays get built and saved end-to-end | — (verification only) | Medium — Session 26's manual trigger already wrote 5 real parlays to the DB, confirming the fix works; only the fully-unattended scheduled-trigger path remains unobserved |
 | Re-run coverage-vs-matchup analysis | analysis only, target 2026-08-06 | **High — Session 24, needs `mlb_prop_legs_history` to accumulate ~1 week of data first** |
 | Watch first live 9 AM prop-line capture run | — (verification only) | **High — Session 23, real `run_pipeline()` wiring not yet exercised live** |
@@ -727,6 +744,6 @@
 
 ---
 
-**Build Status:** ✅ HEALTHY — both the 12-day silent parlay-pipeline stall (Session 25) and the parlay builder's zero-recovery-on-missed-floor bug (Session 26) are root-caused, fixed, deployed, and confirmed live. Session 26's live trigger wrote 5 real parlays to the database, confirmed via direct SQL query. Sessions 22, 23, and 24's work was already live as of commit `1db8918` (2026-07-31) — this doc's prior "about to be committed together" status was stale and is corrected above.
-**Last Deployment:** August 4, 2026 (`e094a0f`, Session 26's parlay-builder floor-recovery fix) — confirmed live on both `mlb-agent` and `dashboard-api` Railway services.
-**Next Review:** Watch the next real scheduled run (9 AM/5:30 PM ET, not a manual trigger) confirm parlays get built and saved end-to-end without intervention — the one verification step neither Session 25 nor 26 could perform directly / watch the first live 9 AM prop-line capture run and the 8/1 SGO tier downgrade / re-run the coverage-vs-matchup analysis 2026-08-06 / decide whether to build dashboard step 4 next or return to the remaining Session-21-era queue (confirm lineup_consistency filter via Railway logs, watch leg-cap-revert live EV, pitcher ERA rebuild, manual-pick end-to-end test — all carried, now behind several sessions' worth of newer work)
+**Build Status:** ✅ HEALTHY — the totalBases/over win-rate calibration fix (v3, Session 28) is root-caused, fixed, deployed, and confirmed live: closes the numeric-overflow bug that silently zeroed out 8/5-8/6's automated parlay saves, and the first post-deploy run correctly produced zero over-scored totalBases/over legs. Four items opened this session remain open (see Pending Code Changes): the hits/over `effective_era` population gap, the `edge_pct` formula bug, the `auto_530pm` mislabeling bug, and two logged-but-not-urgent weak-signal findings (totalBases/under, strikeouts/over). Everything carried from Sessions 21-27 (parlay-builder floor-recovery, 12-day pipeline-stall fix, reference-data/dashboard work, prop-line capture, point-in-time backfill, leg-scoring redesign v2) remains fixed, deployed, and confirmed live as previously documented.
+**Last Deployment:** August 7, 2026 (`e3cdc685...`, Session 28's totalBases/over calibration fix — a real code deploy, distinct from the docs-only `34546bc` commit) — confirmed live (`SUCCESS`) via Railway.
+**Next Review:** Decide scope/priority on the hits/over `effective_era` population gap (likely `src/pipelines/enrich_legs.py`) / decide on the `edge_pct` formula fix (missing `+1` term and the deeper composite_score-as-probability question) / scope a fix for the `auto_530pm` mislabeling bug / revisit the two logged-but-not-urgent weak-signal findings when time allows (totalBases/under r=0.0232, strikeouts/over r=0.0713) / still carried: watch the next real scheduled run (9 AM/5:30 PM ET, not a manual trigger) confirm parlays get built and saved end-to-end without intervention, watch the first live 9 AM prop-line capture run and the 8/1 SGO tier downgrade, re-run the coverage-vs-matchup analysis 2026-08-06, decide whether to build dashboard step 4 next or return to the remaining Session-21-era queue (confirm lineup_consistency filter via Railway logs, watch leg-cap-revert live EV, pitcher ERA rebuild, manual-pick end-to-end test)
