@@ -800,6 +800,89 @@ was checked, not because it surfaced anything new.**
 
 ---
 
+## §42 — Session 30 (2026-08-12): v4 hits/over probability model replaces composite_score for selection
+
+**What shipped.** `composite_score` no longer drives hits/over selection. A probability model (`src/engine/hits_v4.py`) computes `P(>=1 hit)` per leg and the builder ranks by it. The Gate 1 hits/over coverage floor is removed entirely, the production parlay pool is restricted to hits/over, and the builder may extend to 6 legs to reach +400. `composite_score` is still computed and stored on every leg for live comparison. All of it is behind `main.V4_HITS_ENABLED`.
+
+### The model
+
+```
+starter_share = min(SP_avg_IP / 9, 1)
+hit_env       = starter_share * f(SP_WHIP, SP_ERA) + (1 - starter_share) * f(BP_WHIP, BP_ERA)
+hit_env_adj   = hit_env * (1 + 0.252 * (lg_DER - opp_DER))
+p_per_AB      = base_rate * platoon_mult * trend_mult * (hit_env_adj / lg_avg_env)
+P(>=1 hit)    = mean over the batter's last-5 AB counts k of (1 - (1 - p_per_AB)^k)
+```
+
+Two rules were treated as non-negotiable: **no step functions or dead bands** (every prior discretized term destroyed signal — v3's `era_adj` returned exactly 0 for 70.5% of legs, `lineup_adj` for 100%), and **no hand-picked constants** (every value fitted on games before 2026-07-01, evaluated on 2026-07-01 onward).
+
+### Every derived constant
+
+| Constant | Value | Derivation |
+|---|---|---|
+| `f()` intercept / WHIP / ERA | 0.187327 / +0.052044 / −0.002562 | WLS on 2,193 train team-games weighted by AB (73,735 AB); t = 86.8 / 19.9 / −5.7 |
+| `lg_avg_env` | 0.24363 | AB-weighted mean `hit_env`, train; equals pooled observed H/AB to 5dp |
+| `lg_DER` | 0.70886 | AB-weighted league mean, train |
+| DER γ | 0.252 | residual slope ÷ hit_env — **not** the 1.0 the additive form implies |
+| batter league rate / `k` | 0.24404 / 462.6 AB | beta-binomial MoM, 514 batters; implied true-talent SD 0.0200 |
+| platoon `k` | 1616.6 AB | variance decomposition, 727 player-hand cells |
+| trend window / β | 15 games / 0.098 | window is argmax over {5,10,15,20,30}; β = slope ÷ pooled rate |
+| SP WHIP `k` / μ | 61.9 IP / 1.2827 | odd-even split-half r = 0.375 at 37.2 IP/half |
+| SP ERA `k` / μ | 67.8 IP / 4.2193 | split-half r = 0.354 |
+| SP avg_IP `k` / μ | 4.81 starts / 5.3288 | split-half r = 0.594 |
+| BP league WHIP / ERA | 1.3113 / 3.9873 | train relief innings; **not** shrunk — min team relief IP was 372.3 |
+
+### Finding: the ERA coefficient is negative conditional on WHIP — this explains four months of "ERA is backwards"
+
+Fitted against observed per-AB hit rate with WHIP in the model, ERA's coefficient is **−0.002562 (t = −5.7, 95% CI [−0.0034, −0.0017])**. Higher ERA predicts *fewer* hits per AB once WHIP is controlled.
+
+This is not a sign error and must not be "fixed". WHIP already counts baserunners allowed; conditional on that, a higher ERA means those baserunners convert to runs more often (home runs, sequencing, poor LOB) — not that more hits are allowed.
+
+This reframes §40's conclusion. §40 found hits/over's `composite_score` carried r=0.0116 and root-caused it to `effective_era` populating on only ~3% of legs, with the raw-`pitcher_era` fallback showing r=−0.0039. That population gap is real and the diagnosis of it stands. But the near-zero raw-ERA correlation was **not solely** a dilution artifact — ERA's marginal effect on hit rate is genuinely small and negative, so any model using raw ERA alone as a positive hit-rate signal was reading a confounded quantity. §41's continuous-ERA shadow re-weight improved things because continuity recovered signal that discretization destroyed, not because raw ERA is a strong positive predictor. v4 supersedes both by putting WHIP and ERA in together, with the sign the data gives.
+
+### Finding: the platoon term collapses under correct shrinkage
+
+True variance of a batter's per-hand deviation is 0.0001126 (true SD 0.0106); observed variance is 0.0015319, so **88% of observed platoon-split variance is sampling noise** at one season of sample. With k = 1616.6 AB against a typical ~58 AB vs-LHP sample, the shrinkage weight is 3.5% and `platoon_mult` lands within ~1% of 1.000 for essentially every batter (observed SD across the scored pool: 0.007–0.010). The term is retained because it is correctly derived and costs nothing, not because it carries signal. Anyone tempted to add a bigger platoon adjustment should re-derive this first.
+
+### Finding: the DER term does not survive its own test
+
+DER's incremental correlation after `hit_env` is r = 0.0151, **95% CI [−0.027, +0.057] — includes zero**. `corr(hit_env, opp_DER) = −0.354`: team defence is already substantially embedded in that team's bullpen and starter WHIP/ERA. The term is kept at its derived γ = 0.252 rather than the implied 1.0, and flagged in code as the first thing to drop if the model is simplified.
+
+### Finding: range restriction, and why the gate had to go
+
+Out-of-sample backtest (2026-07-01 onward, constants fitted only on earlier games):
+
+- **Batter-game level (n = 11,022):** AUC **0.6042** vs 0.5976 for coverage alone. r = **0.1838**, 95% CI **[0.165, 0.202]**. Win rate monotone across all ten deciles, .372 → .661, **D10−D1 = 28.9 points**. The matchup layer earns its place beyond the batter's own rate: partial r = 0.0319, CI [0.013, 0.051], excludes zero.
+- **Leg level (n = 1,851):** AUC 0.5243 vs `composite_score` 0.5061; r 0.0439 vs 0.0203. Better on every metric but **not significantly so** — Steiger t = 0.899, p = 0.37.
+
+The two levels reconcile exactly through range restriction. The Gate 1 coverage floor selects on coverage, the single dimension carrying most of the model's power, compressing SD from 0.1275 to 0.0593 (**u = 0.465**). The range-restriction prediction of leg-level r from the batter-game result is **0.0867**, which falls inside the observed CI [−0.002, 0.089]. The model has power the gate was discarding — which is why removing the gate is the deployment, not a separate optimisation.
+
+**This is also a methodological lesson.** Every prior null result in this project was measured on a few hundred to a few thousand resolved legs. The trend signal here produced the first CI in the project's history to exclude zero (partial r = 0.0339, [0.019, 0.048]) purely because it was measured on 17,877 batter-games instead of legs. Effects of magnitude r≈0.03 need n in the tens of thousands; leg-level samples cannot resolve them. Measure at batter-game level first, then check whether the pipeline preserves the effect.
+
+### Point-in-time traps found (all caught by measuring population on *unstarted* games)
+
+- `mlb_games.home/away_probable_pitcher_id` reads **100% on historical rows and 0% on same-day games** — it is backfilled after the game. Using it would have backtested beautifully and produced nothing live. The opposing starter comes from `mlb_scored_legs.opposing_pitcher_id` (96.2% same-day) instead.
+- `mlb_players.throws` and `.bats` were **100% NULL on all 1,388 rows**. Backfilled this session from StatsAPI and validated at **16,919/16,919 agreement** against the pipeline's independently-sourced `pitcher_hand`. A first attempt defaulted non-rostered players to 'R' and got JP Sears (676664) wrong across 53 legs — caught only by that cross-validation, not by inspection. **Never default handedness.**
+- `mlb_player_batting_logs.plate_appearances` and `.hit_by_pitch` are **100% NULL**. Expected trips are therefore measured in at-bats, which is the correct denominator anyway.
+- The two pitching tables use **different IP encodings**: `mlb_player_pitching_logs` is decimalized (.0/.3/.7), `mlb_player_season_pitching_stats` uses baseball .1/.2 notation. Summing the latter raw understates IP by ~9%. Every v4 aggregate applies `round(IP*3)/3`.
+- `mlb_player_season_pitching_stats` covers **65 players and 15 days** — 30.7% of recent probable starters. Unusable. SP stats come from `mlb_player_pitching_logs` (100% of probables, rewindable to any date).
+
+### Calibration
+
+Scoring at mean AB over-predicted by +0.036 train / +0.040 test — Jensen's inequality, since `1-(1-p)^AB` is concave in AB. Averaging the probability over the batter's empirical last-5 AB counts (same window, no new constant) halves it to **+0.018 / +0.022**. The residual is structural — per-AB outcomes within a game are positively correlated — and is a monotone shift that does not affect ranking. It was left rather than tuned away. If `p_hit` is ever used for EV rather than ranking, fit a recalibration intercept on train data first.
+
+### Builder: extension over swapping
+
+Ranking by probability and requiring +400 pull against each other — higher-probability legs are priced shorter. The builder reaches the floor by **adding a 5th or 6th leg**, never by swapping down the `p_hit` ranking; `_attempt_swap_recovery()` fires only if 6 legs still miss the floor. Extension keeps every leg the model likes and buys odds with an extra selection; swapping discards the model's own preference to buy the same odds. Smoke test on 2026-08-11's 121 legs confirmed it: the top parlay used `p_hit` ranks [0,1,2,3,4] at 5 legs for +575.
+
+Note this partially reopens §26, which reverted 4–6 legs to fixed 4 on EV evidence (4-leg +$0.128/$1 vs 5-leg −$0.416). That evidence was gathered under `composite_score` selection over a gated multi-stat pool — a different pool and a different ranking signal. The 5th leg here is added only when 4 legs miss the floor, and never at the cost of a better-ranked leg. **This needs live EV verification before it can be called settled**; if per-$1 EV on 5-leg v4 parlays comes back negative, cut `V4_MAX_LEGS` to 4 and let swap recovery handle the floor.
+
+### Rollback
+
+**`main.V4_HITS_ENABLED = False`.** Single constant, no other file, no migration to revert. It restores the Gate 1 hits/over coverage floor, stops restricting the pool to hits/over, and puts the builder back on `composite_score` at 4 legs. The v4 columns simply stop being populated. `tests/test_main_gates_2026_08_05.py` pins both flag states so the switch cannot silently rot.
+
+---
+
 ## Lessons Learned
 
 *(Items 1-54 unchanged from prior version — see full list in git history / prior document version.)*

@@ -51,6 +51,43 @@ POOL_MIN_COVERAGE = 65.0
 POOL_MIN_ODDS     = -250
 POOL_MAX_ODDS     = 150
 
+# ── v4 hits/over probability model (2026-08-12) ───────────────────────────────
+# THIS FLAG IS THE ROLLBACK SWITCH. Set V4_HITS_ENABLED = False and the
+# pipeline reverts entirely to composite_score-driven selection over the
+# pre-v4 multi-stat pool: the Gate 1 hits/over coverage floor comes back, the
+# pool stops being restricted to hits/over, and the builder sorts by
+# composite_score with MAX_LEGS back at 4. No other file needs editing and no
+# migration needs reverting — the v4 columns simply stop being populated.
+#
+# What it turns on (see docs/ARCHITECTURE_DECISIONS.md §42):
+#   1. Gate 1's hits/over COVERAGE FLOOR is removed. Gate 2 (odds band) is
+#      unchanged, and so is the seasonal minimum-games check inside
+#      calculate_coverage() — that returns None below get_season_minimum()
+#      and still drops those legs. So the pool is every available Over 0.5
+#      Hits line for a batter with enough game history to compute features,
+#      not literally every line. That residual filter is a sample-size gate,
+#      not a quality gate: it does not select on how well the batter hits.
+#   2. The production parlay pool is restricted to hits/over. Other stats are
+#      still scored and logged, they just don't reach the builder.
+#   3. Legs are ranked by p_hit instead of composite_score, and the builder
+#      may extend to V4_MAX_LEGS to reach the odds floor.
+#
+# Backtest that justified this (out-of-sample, 2026-07-01 onward):
+#   batter-game level n=11,022 — AUC 0.6042 vs 0.5976 coverage-alone,
+#   r=0.1838 95% CI [0.165, 0.202], monotone across all ten deciles,
+#   D10-D1 = 28.9pts.
+#   leg level n=1,851 — AUC 0.5243 vs composite_score 0.5061, but the
+#   difference is NOT significant (Steiger t=0.899, p=0.37). The gap between
+#   the two levels is range restriction from the very gate item 1 removes:
+#   the gated pool carries only 47% of the model's spread (SD 0.059 vs
+#   0.127), and the predicted leg-level r of 0.0867 fell inside the observed
+#   CI. Removing the gate is what the batter-game result says to do.
+V4_HITS_ENABLED = True
+
+# Builder may add a 5th/6th leg to reach the +400 floor rather than swapping
+# down the p_hit ranking. See src/engine/parlay_builder.py.
+V4_MAX_LEGS = 6
+
 # TotalBases/over sample-size gate (2026-08-05 scoring redesign): no
 # coverage_overall has ever been computed for this direction, so it's gated
 # on raw sample size instead — matches the MIN_RECENT_GAMES=5 pattern already
@@ -407,10 +444,22 @@ def _find_qualifying_legs(
             #   corresponds to roughly a .240 batting average, targeting genuine
             #   weak hitters. The 65% over gate is structurally impossible for
             #   unders (no healthy MLB hitter is hitless 65%+ of the time).
+            # v4 (2026-08-12): the hits/over coverage floor is REMOVED. (The
+            # seasonal minimum-games check above still applies — that's a
+            # sample-size gate, not a coverage one.) The floor was
+            # selecting on coverage, which is the single dimension carrying
+            # most of v4's predictive power, so it was compressing the model's
+            # spread by 53% (SD 0.127 -> 0.059) and pushing a real effect below
+            # what the resolved-leg sample can detect. Other stats' floors are
+            # deliberately left intact so this is reversible via
+            # V4_HITS_ENABLED alone.
             if direction == "over":
-                over_floor = 55.0 if stat == "hits" else 65.0
-                if coverage_overall_raw < over_floor:
-                    continue
+                if stat == "hits" and V4_HITS_ENABLED:
+                    pass  # no coverage floor — ranked later by p_hit
+                else:
+                    over_floor = 55.0 if stat == "hits" else 65.0
+                    if coverage_overall_raw < over_floor:
+                        continue
             if direction == "under" and coverage_overall_raw < 40.0:
                 continue
 
@@ -899,8 +948,36 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
     )
 
     # ── Simple Scoring (all qualifying legs, before logging and parlay builder) ──
+    # composite_score is still computed for EVERY leg, including hits/over, so
+    # v4 and v3 can be compared on live rows. Under V4_HITS_ENABLED it just no
+    # longer drives selection for hits/over.
     from src.engine.simple_scorer import score_legs
     score_legs(qualifying_legs)
+
+    # ── v4 probability model for hits/over ───────────────────────────────────
+    if V4_HITS_ENABLED:
+        try:
+            from src.engine.hits_v4 import score_hits_over_v4
+            from src.utils.db import get_conn as _v4_conn
+
+            _v4_t0 = time.time()
+            _conn = _v4_conn()
+            try:
+                n_v4 = score_hits_over_v4(
+                    qualifying_legs, _conn,
+                    cutoff_date=today,
+                    abbr_to_team_id={v: k for k, v in team_id_to_abbr.items()},
+                )
+            finally:
+                _conn.close()
+            print(f"[main] v4 scored {n_v4} hits/over leg(s) in {time.time() - _v4_t0:.2f}s")
+        except Exception as _v4_err:
+            # A v4 failure must not take the run down. Legs keep their
+            # composite_score, and the pool restriction below is skipped so
+            # the builder still has a multi-stat pool to work with.
+            print(f"[main] v4 scoring FAILED (non-fatal, falling back to composite_score): {_v4_err}")
+            import traceback
+            traceback.print_exc()
     scored_count = sum(1 for l in qualifying_legs if l.get("composite_score") is not None)
     if scored_count:
         scores = [l["composite_score"] for l in qualifying_legs if l.get("composite_score") is not None]
@@ -962,12 +1039,42 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
     tier_label = f"Tier {tier_info['tier']}" if tier_info else "Tier 4 (thin slate)"
     print(f"\n[8/8] Building hybrid parlays ({len(schedule)} games → {tier_label})...")
 
-    # totalBases (both directions) is production-eligible as of 2026-08-05 —
-    # previously excluded here and held to shadow validation only.
+    # ── v4: restrict the production pool to hits/over ────────────────────────
+    # Other stats are still scored above and still logged to mlb_scored_legs
+    # below — they just don't reach the builder. Their gates are left intact in
+    # the qualification code so flipping V4_HITS_ENABLED restores them.
+    #
+    # Only legs that actually carry a p_hit are eligible: if v4 scoring failed
+    # for a leg, it has no ranking signal under v4 and must not silently fall
+    # back to being ranked by composite_score against legs that do.
+    builder_pool = qualifying_legs
+    builder_max_legs = None
+    if V4_HITS_ENABLED:
+        v4_pool = [
+            l for l in qualifying_legs
+            if l.get("stat") == "hits" and l.get("direction") == "over"
+            and l.get("p_hit") is not None
+        ]
+        if len(v4_pool) >= 4:
+            builder_pool = v4_pool
+            builder_max_legs = V4_MAX_LEGS
+            print(
+                f"  [v4] Production pool restricted to hits/over: "
+                f"{len(v4_pool)} of {len(qualifying_legs)} legs carry p_hit"
+            )
+        else:
+            print(
+                f"  [v4] Only {len(v4_pool)} hits/over leg(s) with p_hit — "
+                f"too thin to build from. Falling back to the full "
+                f"composite_score pool for this run."
+            )
+
     parlays = build_parlays(
-        qualifying_legs,
+        builder_pool,
         top_n=5,
         num_games=len(schedule),
+        rank_by="p_hit" if builder_pool is not qualifying_legs else "composite_score",
+        max_legs=builder_max_legs,
     )
     print(f"  Built {len(parlays)} parlay(s)")
 

@@ -795,6 +795,22 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
             leg.get("exposure_weight"),
             leg.get("shadow_composite_score_v1"),
             leg.get("shadow_composite_score_v2"),
+            leg.get("p_hit"),
+            leg.get("p_per_ab"),
+            leg.get("v4_base_rate"),
+            leg.get("v4_platoon_mult"),
+            leg.get("v4_trend_mult"),
+            leg.get("v4_exp_ab"),
+            leg.get("v4_prior_games"),
+            leg.get("v4_hit_env"),
+            leg.get("v4_hit_env_adj"),
+            leg.get("v4_starter_share"),
+            leg.get("v4_sp_whip"),
+            leg.get("v4_sp_era"),
+            leg.get("v4_sp_avg_ip"),
+            leg.get("v4_bp_whip"),
+            leg.get("v4_bp_era"),
+            leg.get("v4_opp_der"),
         )
         for leg in legs
         if leg.get("stat") and leg.get("player_name") and leg.get("odd_id")
@@ -817,7 +833,11 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
              batter_hand, pitcher_vs_batter_hand_era,
              pitcher_era_rank, pitcher_k9_rank, pitcher_whip_rank, lineup_consistency,
              scorer_version, pt_tb_rate, effective_era, effective_whip, exposure_weight,
-             shadow_composite_score_v1, shadow_composite_score_v2)
+             shadow_composite_score_v1, shadow_composite_score_v2,
+             p_hit, p_per_ab, v4_base_rate, v4_platoon_mult, v4_trend_mult,
+             v4_exp_ab, v4_prior_games, v4_hit_env, v4_hit_env_adj,
+             v4_starter_share, v4_sp_whip, v4_sp_era, v4_sp_avg_ip,
+             v4_bp_whip, v4_bp_era, v4_opp_der)
         VALUES %s
         ON CONFLICT (run_date, odd_id) DO UPDATE
             SET composite_score             = COALESCE(mlb_scored_legs.composite_score,             EXCLUDED.composite_score),
@@ -844,7 +864,27 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
                 effective_whip              = COALESCE(mlb_scored_legs.effective_whip,              EXCLUDED.effective_whip),
                 exposure_weight             = COALESCE(mlb_scored_legs.exposure_weight,             EXCLUDED.exposure_weight),
                 shadow_composite_score_v1   = COALESCE(mlb_scored_legs.shadow_composite_score_v1,   EXCLUDED.shadow_composite_score_v1),
-                shadow_composite_score_v2   = COALESCE(mlb_scored_legs.shadow_composite_score_v2,   EXCLUDED.shadow_composite_score_v2)
+                shadow_composite_score_v2   = COALESCE(mlb_scored_legs.shadow_composite_score_v2,   EXCLUDED.shadow_composite_score_v2),
+                -- v4: COALESCE (not EXCLUDED) so the stored p_hit stays the one
+                -- that actually drove selection on the first run of the day.
+                -- A later run only fills it in if it was NULL — e.g. the first
+                -- run had no opposing_pitcher_id yet.
+                p_hit                       = COALESCE(mlb_scored_legs.p_hit,                       EXCLUDED.p_hit),
+                p_per_ab                    = COALESCE(mlb_scored_legs.p_per_ab,                    EXCLUDED.p_per_ab),
+                v4_base_rate                = COALESCE(mlb_scored_legs.v4_base_rate,                EXCLUDED.v4_base_rate),
+                v4_platoon_mult             = COALESCE(mlb_scored_legs.v4_platoon_mult,             EXCLUDED.v4_platoon_mult),
+                v4_trend_mult               = COALESCE(mlb_scored_legs.v4_trend_mult,               EXCLUDED.v4_trend_mult),
+                v4_exp_ab                   = COALESCE(mlb_scored_legs.v4_exp_ab,                   EXCLUDED.v4_exp_ab),
+                v4_prior_games              = COALESCE(mlb_scored_legs.v4_prior_games,              EXCLUDED.v4_prior_games),
+                v4_hit_env                  = COALESCE(mlb_scored_legs.v4_hit_env,                  EXCLUDED.v4_hit_env),
+                v4_hit_env_adj              = COALESCE(mlb_scored_legs.v4_hit_env_adj,              EXCLUDED.v4_hit_env_adj),
+                v4_starter_share            = COALESCE(mlb_scored_legs.v4_starter_share,            EXCLUDED.v4_starter_share),
+                v4_sp_whip                  = COALESCE(mlb_scored_legs.v4_sp_whip,                  EXCLUDED.v4_sp_whip),
+                v4_sp_era                   = COALESCE(mlb_scored_legs.v4_sp_era,                   EXCLUDED.v4_sp_era),
+                v4_sp_avg_ip                = COALESCE(mlb_scored_legs.v4_sp_avg_ip,                EXCLUDED.v4_sp_avg_ip),
+                v4_bp_whip                  = COALESCE(mlb_scored_legs.v4_bp_whip,                  EXCLUDED.v4_bp_whip),
+                v4_bp_era                   = COALESCE(mlb_scored_legs.v4_bp_era,                   EXCLUDED.v4_bp_era),
+                v4_opp_der                  = COALESCE(mlb_scored_legs.v4_opp_der,                  EXCLUDED.v4_opp_der)
         """,
         rows,
     )

@@ -1,10 +1,21 @@
 """
 parlay_builder.py — Single flat pool parlay builder for MLB.
 
-Parlays are fixed 4 legs from a single flat pool.
+Parlays are MIN_LEGS..max_legs legs from a single flat pool.
 Combined odds minimum: +400. No ceiling.
 
-Pool: composite_score >= 65, odds in [-250, +150].
+Two ranking modes, selected by the `rank_by` argument:
+
+  rank_by="composite_score"  (default, pre-v4 behaviour)
+      Pool: composite_score >= 65, odds in [-250, +150]. Fixed 4 legs.
+
+  rank_by="p_hit"            (v4 hits/over, 2026-08-12)
+      Pool: every hits/over leg carrying a p_hit, odds in [-250, +150].
+      NO score floor — removing it is the point of v4 (see main.py
+      V4_HITS_ENABLED and docs/ARCHITECTURE_DECISIONS.md §42). Callers pass
+      max_legs=6 so the builder can reach the +400 floor by ADDING a 5th or
+      6th leg rather than swapping down the probability ranking; see the
+      comment on the greedy loop for why that ordering matters.
 
 Constraints:
   - Max 1 leg per player per parlay.
@@ -103,18 +114,23 @@ def filter_already_used_players(legs: list, run_date: str) -> list:
     return filtered
 
 
-def _filter_legs(legs: list) -> list:
+def _filter_legs(legs: list, rank_by: str = "composite_score") -> list:
     filtered = []
     low_score_blocked = 0
     extreme_juice_blocked = 0
 
     for leg in legs:
-        score = leg.get("composite_score", 0)
-        direction = leg.get("direction", "over").lower()
-        floor = MIN_COV_POOL_UNDER if direction == "under" else MIN_COV_POOL
-        if score < floor:
-            low_score_blocked += 1
-            continue
+        # Under v4 (rank_by="p_hit") there is no score floor at all — the whole
+        # point of v4 is that the coverage/composite gate was compressing the
+        # model's spread and discarding real signal. Gate 2 (the odds band
+        # below) still applies, and so do every per-game and per-player cap.
+        if rank_by == "composite_score":
+            score = leg.get("composite_score", 0)
+            direction = leg.get("direction", "over").lower()
+            floor = MIN_COV_POOL_UNDER if direction == "under" else MIN_COV_POOL
+            if score < floor:
+                low_score_blocked += 1
+                continue
         odds = leg.get("best_odds")
         if odds is not None:
             try:
@@ -186,7 +202,9 @@ def _leg_fits(candidate: dict, other_legs: list) -> bool:
     return True
 
 
-def _attempt_swap_recovery(legs: list, pool: list, min_decimal: float) -> tuple[list | None, int]:
+def _attempt_swap_recovery(
+    legs: list, pool: list, min_decimal: float, rank_by: str = "composite_score"
+) -> tuple[list | None, int]:
     """
     When `legs` (the greedy top-N-by-score pick) doesn't clear `min_decimal`,
     search for a single-leg swap that does.
@@ -209,7 +227,7 @@ def _attempt_swap_recovery(legs: list, pool: list, min_decimal: float) -> tuple[
     selected_ids = {id(l) for l in legs}
     alternatives = sorted(
         (l for l in pool if id(l) not in selected_ids),
-        key=lambda l: l.get("composite_score", 0),
+        key=lambda l: l.get(rank_by) or 0,
         reverse=True,
     )[:SWAP_CANDIDATE_LIMIT]
 
@@ -229,7 +247,7 @@ def _attempt_swap_recovery(legs: list, pool: list, min_decimal: float) -> tuple[
             if _combined_decimal(trial_legs) < min_decimal:
                 continue
 
-            total_score = sum(l.get("composite_score", 0.0) for l in trial_legs)
+            total_score = sum((l.get(rank_by) or 0.0) for l in trial_legs)
             if total_score > best_score:
                 best_score = total_score
                 best_legs = trial_legs
@@ -241,6 +259,8 @@ def build_parlays(
     pool_legs: list,
     top_n: int = 5,
     num_games: int = 15,
+    rank_by: str = "composite_score",
+    max_legs: int | None = None,
 ) -> list:
     """
     Build up to top_n parlays from a single flat leg pool.
@@ -266,9 +286,10 @@ def build_parlays(
 
     TIER = params["tier"]
     MIN_DECIMAL = MIN_PARLAY_ODDS / 100 + 1
+    EFF_MAX_LEGS = max_legs if max_legs is not None else MAX_LEGS
 
     # Filter pool by threshold gates
-    filtered_pool = _filter_legs(pool_legs)
+    filtered_pool = _filter_legs(pool_legs, rank_by=rank_by)
 
     if len(filtered_pool) < MIN_LEGS:
         print(
@@ -284,7 +305,8 @@ def build_parlays(
 
     print(
         f"  [parlay_builder] Received {len(pool_legs)} pool legs | "
-        f"target {MIN_LEGS}–{MAX_LEGS} legs, +{MIN_PARLAY_ODDS}+ combined odds"
+        f"target {MIN_LEGS}–{EFF_MAX_LEGS} legs, +{MIN_PARLAY_ODDS}+ combined odds "
+        f"| ranking by {rank_by}"
     )
     print(
         f"  [parlay_builder] Eligible: {len(filtered_pool)} pool legs (Tier {TIER})"
@@ -315,8 +337,9 @@ def build_parlays(
             )
             break
 
-        # Sort by composite_score DESC — greedy selects highest-quality legs first
-        pool_sorted = sorted(avail_pool, key=lambda l: l.get("composite_score", 0), reverse=True)
+        # Sort by the ranking signal DESC — greedy selects best legs first.
+        # Under v4 that's p_hit (probability of >=1 hit); otherwise composite_score.
+        pool_sorted = sorted(avail_pool, key=lambda l: l.get(rank_by) or 0, reverse=True)
 
         # ── Greedy selection ─────────────────────────────────────────────────
         legs: list = []
@@ -325,8 +348,22 @@ def build_parlays(
         in_parlay: set = set()
         combined_dec = 1.0
 
+        # Greedy walk in rank order. The loop only stops early once MIN_LEGS
+        # are held AND the odds floor is cleared; otherwise it keeps ADDING
+        # legs up to EFF_MAX_LEGS.
+        #
+        # That ordering is deliberate and is the whole reason EFF_MAX_LEGS can
+        # exceed MIN_LEGS under v4. Ranking by probability and requiring +400
+        # pull against each other — higher-probability legs are priced shorter,
+        # so a 4-leg parlay of the very best p_hit legs will often sit under
+        # the floor. The two ways out are (a) add a 5th/6th leg, or (b) swap a
+        # top leg for a longer-priced one further down the ranking. (a) keeps
+        # every leg the model likes and buys odds with an extra selection;
+        # (b) discards the model's own preference to buy the same odds. So
+        # extension is tried first, exhaustively, and _attempt_swap_recovery()
+        # below fires only if EFF_MAX_LEGS legs still miss the floor.
         for leg in pool_sorted:
-            if len(legs) >= MAX_LEGS:
+            if len(legs) >= EFF_MAX_LEGS:
                 break
 
             odd_id = leg.get("odd_id")
@@ -369,7 +406,9 @@ def build_parlays(
             recovery_status = None  # set below by the swap attempt
 
         if len(legs) >= MIN_LEGS and combined_dec < MIN_DECIMAL:
-            swapped_legs, swap_attempts = _attempt_swap_recovery(legs, pool_sorted, MIN_DECIMAL)
+            swapped_legs, swap_attempts = _attempt_swap_recovery(
+                legs, pool_sorted, MIN_DECIMAL, rank_by=rank_by
+            )
             if swapped_legs is not None:
                 legs = swapped_legs
                 combined_dec = _combined_decimal(legs)
@@ -393,6 +432,8 @@ def build_parlays(
         odds_val = int((combined_dec - 1) * 100)
         avg_cov  = sum(l["coverage_pct"] for l in legs) / len(legs)
         avg_comp = sum(l.get("composite_score", 0.0) for l in legs) / len(legs)
+        p_hits   = [l["p_hit"] for l in legs if l.get("p_hit") is not None]
+        avg_p_hit = round(sum(p_hits) / len(p_hits), 4) if p_hits else None
         ev_list  = [l["ev_per_unit"] for l in legs if "ev_per_unit" in l]
         avg_ev   = round(sum(ev_list) / len(ev_list), 4) if ev_list else None
 
@@ -402,9 +443,11 @@ def build_parlays(
             "num_legs":      len(legs),
             "avg_coverage":  round(avg_cov, 1),
             "avg_composite": round(avg_comp, 4),
+            "avg_p_hit":     avg_p_hit,
             "avg_ev":        avg_ev,
             "parlay_type":   "pool",
             "tier":          TIER,
+            "ranked_by":     rank_by,
         }
 
         for leg in legs:

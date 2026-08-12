@@ -104,26 +104,46 @@ def _run(prop, coverage_return, pt_totals_return=None):
         )
 
 
+def _coverage(pct):
+    return {"coverage_overall": pct, "coverage_vs_hand": None,
+            "coverage_recent_10": pct, "games_total": 50,
+            "games_vs_hand": None, "games_recent": 10,
+            "pitcher_hand": "R", "batter_hand": "R"}
+
+
 class TestHitsOverGateLowered:
-    """hits/over: floor lowered from 65% to 55% — no evidence 65% was calibrated."""
+    """
+    hits/over floor: 65% -> 55% (2026-08-05), then REMOVED under v4
+    (2026-08-12). Both behaviours are pinned here against main.V4_HITS_ENABLED
+    so the flag remains a genuine rollback switch — if flipping it back to
+    False stops restoring the 55% floor, the legacy test below fails.
+    """
 
-    def test_60pct_now_qualifies(self):
-        prop = _make_prop("hits", "over", 0.5)
-        coverage = {"coverage_overall": 60.0, "coverage_vs_hand": None,
-                    "coverage_recent_10": 60.0, "games_total": 50,
-                    "games_vs_hand": None, "games_recent": 10,
-                    "pitcher_hand": "R", "batter_hand": "R"}
-        legs = _run(prop, coverage)
-        assert len(legs) == 1, "60% coverage should qualify under the new 55% floor"
+    def test_60pct_qualifies_either_way(self):
+        legs = _run(_make_prop("hits", "over", 0.5), _coverage(60.0))
+        assert len(legs) == 1, "60% coverage qualifies under both the 55% floor and v4"
 
-    def test_below_55pct_still_rejected(self):
-        prop = _make_prop("hits", "over", 0.5)
-        coverage = {"coverage_overall": 50.0, "coverage_vs_hand": None,
-                    "coverage_recent_10": 50.0, "games_total": 50,
-                    "games_vs_hand": None, "games_recent": 10,
-                    "pitcher_hand": "R", "batter_hand": "R"}
-        legs = _run(prop, coverage)
-        assert legs == [], "50% coverage is still below the new 55% floor"
+    def test_below_55pct_rejected_when_v4_disabled(self):
+        with patch("main.V4_HITS_ENABLED", False):
+            legs = _run(_make_prop("hits", "over", 0.5), _coverage(50.0))
+        assert legs == [], "with v4 off, 50% coverage is below the legacy 55% floor"
+
+    def test_below_55pct_accepted_when_v4_enabled(self):
+        """v4 removes the coverage floor — this is the pool-widening change."""
+        with patch("main.V4_HITS_ENABLED", True):
+            legs = _run(_make_prop("hits", "over", 0.5), _coverage(50.0))
+        assert len(legs) == 1, "v4 removes the hits/over coverage floor entirely"
+
+    def test_very_low_coverage_accepted_when_v4_enabled(self):
+        with patch("main.V4_HITS_ENABLED", True):
+            legs = _run(_make_prop("hits", "over", 0.5), _coverage(12.0))
+        assert len(legs) == 1, "no coverage floor means no floor, not a lower one"
+
+    def test_v4_does_not_widen_other_stats(self):
+        """The floor removal is hits/over only — strikeouts/over is untouched."""
+        with patch("main.V4_HITS_ENABLED", True):
+            legs = _run(_make_prop("strikeouts", "over", 0.5), _coverage(50.0))
+        assert legs == [], "v4 must not remove the strikeouts/over floor"
 
 
 class TestStrikeoutsOverGateUnchanged:

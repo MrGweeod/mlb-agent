@@ -1,7 +1,43 @@
 # MLB Parlay Agent — Session Handoff
-**Last Updated:** August 7, 2026 (Session 28 — totalBases/over win-rate calibration fix (v3) shipped, deployed, and live-verified; composite_score audit found hits/over's real-world signal is being diluted by an effective_era coverage gap; two independent bugs found — edge_pct formula, auto_530pm mislabeling)
+**Last Updated:** August 12, 2026 (Session 30 — v4 hits/over probability model replaces composite_score for selection; Gate 1 coverage floor removed; pool restricted to hits/over; mlb_players handedness backfilled)
 
-## Current Status
+## Session 30 (2026-08-12) — v4 hits/over probability model
+
+✅ **`P(>=1 hit)` (`p_hit`) replaces `composite_score` as the hits/over selection signal.** New module `src/engine/hits_v4.py`. Every constant fitted on games before 2026-07-01 and evaluated out-of-sample on 2026-07-01 onward; nothing hand-picked. Full detail and the constants table in `ARCHITECTURE_DECISIONS.md` §42 — that is the authoritative write-up.
+
+✅ **Gate 1's hits/over coverage floor is REMOVED.** The pool is now every available Over 0.5 Hits line for a batter with enough history to compute features. Gate 2 (odds band `[-250, +150]`), the per-game cap (2), and the per-player caps are all unchanged. Other stats' floors are untouched in code.
+
+✅ **Production parlay pool restricted to hits/over.** Other stats are still scored and still logged to `mlb_scored_legs`; they just don't reach the builder.
+
+✅ **Builder ranks by `p_hit`, targets 4+ legs, +400 floor, no ceiling.** It reaches the floor by adding a 5th/6th leg rather than swapping down the probability ranking — see §42 for why that ordering matters, and for the §26 EV caveat it reopens.
+
+✅ **Backtest, out-of-sample.** Batter-game level (n=11,022): AUC **0.6042** vs 0.5976 coverage-alone, r=**0.1838** CI [0.165, 0.202], win rate monotone across all ten deciles (.372 → .661, D10−D1 = **28.9pts**). Leg level (n=1,851): AUC 0.5243 vs `composite_score` 0.5061 — better on every metric but **not statistically significant** (Steiger p=0.37). The gap is range restriction from the very gate this session removed (u=0.465; predicted leg-level r of 0.0867 sits inside the observed CI).
+
+✅ **`mlb_players.throws`/`.bats` backfilled** — both were 100% NULL across all 1,388 rows. Validated at **16,919/16,919** agreement against `mlb_scored_legs.pitcher_hand`.
+
+✅ **Migration applied and verified live** in `information_schema.columns`: 16 new `mlb_scored_legs` columns (`p_hit`, `p_per_ab`, `v4_*`), all `DOUBLE PRECISION` (no declared precision to overflow — the 8/5–8/6 zero-save incident was a `NUMERIC` overflow).
+
+✅ **Tests: 55/55 passing** across `test_hits_v4.py` (new, 33 tests), `test_main_gates_2026_08_05.py` (updated to pin both `V4_HITS_ENABLED` states), `test_simple_scorer_2026_08_05.py`.
+
+✅ **Smoke test passed offline** on 2026-08-11's 121 real legs (`scripts/smoke_test_hits_v4.py`): 121/121 scored, no guard rejections, p_hit 0.4007–0.7763, no overflow risk, valid parlay built at 5 legs/+575 using `p_hit` ranks [0,1,2,3,4]. **Top-4 overlap between the `p_hit` and `composite_score` rankings was 0/4** — these are genuinely different orderings.
+
+🔲 **PENDING — run the smoke test in LIVE mode before trusting a scheduled run.** This sandbox has no `.env`/`DATABASE_URL`, so `load_v4_aggregates()`'s psycopg2 path was never executed. Run:
+`source .venv/bin/activate && python scripts/smoke_test_hits_v4.py --date 2026-08-11`
+It exits non-zero on failure. Everything above it (the model arithmetic, the builder, the SQL logic) is verified; the DB round-trip is not.
+
+🔲 **PENDING — deploy to Railway** (`mlb-agent`, `dashboard-api`) and verify the first live run: `p_hit` non-null on hits/over rows, `scorer_version = 'v4_2026-08-12'`, parlays built from hits/over only.
+
+🔲 **PENDING — live EV check on 5-leg parlays** (see §42's §26 caveat). If per-$1 EV comes back negative, set `V4_MAX_LEGS = 4`.
+
+🔲 **PENDING — leg-level confirmation needs ~5 days.** At r≈0.087 and ~106 hits/over legs/day ungated, ~514 legs are needed for the CI to clear zero.
+
+**ROLLBACK: set `main.V4_HITS_ENABLED = False`.** One constant, no other file, no migration to revert.
+
+⚠️ **§40's `effective_era` diagnosis is partially superseded.** The population gap is real, but the near-zero raw-ERA correlation was not solely dilution: ERA's coefficient conditional on WHIP is genuinely **negative** (t=−5.7). See §42.
+
+---
+
+## Current Status (Session 28 and earlier — carried forward)
 ✅ **OPERATIONAL — totalBases/over WIN-RATE CALIBRATION FIX (v3) DEPLOYED AND LIVE-VERIFIED (SESSION 28)**
 ✅ **Bug found and fixed: zero parlays saved 8/5-8/6 due to a numeric field overflow.** `mlb_parlay_recommendations_v2.edge_percent` (`NUMERIC(6,3)`, max ~999.999) overflowed on `edge_percent` values up to 1783.1%, caused by totalBases/over's percentile-rank scoring implying win probabilities far above real outcomes — caught in a non-fatal `try/except` that silently rolled back the entire save batch both days, with the pipeline itself completing normally (no visible error).
 ✅ **Root cause confirmed: totalBases/over's percentile-rank scoring implied ~95% win probability at the top of the pool; real historical win rate only ranges ~21-39%.** Checked against 1,421 resolved totalBases/over legs (`pt_tb_rate` percentile-ranked within each day's pool the same way the live scorer does). Investigated and ruled out opposing-starter WHIP/rolling-IP as an alternative signal first (r<0.03 for WHIP alone, IP alone, and their interaction, n=1,352) before landing on a calibration fix.

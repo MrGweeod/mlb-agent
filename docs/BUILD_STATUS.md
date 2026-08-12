@@ -1,7 +1,56 @@
 # MLB Parlay Agent — Build Status
-**Last Updated:** August 7, 2026 (Session 28 — totalBases/over win-rate calibration fix (v3) shipped, deployed, and live-verified; composite_score audit found hits/over's real-world signal is being diluted by an effective_era coverage gap; two independent bugs found — edge_pct formula, auto_530pm mislabeling)
+**Last Updated:** August 12, 2026 (Session 30 — v4 hits/over probability model replaces composite_score for selection; Gate 1 coverage floor removed; production pool restricted to hits/over)
 
-## Overall System Status: ✅ OPERATIONAL — totalBases/over CALIBRATION FIX (v3) DEPLOYED AND LIVE-VERIFIED (SESSION 28); FOUR OPEN ITEMS (effective_era GAP, edge_pct FORMULA, auto_530pm MISLABELING, TWO WEAK-SIGNAL FINDINGS) NOT YET FIXED
+## Overall System Status: ✅ OPERATIONAL — v4 HITS/OVER PROBABILITY MODEL CODE-COMPLETE AND SMOKE-TESTED, **NOT YET DEPLOYED OR LIVE-VERIFIED** (SESSION 30)
+
+```
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                    v4 HITS/OVER MODEL (Session 30, 2026-08-12)                 │
+├────────────────────────────────────────────────────────────────────────────────┤
+│ Selection signal:               ✅ p_hit = P(>=1 hit)  — src/engine/hits_v4.py │
+│ composite_score:                ✅ STILL COMPUTED + STORED for comparison,     │
+│                                    no longer drives hits/over selection        │
+│ Gate 1 (hits/over cov floor):   ✅ REMOVED — pool is every Over 0.5 Hits line  │
+│                                    with enough history to compute features     │
+│ Gate 1 (other stats):           ✅ UNCHANGED — left intact for reversibility   │
+│ Gate 2 (odds band):             ✅ UNCHANGED  [-250, +150]                     │
+│ Per-game / per-player caps:     ✅ UNCHANGED  (2 per game, 2 parlays/player)   │
+│ Production pool:                ✅ RESTRICTED TO hits/over                     │
+│ Builder:                        ✅ ranks by p_hit, 4-6 legs, +400 floor,       │
+│                                    no ceiling; reaches floor by EXTENDING,     │
+│                                    never by swapping down the ranking          │
+├────────────────────────────────────────────────────────────────────────────────┤
+│ Backtest (out-of-sample, 2026-07-01+):                                         │
+│   batter-game n=11,022:         ✅ AUC 0.6042 (vs 0.5976 coverage-alone)       │
+│                                    r=0.1838, 95% CI [0.165, 0.202]             │
+│                                    monotone across ALL TEN deciles             │
+│                                    D10-D1 = 28.9 percentage points             │
+│   leg level n=1,851:            ⚠️  AUC 0.5243 vs composite_score 0.5061 —    │
+│                                    better on every metric but NOT significant  │
+│                                    (Steiger p=0.37). Explained quantitatively  │
+│                                    by range restriction (u=0.465) from the     │
+│                                    very gate this session removes.             │
+├────────────────────────────────────────────────────────────────────────────────┤
+│ Tests:                          ✅ 55/55 passing                               │
+│ Smoke test (offline):           ✅ PASSED — 121/121 legs scored, valid parlay  │
+│                                    at 5 legs/+575, p_hit ranks [0,1,2,3,4]     │
+│ Smoke test (live DB):           🔲 NOT RUN — no .env in this sandbox           │
+│ Deployed to Railway:            🔲 NOT YET                                     │
+│ Live-verified:                  🔲 NOT YET                                     │
+├────────────────────────────────────────────────────────────────────────────────┤
+│ ROLLBACK:                       main.V4_HITS_ENABLED = False                   │
+│                                 One constant. No other file. No migration      │
+│                                 to revert. Both states pinned by tests.        │
+└────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Reference data fixed this session:** `mlb_players.throws`/`.bats` were 100% NULL on all 1,388 rows; backfilled from StatsAPI and validated at 16,919/16,919 agreement against `mlb_scored_legs.pitcher_hand`.
+
+**Full write-up: `ARCHITECTURE_DECISIONS.md` §42.**
+
+---
+
+## Session 28 status (carried forward)
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────┐

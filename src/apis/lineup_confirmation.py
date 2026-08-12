@@ -433,6 +433,8 @@ def run_confirmed_lineup_resolution(run_date_str: str, affected_parlay_ids: list
         POOL_MIN_COVERAGE,
         POOL_MIN_ODDS,
         POOL_MAX_ODDS,
+        V4_HITS_ENABLED,
+        V4_MAX_LEGS,
     )
     from src.engine.parlay_builder import build_parlays, TOTAL_LEGS
     from src.utils.sorting import sort_legs_by_game_time
@@ -454,7 +456,7 @@ def run_confirmed_lineup_resolution(run_date_str: str, affected_parlay_ids: list
           AND game_start_time::timestamptz > now()
           AND (lineup_check_status IN ('LINEUP_CONFIRMED', 'MISSING_LINEUP_CONFIRMATION')
                OR lineup_check_status IS NULL)
-          AND composite_score IS NOT NULL
+          AND (composite_score IS NOT NULL OR p_hit IS NOT NULL)
         """,
         (run_date_str,),
     )
@@ -462,13 +464,26 @@ def run_confirmed_lineup_resolution(run_date_str: str, affected_parlay_ids: list
     cur.close()
     conn.close()
 
+    # Under v4 the replacement pool must be built the same way the original
+    # parlay was, or a scratched leg gets swapped for one chosen by a signal
+    # that no longer drives selection. Same restriction (hits/over carrying
+    # p_hit), same absence of a score floor, same ranking.
+    rebuild_rank_by = "p_hit" if V4_HITS_ENABLED else "composite_score"
+    rebuild_max_legs = V4_MAX_LEGS if V4_HITS_ENABLED else None
+
     eligible_pool = []
     for leg in pool_rows:
-        direction = (leg.get("direction") or "over").lower()
-        cov_floor = 40.0 if direction == "under" else POOL_MIN_COVERAGE
-        comp      = leg.get("composite_score") or 0
-        if comp < cov_floor:
-            continue
+        if V4_HITS_ENABLED:
+            if leg.get("stat") != "hits" or (leg.get("direction") or "").lower() != "over":
+                continue
+            if leg.get("p_hit") is None:
+                continue
+        else:
+            direction = (leg.get("direction") or "over").lower()
+            cov_floor = 40.0 if direction == "under" else POOL_MIN_COVERAGE
+            comp      = leg.get("composite_score") or 0
+            if comp < cov_floor:
+                continue
         try:
             odds_val = float(leg.get("odds") or 0)
         except (TypeError, ValueError):
@@ -479,8 +494,12 @@ def run_confirmed_lineup_resolution(run_date_str: str, affected_parlay_ids: list
         leg["best_line"] = leg.get("line")
         eligible_pool.append(leg)
 
-    eligible_pool = [l for l in eligible_pool if l.get("stat") != "totalBases"]
-    print(f"[clr] Replacement pool: {len(eligible_pool)} eligible upcoming legs (totalBases excluded)")
+    if not V4_HITS_ENABLED:
+        eligible_pool = [l for l in eligible_pool if l.get("stat") != "totalBases"]
+    print(
+        f"[clr] Replacement pool: {len(eligible_pool)} eligible upcoming legs "
+        f"(ranking by {rebuild_rank_by})"
+    )
 
     # ── Step 2: Seconds until start for each game (DB-level, avoids TZ parsing) ─
     conn = get_conn()
@@ -619,7 +638,10 @@ def run_confirmed_lineup_resolution(run_date_str: str, affected_parlay_ids: list
             _void_parlay(parlay_id, f"THIN_POOL_NO_REBUILD: {bad_reasons}")
             continue
 
-        candidates = build_parlays(available_pool, top_n=10, num_games=15)
+        candidates = build_parlays(
+            available_pool, top_n=10, num_games=15,
+            rank_by=rebuild_rank_by, max_legs=rebuild_max_legs,
+        )
         if not candidates:
             print(f"[clr] Builder produced no candidates for parlay {parlay_id} — voiding")
             thin_pool += 1
