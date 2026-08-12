@@ -21,11 +21,12 @@
 
 ✅ **Smoke test passed offline** on 2026-08-11's 121 real legs (`scripts/smoke_test_hits_v4.py`): 121/121 scored, no guard rejections, p_hit 0.4007–0.7763, no overflow risk, valid parlay built at 5 legs/+575 using `p_hit` ranks [0,1,2,3,4]. **Top-4 overlap between the `p_hit` and `composite_score` rankings was 0/4** — these are genuinely different orderings.
 
-🔲 **PENDING — run the smoke test in LIVE mode before trusting a scheduled run.** This sandbox has no `.env`/`DATABASE_URL`, so `load_v4_aggregates()`'s psycopg2 path was never executed. Run:
-`source .venv/bin/activate && python scripts/smoke_test_hits_v4.py --date 2026-08-11`
-It exits non-zero on failure. Everything above it (the model arithmetic, the builder, the SQL logic) is verified; the DB round-trip is not.
+⛔ **SHIPPED DISABLED — `V4_HITS_ENABLED = False`.** The code is on `master` and deployed, but v4 is NOT active. With the flag off the pipeline behaves exactly as it did at `9a879cc`. This was deliberate: Railway auto-deploys on push to `master` with **no CI gate** (confirmed from service config — both `mlb-agent` and `dashboard-api` track `MrGweeod/mlb-agent`/`master`, `checkSuites: false`), and the build sandbox had no `.env`, so shipping it `True` would have put un-smoke-tested code live.
 
-🔲 **PENDING — deploy to Railway** (`mlb-agent`, `dashboard-api`) and verify the first live run: `p_hit` non-null on hits/over rows, `scorer_version = 'v4_2026-08-12'`, parlays built from hits/over only.
+🔲 **PENDING — TO ENABLE, in this order:**
+1. `source .venv/bin/activate && python scripts/smoke_test_hits_v4.py --date 2026-08-11` — this is the one thing never verified: `load_v4_aggregates()`'s psycopg2 round-trip. Exits non-zero on failure; do not proceed if it fails. Everything else (model arithmetic, builder, SQL logic) is verified.
+2. Flip `main.V4_HITS_ENABLED` to `True`, commit, push. Railway redeploys automatically.
+3. Verify the first live run: `p_hit` non-null on hits/over rows, `scorer_version = 'v4_2026-08-12'`, parlays built from hits/over only.
 
 🔲 **PENDING — live EV check on 5-leg parlays** (see §42's §26 caveat). If per-$1 EV comes back negative, set `V4_MAX_LEGS = 4`.
 

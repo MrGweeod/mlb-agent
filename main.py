@@ -82,7 +82,23 @@ POOL_MAX_ODDS     = 150
 #   the gated pool carries only 47% of the model's spread (SD 0.059 vs
 #   0.127), and the predicted leg-level r of 0.0867 fell inside the observed
 #   CI. Removing the gate is what the batter-game result says to do.
-V4_HITS_ENABLED = True
+# SHIPPED DISABLED (2026-08-12). The code is complete, tested (55/55) and
+# smoke-tested offline, but the LIVE smoke test — the one that exercises
+# load_v4_aggregates()'s psycopg2 path against the real DB — has not been run,
+# because the sandbox this was built in has no .env/DATABASE_URL. Railway
+# auto-deploys on push to master with no CI gate, so shipping this True would
+# have put v4 live un-smoke-tested.
+#
+# TO ENABLE, in this order:
+#   1. source .venv/bin/activate && python scripts/smoke_test_hits_v4.py --date 2026-08-11
+#      (exits non-zero on failure — do not proceed if it fails)
+#   2. flip this to True, commit, push. Railway redeploys automatically.
+#
+# With this False the pipeline behaves exactly as it did at 9a879cc: Gate 1's
+# hits/over coverage floor applies, the pool is multi-stat, and the builder
+# ranks by composite_score at a fixed 4 legs. The v4 columns exist in
+# mlb_scored_legs but stay NULL.
+V4_HITS_ENABLED = False
 
 # Builder may add a 5th/6th leg to reach the +400 floor rather than swapping
 # down the p_hit ranking. See src/engine/parlay_builder.py.

@@ -34,9 +34,16 @@
 │ Tests:                          ✅ 55/55 passing                               │
 │ Smoke test (offline):           ✅ PASSED — 121/121 legs scored, valid parlay  │
 │                                    at 5 legs/+575, p_hit ranks [0,1,2,3,4]     │
-│ Smoke test (live DB):           🔲 NOT RUN — no .env in this sandbox           │
-│ Deployed to Railway:            🔲 NOT YET                                     │
+│ Smoke test (live DB):           🔲 NOT RUN — no .env in the build sandbox      │
+│ V4_HITS_ENABLED:                ⛔ FALSE — SHIPPED DISABLED ON PURPOSE         │
+│ Deployed to Railway:            ✅ CODE deployed (auto-deploy on push/master) │
+│ ACTIVE in production:           ⛔ NO — pipeline behaves exactly as 9a879cc    │
 │ Live-verified:                  🔲 NOT YET                                     │
+├────────────────────────────────────────────────────────────────────────────────┤
+│ TO ENABLE (in this order):                                                     │
+│   1. python scripts/smoke_test_hits_v4.py --date 2026-08-11                    │
+│      (needs a real .env/DATABASE_URL; exits non-zero on failure)               │
+│   2. flip main.V4_HITS_ENABLED to True, commit, push — Railway redeploys       │
 ├────────────────────────────────────────────────────────────────────────────────┤
 │ ROLLBACK:                       main.V4_HITS_ENABLED = False                   │
 │                                 One constant. No other file. No migration      │
