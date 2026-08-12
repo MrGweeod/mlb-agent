@@ -47,6 +47,25 @@ before landing on this fix — see chat 2026-08-06 for the full test.
 
 SCORER_VERSION = "v3_2026-08-06"
 
+# Shadow-only ERA re-weight test (2026-08-11) — see docs/ARCHITECTURE_DECISIONS.md
+# §40 follow-up. Live hits/over scoring's ERA term is a discretized ±5 step
+# that only fires outside effective_era [3.0, 5.0] (~70% of legs land in that
+# dead zone and get +0). A read-only diagnostic replacing the step with a
+# continuous term proportional to (effective_era − league_avg) showed
+# correlation with outcome climbing monotonically with the term's weight —
+# from r=0.0065 (ERA excluded) toward r=0.0376 at an 8x-equivalent weight,
+# approaching continuous effective_era-alone's r=0.0548. These two constants
+# are that diagnostic's 4x/8x tiers, carried into shadow scoring for a live
+# read before touching production. Never assigned to composite_score.
+#
+# _SHADOW_ERA_MID is a local copy of src.apis.matchup._ERA_MID (4.00) — not
+# imported, since this module is pure-function/no-DB by design (see
+# tests/test_simple_scorer_2026_08_05.py's docstring) and src.apis.matchup
+# pulls in src.utils.db, which opens a live connection at import time.
+_SHADOW_ERA_MID = 4.00
+_SHADOW_ERA_WEIGHT_V1 = 4.0   # score points per 1.0 ERA away from league average
+_SHADOW_ERA_WEIGHT_V2 = 8.0   # score points per 1.0 ERA away from league average
+
 # Empirical win-rate calibration for totalBases/over, fit 2026-08-06 — see
 # module docstring above for methodology and evidence. Score = intercept +
 # slope * day-pool percentile (0-100), expressed on the same 0-100 scale as
@@ -220,6 +239,64 @@ def calculate_composite_score(leg):
     return max(5, min(95, score))
 
 
+def _shadow_hits_over_score(leg, era_weight):
+    """
+    Shadow-only recomputation of the hits/over composite_score formula with
+    one change: the live ±5 discretized ERA step (see calculate_composite_score,
+    section 3) is replaced by a continuous term, era_weight points per 1.0 ERA
+    away from league average (_SHADOW_ERA_MID). Every other term (base
+    coverage, trend, lineup) is identical to the live formula. Diagnostic
+    only — the result is never assigned to composite_score and never affects
+    selection.
+    """
+    if leg.get("coverage_vs_hand") is not None and leg.get("coverage_vs_hand") > 0:
+        score = leg["coverage_vs_hand"]
+    elif leg.get("coverage_overall") is not None:
+        score = leg["coverage_overall"]
+    else:
+        score = leg.get("coverage_pct", 50)
+
+    recent_10 = leg.get("coverage_recent_10")
+    coverage_overall = leg.get("coverage_overall")
+    if recent_10 is not None and coverage_overall is not None:
+        gap = coverage_overall - recent_10
+        if gap >= 20:
+            score -= 6
+        elif gap >= 12:
+            score -= 4
+        elif gap >= 6:
+            score -= 2
+        elif gap <= -10:
+            score += 2
+        elif gap <= -5:
+            score += 1
+
+    pitcher_era = leg.get("effective_era")
+    if pitcher_era is None:
+        pitcher_era = leg.get("pitcher_era")
+    if pitcher_era is not None:
+        score += (pitcher_era - _SHADOW_ERA_MID) * era_weight
+
+    lineup_consistency = leg.get("lineup_consistency")
+    if lineup_consistency is not None and lineup_consistency < 0.50:
+        score -= 5
+
+    return max(5, min(95, score))
+
+
+def calculate_shadow_composite_scores_hits_over(leg):
+    """
+    Attach shadow_composite_score_v1/_v2 to a hits/over leg in-place, using
+    the 4x/8x continuous-ERA weight tiers (see module-level constants above).
+    No-op for every other stat/direction. Read-only — does not touch
+    composite_score or any field selection logic reads.
+    """
+    if leg.get("stat") != "hits" or leg.get("direction") != "over":
+        return
+    leg["shadow_composite_score_v1"] = _shadow_hits_over_score(leg, _SHADOW_ERA_WEIGHT_V1)
+    leg["shadow_composite_score_v2"] = _shadow_hits_over_score(leg, _SHADOW_ERA_WEIGHT_V2)
+
+
 def score_legs(legs):
     """
     Score all legs using simple coverage + contextual adjustments.
@@ -241,6 +318,7 @@ def score_legs(legs):
         score = calculate_composite_score(leg)
         leg["composite_score"] = score
         leg["scorer_version"] = SCORER_VERSION
+        calculate_shadow_composite_scores_hits_over(leg)
         leg["score_breakdown"] = {
             "base_coverage": base,
             "final_score": score,

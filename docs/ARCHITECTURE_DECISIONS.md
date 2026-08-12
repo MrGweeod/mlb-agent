@@ -786,6 +786,20 @@ was checked, not because it surfaced anything new.**
 
 ---
 
+## §41 — Session 29 (2026-08-11): hits/over ERA re-weight shipped as a shadow signal
+
+**Background.** §40 identified that hits/over `composite_score`'s ERA term discretizes `effective_era`/`pitcher_era` into a ±5 step that only fires outside `[3.0, 5.0]` — ~70% of legs land in that dead zone and get +0. A same-session read-only diagnostic (recomputing alternate weightings from stored `mlb_scored_legs` columns, no code changes) showed correlation with outcome climbing monotonically as the ERA term's weight increased: r=0.0065 (ERA excluded) → r=0.0103 (2x) → r=0.0232 (4x) → r=0.0376 (8x), approaching continuous `effective_era`-alone's r=0.0548. This suggested a continuous, higher-weighted ERA term is directionally likely to help — not yet validated against live selection, so shipped as a shadow signal rather than a production change.
+
+**Implementation.** `src/engine/simple_scorer.py`: `_shadow_hits_over_score(leg, era_weight)` recomputes the hits/over formula with the live ±5 discretized step replaced by `(pitcher_era_or_effective_era − 4.00) × era_weight`; every other term (base coverage, trend, lineup) is byte-for-byte identical to `calculate_composite_score()`. `calculate_shadow_composite_scores_hits_over(leg)` is a hits/over-only wrapper called from `score_legs()` right after `composite_score` is assigned, attaching `shadow_composite_score_v1` (weight=4, the diagnostic's 4x tier) and `shadow_composite_score_v2` (weight=8, the 8x tier) to the leg dict. Never assigned to `composite_score`; no other function reads these keys, so leg selection (`build_parlays`, the player cap, Gate 1/2) is untouched — verified by running `score_legs()` against a small in-memory leg set and confirming `composite_score` was unchanged before/after the addition, plus the full pre-existing `tests/test_simple_scorer_2026_08_05.py` suite (16/16) still passes unmodified.
+
+`_SHADOW_ERA_MID = 4.00` is a **local copy** of `src.apis.matchup._ERA_MID`, not an import — `simple_scorer.py` is documented (in `tests/test_simple_scorer_2026_08_05.py`'s own docstring) as pure-function/no-DB, and `src.apis.matchup` transitively imports `src.utils.db`, which opens a live DB connection at module-import time (`init_db()` at `db.py` module scope). An initial version imported `_ERA_MID` directly and broke that invariant (confirmed by reproducing the import failure locally before reverting to a local constant) — noted here since it's an easy trap for the next person wiring a new signal into this specific file.
+
+**Schema.** `sql/shadow_era_reweight_2026_08_11_migration.sql` adds `shadow_composite_score_v1 REAL` and `shadow_composite_score_v2 REAL` to `mlb_scored_legs`, applied directly via the Supabase MCP and verified live via `information_schema.columns` (not assumed from exit status). `src/utils/db.py`'s `log_scored_legs()` INSERT/ON CONFLICT was extended with both columns using the same `COALESCE(existing, EXCLUDED)` pattern as `composite_score` and the other §39 signal columns — column list and value tuple confirmed aligned (46/46) via a standalone script, since the live-DB-at-import issue above prevented running `tests/test_bug_fixes.py` (which exercises `log_scored_legs` via source inspection) in this session's sandbox.
+
+**Status: implemented and verified structurally; not yet validated against live outcomes.** Estimated read-worthiness: hits/over runs ~15-20 legs/day, so a same-order-of-magnitude sample to §40/§41's ~500-600-leg diagnostic windows (needed for r-values in the 0.02-0.06 range to be distinguishable from noise at these small effect sizes) is roughly **4-6 weeks** of live data before comparing `shadow_composite_score_v1`/`v2`'s correlation against `composite_score`'s is trustworthy enough to consider promotion. A first directional read (not a promotion decision) could reasonably happen after 1-2 weeks (~150-250 legs).
+
+---
+
 ## Lessons Learned
 
 *(Items 1-54 unchanged from prior version — see full list in git history / prior document version.)*

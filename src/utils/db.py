@@ -793,6 +793,8 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
             leg.get("effective_era"),
             leg.get("effective_whip"),
             leg.get("exposure_weight"),
+            leg.get("shadow_composite_score_v1"),
+            leg.get("shadow_composite_score_v2"),
         )
         for leg in legs
         if leg.get("stat") and leg.get("player_name") and leg.get("odd_id")
@@ -814,7 +816,8 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
              pitcher_id, pitcher_name, pitcher_team, pitcher_era, pitcher_k9, pitcher_whip,
              batter_hand, pitcher_vs_batter_hand_era,
              pitcher_era_rank, pitcher_k9_rank, pitcher_whip_rank, lineup_consistency,
-             scorer_version, pt_tb_rate, effective_era, effective_whip, exposure_weight)
+             scorer_version, pt_tb_rate, effective_era, effective_whip, exposure_weight,
+             shadow_composite_score_v1, shadow_composite_score_v2)
         VALUES %s
         ON CONFLICT (run_date, odd_id) DO UPDATE
             SET composite_score             = COALESCE(mlb_scored_legs.composite_score,             EXCLUDED.composite_score),
@@ -839,7 +842,9 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
                 pt_tb_rate                  = COALESCE(mlb_scored_legs.pt_tb_rate,                  EXCLUDED.pt_tb_rate),
                 effective_era               = COALESCE(mlb_scored_legs.effective_era,               EXCLUDED.effective_era),
                 effective_whip              = COALESCE(mlb_scored_legs.effective_whip,              EXCLUDED.effective_whip),
-                exposure_weight             = COALESCE(mlb_scored_legs.exposure_weight,             EXCLUDED.exposure_weight)
+                exposure_weight             = COALESCE(mlb_scored_legs.exposure_weight,             EXCLUDED.exposure_weight),
+                shadow_composite_score_v1   = COALESCE(mlb_scored_legs.shadow_composite_score_v1,   EXCLUDED.shadow_composite_score_v1),
+                shadow_composite_score_v2   = COALESCE(mlb_scored_legs.shadow_composite_score_v2,   EXCLUDED.shadow_composite_score_v2)
         """,
         rows,
     )
