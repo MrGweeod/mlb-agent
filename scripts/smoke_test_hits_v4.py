@@ -218,7 +218,8 @@ def main() -> int:
     parlays = build_parlays(legs, top_n=3, num_games=15,
                             rank_by="p_hit", max_legs=V4_MAX_LEGS,
                             quality_floor_mode=FLOOR_MODE,
-                            quality_floor_value=FLOOR_VALUE)
+                            quality_floor_value=FLOOR_VALUE,
+                            joint_by="p_hit_cal")
     build_secs = time.time() - t0
     print(f"  built {len(parlays)} parlay(s) in {build_secs:.2f}s")
     check(len(parlays) > 0, "at least one valid parlay built")
@@ -228,7 +229,8 @@ def main() -> int:
         p = parlays[0]
         odds = int(p["parlay_odds"].lstrip("+"))
         print(f"  top parlay: {p['num_legs']} legs, +{odds}, "
-              f"joint p_hit {p.get('joint_p_hit')}, path={p.get('selection_path')}")
+              f"joint raw {p.get('joint_p_hit')} / cal {p.get('joint_p_hit_cal')}, "
+              f"path={p.get('selection_path')}")
         for leg in p["legs"]:
             print(f"      {leg.get('player_name','?'):<24} "
                   f"p_hit={leg['p_hit']:.4f} odds={leg.get('best_odds')}")

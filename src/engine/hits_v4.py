@@ -54,6 +54,7 @@ anyway — the model is per-AB — and it removes a walk-rate conversion step.
 """
 from __future__ import annotations
 
+import math
 import time
 from decimal import Decimal
 
@@ -251,6 +252,56 @@ def _coerce_row(row) -> dict:
     }
 
 
+# ── Probability calibration (Platt scaling) ─────────────────────────────────
+# p_hit is over-dispersed: it spreads predictions wider than reality. Measured
+# on the held-out period, the bottom ventile predicted 0.248 against an
+# observed 0.402, and the top predicted 0.743 against an observed 0.649.
+#
+# Fitted as grouped-binomial logistic regression on 2026-07-01..07-21
+# (n=4,977, 20 bins) and validated out-of-sample on 2026-07-22..08-11
+# (n=6,045). Both windows sit AFTER the model's own constants were fitted
+# (games before 2026-07-01), so p_hit is out-of-sample in both.
+#
+#     logit(p_cal) = 0.038887 + 0.665607 * logit(p_hit)
+#
+# The slope of 0.666 < 1 IS the over-dispersion, expressed directly: it pulls
+# predictions toward the mean. Out-of-sample it improves every metric —
+# Brier 0.24248 -> 0.24071, log loss 0.67854 -> 0.67434, mean bias
+# +0.0294 -> +0.0195.
+#
+# WHY PLATT AND NOT ISOTONIC: isotonic won in-sample (Brier 0.23911 vs Platt's
+# 0.23987) and LOST out-of-sample (0.24087 vs 0.24071) — the classic
+# overfitting signature. Two parameters is the right complexity at this n.
+#
+# WHAT IT DOES NOT FIX: a residual +0.019 bias survives on the validation
+# window, because that window's base rate (0.530) is genuinely lower than the
+# fitting window's (0.557). That is period drift in how often batters got a
+# hit, not a defect in the mapping, and no static calibrator can absorb it.
+# Refit if the league run environment moves.
+#
+# RANKING IS UNAFFECTED. Platt is strictly monotone, so ordering by p_hit and
+# ordering by p_hit_cal are identical — leg selection cannot change. What it
+# changes is the LEVEL, and therefore any comparison that multiplies
+# probabilities together, where over-confidence compounds with leg count.
+PLATT_A = 0.038887
+PLATT_B = 0.665607
+
+
+def calibrate_p_hit(p: float) -> float:
+    """
+    Map a raw p_hit onto the calibrated probability scale.
+
+    Use this for anything that treats the number as a probability — joint
+    probabilities, EV, anything shown to a human as a chance of winning. Use
+    raw p_hit for ranking, where the monotone transform is a no-op and the
+    raw value is the auditable model output.
+    """
+    if not (0.0 < p < 1.0):
+        return p
+    z = math.log(p / (1.0 - p))
+    return 1.0 / (1.0 + math.exp(-(PLATT_A + PLATT_B * z)))
+
+
 def _f(whip: float, era: float) -> float:
     """Map a pitcher's WHIP/ERA to an expected per-AB hit rate against him."""
     return F_INTERCEPT + F_WHIP * whip + F_ERA * era
@@ -351,6 +402,7 @@ def compute_p_hit(
 
     return {
         "p_hit":          p_hit,
+        "p_hit_cal":      calibrate_p_hit(p_hit),
         "p_per_ab":       p_per_ab,
         "v4_base_rate":   base,
         "v4_platoon_mult": platoon_mult,

@@ -25,8 +25,11 @@ from decimal import Decimal
 import pytest
 
 from src.engine.hits_v4 import (
+    PLATT_A,
+    PLATT_B,
     _coerce_row,
     _num,
+    calibrate_p_hit,
     load_v4_aggregates,
     score_hits_over_v4,
     F_ERA,
@@ -444,6 +447,61 @@ class TestNumHelper:
         assert isinstance(out["player_id"], int)
         assert isinstance(out["prior_g"], int)
         assert isinstance(out["ip"], float)
+
+
+class TestCalibration:
+    """
+    Platt scaling of p_hit. Fitted on 2026-07-01..07-21 (n=4,977), validated
+    out-of-sample on 07-22..08-11 (n=6,045) — both windows after the model's
+    own constants were fitted, so p_hit is out-of-sample in each.
+    """
+
+    def test_slope_is_below_one(self):
+        """Slope < 1 IS the over-dispersion — it pulls predictions inward."""
+        assert 0.0 < PLATT_B < 1.0
+
+    def test_shrinks_toward_the_middle_at_both_ends(self):
+        assert calibrate_p_hit(0.25) > 0.25, "low predictions must move UP"
+        assert calibrate_p_hit(0.78) < 0.78, "high predictions must move DOWN"
+
+    def test_is_strictly_monotone_so_ranking_cannot_change(self):
+        """
+        The load-bearing property: leg selection ranks on p_hit, so the
+        calibration must not be able to reorder anything.
+        """
+        xs = [i / 200.0 for i in range(1, 200)]
+        cs = [calibrate_p_hit(x) for x in xs]
+        assert all(b > a for a, b in zip(cs, cs[1:]))
+
+    def test_stays_a_probability(self):
+        for p in (1e-6, 0.001, 0.5, 0.999, 1 - 1e-6):
+            assert 0.0 < calibrate_p_hit(p) < 1.0
+
+    def test_passes_through_degenerate_inputs(self):
+        assert calibrate_p_hit(0.0) == 0.0
+        assert calibrate_p_hit(1.0) == 1.0
+
+    def test_compounding_penalises_more_legs_more(self):
+        """
+        Why this matters to the builder: over-confidence compounds, so
+        calibration shrinks a 5-leg joint probability by MORE than a 4-leg
+        one. That makes the constrained 4-leg comparison strictly more
+        favourable, never less.
+        """
+        p = 0.70
+        c = calibrate_p_hit(p)
+        ratio4 = c ** 4 / p ** 4
+        ratio5 = c ** 5 / p ** 5
+        assert ratio5 < ratio4 < 1.0
+
+    def test_compute_p_hit_emits_both_values(self):
+        out = compute_p_hit(**NEUTRAL)
+        assert out["p_hit_cal"] == pytest.approx(calibrate_p_hit(out["p_hit"]))
+        assert out["p_hit_cal"] != out["p_hit"]
+
+    def test_constants_are_the_fitted_values(self):
+        assert PLATT_A == pytest.approx(0.038887)
+        assert PLATT_B == pytest.approx(0.665607)
 
 
 class TestFittedConstants:

@@ -39,3 +39,13 @@ ALTER TABLE mlb_scored_legs
 CREATE INDEX IF NOT EXISTS mlb_scored_legs_run_date_p_hit_idx
     ON mlb_scored_legs (run_date, p_hit DESC)
     WHERE p_hit IS NOT NULL;
+
+-- ── Amendment 2026-08-12: calibrated probability ────────────────────────────
+-- p_hit is over-dispersed (Platt slope 0.666 < 1). p_hit_cal is the
+-- calibrated value; p_hit stays the raw model output for ranking and audit.
+-- Ranking is unaffected — Platt is strictly monotone — but any comparison
+-- that MULTIPLIES probabilities (joint probability, EV) must use p_hit_cal,
+-- because over-confidence compounds with leg count.
+-- See src/engine/hits_v4.py PLATT_A/PLATT_B and ARCHITECTURE_DECISIONS.md §42.
+ALTER TABLE mlb_scored_legs
+    ADD COLUMN IF NOT EXISTS p_hit_cal DOUBLE PRECISION;

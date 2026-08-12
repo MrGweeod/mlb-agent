@@ -887,6 +887,38 @@ Two sharp edges found while testing, both pre-existing: legs priced outside `[-2
 
 Note the 4-vs-5 comparison also partially reopens §26, which reverted 4–6 legs to fixed 4 on EV evidence (4-leg +$0.128/$1 vs 5-leg −$0.416). That evidence was gathered under `composite_score` selection over a gated multi-stat pool — a different pool and a different ranking signal. The 5th leg here is added only when 4 legs miss the floor, and never at the cost of a better-ranked leg. **This needs live EV verification before it can be called settled**; if per-$1 EV on 5-leg v4 parlays comes back negative, cut `V4_MAX_LEGS` to 4 and let swap recovery handle the floor.
 
+### Probability calibration (2026-08-12)
+
+`p_hit` is **over-dispersed** — it spreads predictions wider than reality. On the held-out period the bottom ventile predicted 0.248 against an observed 0.402, and the top predicted 0.743 against an observed 0.649.
+
+Fitted as grouped-binomial logistic regression (Platt) on **2026-07-01 → 07-21** (n=4,977, 20 bins), validated out-of-sample on **07-22 → 08-11** (n=6,045). Both windows sit *after* the model's own constants were fitted, so `p_hit` is out-of-sample in each — the calibrator never sees data the model was trained on, and never sees its own validation window.
+
+```
+logit(p_cal) = 0.038887 + 0.665607 * logit(p_hit)
+```
+
+**The slope of 0.666 < 1 is the over-dispersion, stated directly.** Out-of-sample it improves every metric:
+
+| | Brier | log loss | mean bias |
+|---|---|---|---|
+| raw | 0.24248 | 0.67854 | +0.0294 |
+| **Platt** | **0.24071** | **0.67434** | **+0.0195** |
+| isotonic | 0.24087 | 0.67471 | +0.0201 |
+
+**Platt over isotonic, decided out-of-sample, not by preference:** isotonic won in-sample (Brier 0.23911 vs 0.23987) and *lost* out-of-sample — the textbook overfitting signature. Two parameters is the right complexity at this n; 11 isotonic levels over 20 bins is not.
+
+**What calibration does not fix.** A residual **+0.019** bias survives on the validation window, because that window's base rate (0.530) is genuinely lower than the fitting window's (0.557). That is period drift in the league run environment, not a defect in the mapping, and no static calibrator can absorb it. Refit if the run environment moves. Stability verdict: the *shape* correction is trustworthy at ~11K batter-games — it improved every metric out-of-sample — but the *level* is only as stable as the base rate, which moved 2.7pp inside six weeks.
+
+**Ranking is provably unaffected.** Platt is strictly monotone, so ordering by `p_hit` and by `p_hit_cal` are identical and leg selection cannot change. A test asserts this over 199 points.
+
+**Where it does matter: products.** Over-confidence compounds with leg count, so calibration shrinks a 5-leg joint probability *more* than a 4-leg one — at p=0.70, the 4-leg joint shrinks to 72.7% of its raw value and the 5-leg to 67.1%. That makes the constrained-4-leg comparison strictly *more* favourable, never less; calibration reinforces the existing preference rather than flipping it. The builder now maximises the product of `p_hit_cal` (`joint_by`), while still ranking on raw `p_hit`.
+
+**Measured effect on selection: none.** On both the gated (121-leg) and ungated (197-leg) 2026-08-11 pools, the argmax under calibrated joint probability is the *identical* 4-leg combination as under raw. What changes is the reported number — gated top parlay 0.3222 → **0.2221**, ungated 0.3525 → **0.2396**, a ~31% reduction. That is material for EV and for any human reading a win probability, and it is the reason `joint_p_hit_cal` exists alongside `joint_p_hit`.
+
+**This does not make the parlays profitable.** Under calibration both builder variants are negative EV on the gated pool (greedy −0.150, constrained −0.052 per $1). The calibration makes the numbers honest; it does not make them good. Whether v4 can beat the market price is a separate open question from whether v4 ranks legs well, and the batter-game backtest only answered the second.
+
+`p_hit` (raw) and `p_hit_cal` are both stored on `mlb_scored_legs`. Use raw for ranking and audit; use calibrated for anything that multiplies or is shown to a human as a chance of winning.
+
 ### The Decimal boundary bug — and why 55 passing tests didn't catch it
 
 The first live smoke test crashed immediately: `TypeError: unsupported operand type(s) for +: 'decimal.Decimal' and 'float'` in `_shrink()`. psycopg2 maps PostgreSQL `NUMERIC` to `decimal.Decimal`, and Decimal will not mix with float. Every one of the 55 tests fed hand-written floats, so the entire model was verified against a type that production never actually supplies.

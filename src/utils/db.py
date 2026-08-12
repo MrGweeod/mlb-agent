@@ -796,6 +796,7 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
             leg.get("shadow_composite_score_v1"),
             leg.get("shadow_composite_score_v2"),
             leg.get("p_hit"),
+            leg.get("p_hit_cal"),
             leg.get("p_per_ab"),
             leg.get("v4_base_rate"),
             leg.get("v4_platoon_mult"),
@@ -834,7 +835,7 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
              pitcher_era_rank, pitcher_k9_rank, pitcher_whip_rank, lineup_consistency,
              scorer_version, pt_tb_rate, effective_era, effective_whip, exposure_weight,
              shadow_composite_score_v1, shadow_composite_score_v2,
-             p_hit, p_per_ab, v4_base_rate, v4_platoon_mult, v4_trend_mult,
+             p_hit, p_hit_cal, p_per_ab, v4_base_rate, v4_platoon_mult, v4_trend_mult,
              v4_exp_ab, v4_prior_games, v4_hit_env, v4_hit_env_adj,
              v4_starter_share, v4_sp_whip, v4_sp_era, v4_sp_avg_ip,
              v4_bp_whip, v4_bp_era, v4_opp_der)
@@ -870,6 +871,7 @@ def log_scored_legs(legs: list[dict], run_date: str, parlay_odd_ids: set) -> int
                 -- A later run only fills it in if it was NULL — e.g. the first
                 -- run had no opposing_pitcher_id yet.
                 p_hit                       = COALESCE(mlb_scored_legs.p_hit,                       EXCLUDED.p_hit),
+                p_hit_cal                   = COALESCE(mlb_scored_legs.p_hit_cal,                   EXCLUDED.p_hit_cal),
                 p_per_ab                    = COALESCE(mlb_scored_legs.p_per_ab,                    EXCLUDED.p_per_ab),
                 v4_base_rate                = COALESCE(mlb_scored_legs.v4_base_rate,                EXCLUDED.v4_base_rate),
                 v4_platoon_mult             = COALESCE(mlb_scored_legs.v4_platoon_mult,             EXCLUDED.v4_platoon_mult),

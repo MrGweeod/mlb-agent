@@ -367,6 +367,7 @@ def build_parlays(
     max_legs: int | None = None,
     quality_floor_mode: str | None = None,
     quality_floor_value: float | None = None,
+    joint_by: str | None = None,
 ) -> list:
     """
     Build up to top_n parlays from a single flat leg pool.
@@ -393,6 +394,15 @@ def build_parlays(
     TIER = params["tier"]
     MIN_DECIMAL = MIN_PARLAY_ODDS / 100 + 1
     EFF_MAX_LEGS = max_legs if max_legs is not None else MAX_LEGS
+    # Field whose PRODUCT the constrained search maximises. Defaults to the
+    # ranking field. Under v4 the caller passes "p_hit_cal": ordering by raw
+    # p_hit and by p_hit_cal is identical (Platt is monotone), but joint
+    # probability is a product, and raw p_hit is over-dispersed — so
+    # multiplying raw values compounds over-confidence, and compounds it
+    # differently at 4 legs than at 5. Measured on 2026-08-11 the argmax was
+    # unchanged on both the gated and ungated pools, so this is about
+    # reporting an honest number, not about changing the pick.
+    JOINT_BY = joint_by or rank_by
 
     # Filter pool by threshold gates
     filtered_pool = _filter_legs(pool_legs, rank_by=rank_by)
@@ -466,14 +476,14 @@ def build_parlays(
             eligible = [l for l in pool_sorted
                         if (l.get(rank_by) or 0.0) >= floor_score]
             combo, nodes = _best_constrained_combo(
-                eligible, MIN_LEGS, MIN_DECIMAL, rank_by
+                eligible, MIN_LEGS, MIN_DECIMAL, JOINT_BY
             )
             if combo is not None:
                 legs = combo
                 combined_dec = _combined_decimal(legs)
                 joint = 1.0
                 for l in legs:
-                    joint *= (l.get(rank_by) or 0.0)
+                    joint *= (l.get(JOINT_BY) or 0.0)
                 combo_status = (
                     f"constrained {MIN_LEGS}-leg search — {len(eligible)} legs "
                     f"above floor {floor_score:.4f}, {nodes} nodes, "
@@ -579,6 +589,7 @@ def build_parlays(
         avg_comp = sum(l.get("composite_score", 0.0) for l in legs) / len(legs)
         p_hits   = [l["p_hit"] for l in legs if l.get("p_hit") is not None]
         avg_p_hit = round(sum(p_hits) / len(p_hits), 4) if p_hits else None
+        p_cals   = [l["p_hit_cal"] for l in legs if l.get("p_hit_cal") is not None]
         ev_list  = [l["ev_per_unit"] for l in legs if "ev_per_unit" in l]
         avg_ev   = round(sum(ev_list) / len(ev_list), 4) if ev_list else None
 
@@ -590,6 +601,8 @@ def build_parlays(
             "avg_composite": round(avg_comp, 4),
             "avg_p_hit":     avg_p_hit,
             "joint_p_hit":   (round(math.prod(p_hits), 6) if len(p_hits) == len(legs) else None),
+            # The honest win probability — use THIS for EV, not joint_p_hit.
+            "joint_p_hit_cal": (round(math.prod(p_cals), 6) if len(p_cals) == len(legs) else None),
             "avg_ev":        avg_ev,
             "parlay_type":   "pool",
             "tier":          TIER,

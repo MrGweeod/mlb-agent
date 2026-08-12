@@ -1122,6 +1122,9 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
                             if builder_pool is not qualifying_legs else None),
         quality_floor_value=(V4_QUALITY_FLOOR_VALUE
                              if builder_pool is not qualifying_legs else None),
+        # Rank on raw p_hit (monotone-identical), but maximise the product of
+        # the CALIBRATED value — over-confidence compounds with leg count.
+        joint_by=("p_hit_cal" if builder_pool is not qualifying_legs else None),
     )
     print(f"  Built {len(parlays)} parlay(s)")
 
