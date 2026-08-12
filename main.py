@@ -82,23 +82,29 @@ POOL_MAX_ODDS     = 150
 #   the gated pool carries only 47% of the model's spread (SD 0.059 vs
 #   0.127), and the predicted leg-level r of 0.0867 fell inside the observed
 #   CI. Removing the gate is what the batter-game result says to do.
-# SHIPPED DISABLED (2026-08-12). The code is complete, tested (55/55) and
-# smoke-tested offline, but the LIVE smoke test — the one that exercises
-# load_v4_aggregates()'s psycopg2 path against the real DB — has not been run,
-# because the sandbox this was built in has no .env/DATABASE_URL. Railway
-# auto-deploys on push to master with no CI gate, so shipping this True would
-# have put v4 live un-smoke-tested.
+# ENABLED 2026-08-12 after the live smoke test passed against the real DB.
 #
-# TO ENABLE, in this order:
-#   1. source .venv/bin/activate && python scripts/smoke_test_hits_v4.py --date 2026-08-11
-#      (exits non-zero on failure — do not proceed if it fails)
-#   2. flip this to True, commit, push. Railway redeploys automatically.
+# scripts/smoke_test_hits_v4.py --date 2026-08-11 (LIVE mode, operator's
+# machine, 0 warnings): aggregates loaded in 0.61s, 121/121 legs scored, 0
+# guard rejections, all three selection paths exercised, and the constrained
+# search beat greedy on joint probability 0.3222 vs 0.2517. Critically, the
+# live feature layer reproduced the offline fixture to six decimals — same
+# four legs (Rafaela, Kwan, Herrera, Meckler), joint raw 0.322167 / cal
+# 0.222106 — which closes the one gap a fixture could not cover.
 #
-# With this False the pipeline behaves exactly as it did at 9a879cc: Gate 1's
-# hits/over coverage floor applies, the pool is multi-stat, and the builder
-# ranks by composite_score at a fixed 4 legs. The v4 columns exist in
-# mlb_scored_legs but stay NULL.
-V4_HITS_ENABLED = False
+# TO ROLL BACK: set this to False, commit, push. Railway redeploys in ~70s and
+# the pipeline reverts to exactly its pre-v4 behaviour (Gate 1's hits/over
+# coverage floor returns, the pool goes back to multi-stat, and the builder
+# ranks by composite_score at a fixed 4 legs). The v4 columns simply stop
+# being populated; no migration to revert. Both states are pinned by
+# tests/test_main_gates_2026_08_05.py.
+#
+# FIRST UNGATED RUN IS UNVERIFIED. Every measurement above was taken on the
+# GATED pool of 121 legs, because no ungated pool has ever existed in
+# production. The real pool is roughly twice that (197 legs on 2026-08-11
+# after the odds band). Watch the first run's [hits_v4] timing line and the
+# p_hit distribution — see docs/SESSION_HANDOFF.md for the watch list.
+V4_HITS_ENABLED = True
 
 # Builder may add a 5th/6th leg to reach the +400 floor, but only as a FALLBACK
 # after the constrained 4-leg search below fails. See src/engine/parlay_builder.py.
