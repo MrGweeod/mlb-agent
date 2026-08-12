@@ -45,6 +45,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 MIN_PARLAY_ODDS = 400
 MIN_LEGS = 4
 V4_MAX_LEGS = 6
+FLOOR_MODE = "percentile"   # mirrors main.V4_QUALITY_FLOOR_MODE
+FLOOR_VALUE = 25.0          # mirrors main.V4_QUALITY_FLOOR_VALUE
 
 _failures: list[str] = []
 _warnings: list[str] = []
@@ -203,40 +205,89 @@ def main() -> int:
     check(worst < 1e6, "no value large enough to risk an overflow on write",
           f"max |value| = {worst:.4f}")
 
-    print("\n-- 5/7 builder -----------------------------------------------------")
-    from src.engine.parlay_builder import build_parlays
+    print("\n-- 5/7 builder: constrained 4-leg search ---------------------------")
+    from src.engine.parlay_builder import build_parlays, compute_quality_floor
+    import math as _math
+
+    floor = compute_quality_floor(legs, "p_hit", FLOOR_MODE, FLOOR_VALUE)
+    n_elig = sum(1 for l in legs if (l.get("p_hit") or 0) >= floor)
+    print(f"  quality floor {FLOOR_MODE}={FLOOR_VALUE} -> p_hit >= {floor:.4f} "
+          f"({n_elig} of {len(legs)} legs eligible)")
 
     t0 = time.time()
     parlays = build_parlays(legs, top_n=3, num_games=15,
-                            rank_by="p_hit", max_legs=V4_MAX_LEGS)
-    print(f"  built {len(parlays)} parlay(s) in {time.time() - t0:.2f}s")
+                            rank_by="p_hit", max_legs=V4_MAX_LEGS,
+                            quality_floor_mode=FLOOR_MODE,
+                            quality_floor_value=FLOOR_VALUE)
+    build_secs = time.time() - t0
+    print(f"  built {len(parlays)} parlay(s) in {build_secs:.2f}s")
     check(len(parlays) > 0, "at least one valid parlay built")
+    check(build_secs < 30, "builder runtime acceptable", f"{build_secs:.2f}s")
 
     if parlays:
         p = parlays[0]
         odds = int(p["parlay_odds"].lstrip("+"))
         print(f"  top parlay: {p['num_legs']} legs, +{odds}, "
-              f"avg p_hit {p.get('avg_p_hit')}, ranked_by={p.get('ranked_by')}")
+              f"joint p_hit {p.get('joint_p_hit')}, path={p.get('selection_path')}")
         for leg in p["legs"]:
             print(f"      {leg.get('player_name','?'):<24} "
                   f"p_hit={leg['p_hit']:.4f} odds={leg.get('best_odds')}")
         check(p["num_legs"] >= MIN_LEGS, f"parlay has >= {MIN_LEGS} legs")
         check(odds >= MIN_PARLAY_ODDS, f"parlay clears +{MIN_PARLAY_ODDS}", f"+{odds}")
         check(p.get("ranked_by") == "p_hit", "parlay was ranked by p_hit")
+        check(all((l.get("p_hit") or 0) >= floor for l in p["legs"])
+              or p["selection_path"].startswith("greedy"),
+              "constrained picks respect the quality floor")
 
-    print("\n-- 6/7 extension-over-swap ----------------------------------------")
-    if parlays:
-        p = parlays[0]
-        ranked = sorted(legs, key=lambda l: l["p_hit"], reverse=True)
-        chosen = {id(l) for l in p["legs"]}
-        depths = [i for i, l in enumerate(ranked) if id(l) in chosen]
-        print(f"  chosen legs sit at p_hit ranks {depths} of {len(ranked)}")
-        print(f"  parlay length {p['num_legs']} (min {MIN_LEGS}, max {V4_MAX_LEGS})")
-        if p["num_legs"] > MIN_LEGS:
-            print("  -> reached the floor by EXTENDING, as designed")
-        if max(depths) > 3 * len(ranked) / 4 and p["num_legs"] == MIN_LEGS:
-            warn("a selected leg came from the bottom quartile of the p_hit "
-                 "ranking at minimum length — check swap recovery fired, not extension")
+    print("\n-- 6/7 selection paths --------------------------------------------")
+    # (a) constrained vs (b) greedy fallback vs (c) no valid parlay.
+    paths = [p.get("selection_path") for p in parlays]
+    print(f"  paths taken across {len(parlays)} parlay(s): {paths}")
+
+    greedy_only = build_parlays(legs, top_n=3, num_games=15,
+                                rank_by="p_hit", max_legs=V4_MAX_LEGS)
+    if parlays and greedy_only:
+        c, g = parlays[0], greedy_only[0]
+        cj, gj = c.get("joint_p_hit"), g.get("joint_p_hit")
+        co = int(c["parlay_odds"].lstrip("+"))
+        go = int(g["parlay_odds"].lstrip("+"))
+        print(f"  constrained: {c['num_legs']} legs +{co} joint={cj}")
+        print(f"  greedy-only: {g['num_legs']} legs +{go} joint={gj}")
+        if cj is not None and gj is not None:
+            check(cj >= gj - 1e-9,
+                  "constrained search never loses to greedy on joint probability",
+                  f"{cj:.4f} vs {gj:.4f}")
+            if cj > gj:
+                print(f"  -> constrained improves win probability by "
+                      f"{(cj / gj - 1) * 100:+.1f}% at {(co / go - 1) * 100:+.1f}% odds")
+
+    # (c) no-valid-parlay path must return [] cleanly, not raise
+    try:
+        none_out = build_parlays(legs[:2], top_n=1, num_games=15, rank_by="p_hit",
+                                 max_legs=V4_MAX_LEGS, quality_floor_mode=FLOOR_MODE,
+                                 quality_floor_value=FLOOR_VALUE)
+        check(none_out == [], "insufficient pool returns [] without raising")
+    except Exception as e:  # noqa: BLE001
+        check(False, "insufficient pool returns [] without raising", repr(e))
+
+    # fallback path: force it by demanding an unreachable floor via a tiny pool
+    try:
+        # NOTE: build_parlays() caches decimal odds on the leg as "_dec", so a
+        # copy that changes best_odds without dropping _dec keeps the OLD price.
+        short = [{k: v for k, v in l.items() if k != "_dec"} | {"best_odds": "-245"}
+                 for l in legs[:12]]
+        fb = build_parlays(short, top_n=1, num_games=15, rank_by="p_hit",
+                           max_legs=V4_MAX_LEGS, quality_floor_mode=FLOOR_MODE,
+                           quality_floor_value=FLOOR_VALUE)
+        if fb:
+            print(f"  all-short-price pool -> {fb[0]['num_legs']} legs "
+                  f"[{fb[0]['selection_path']}]")
+            check(fb[0]["num_legs"] > MIN_LEGS,
+                  "no-4-leg-solution pool falls back to extension")
+        else:
+            warn("all-short-price fallback produced no parlay")
+    except Exception as e:  # noqa: BLE001
+        check(False, "fallback path runs without raising", repr(e))
 
     print("\n-- 7/7 comparison against composite_score --------------------------")
     comps = [l for l in legs if l.get("composite_score") is not None]

@@ -38,6 +38,8 @@ _attempt_swap_recovery().
 
 Public API: build_parlays(...), build_hybrid_parlays(...), _tier_params(...).
 """
+import math
+
 from src.utils.odds_math import american_to_decimal
 from src.utils.db import get_players_used_today
 
@@ -202,6 +204,108 @@ def _leg_fits(candidate: dict, other_legs: list) -> bool:
     return True
 
 
+def compute_quality_floor(pool: list, rank_by: str, mode: str, value: float) -> float:
+    """
+    Minimum `rank_by` score a leg needs to enter the constrained search.
+
+    mode="percentile": `value` is a percentile (0-100) of the day's pool.
+        Adapts to pool composition — important under v4, where the pool is
+        ungated and its size and shape vary a lot day to day.
+    mode="max_drop": `value` is the largest allowed absolute drop below the
+        best leg's score. Anchored to the day's best available leg rather
+        than to the pool's shape.
+    """
+    scores = sorted((l.get(rank_by) or 0.0) for l in pool)
+    if not scores:
+        return 0.0
+    if mode == "percentile":
+        idx = min(len(scores) - 1, max(0, int(round(value / 100.0 * (len(scores) - 1)))))
+        return scores[idx]
+    if mode == "max_drop":
+        return scores[-1] - value
+    raise ValueError(f"unknown quality floor mode: {mode!r}")
+
+
+def _best_constrained_combo(
+    pool: list, k: int, min_decimal: float, rank_by: str
+) -> tuple[list | None, int]:
+    """
+    Exact branch-and-bound search for the k-leg combination that MAXIMISES
+    joint probability (product of `rank_by`) subject to combined decimal odds
+    >= min_decimal and every roster constraint _leg_fits() enforces.
+
+    Why this exists: greedy top-k-by-score then check-the-floor is not a search
+    — it inspects exactly one combination. On 2026-08-11 the top 4 by p_hit
+    multiplied to +351 and the builder extended to 5 legs, while 61 of the 121
+    legs were priced long enough (decimal >= 1.495) that some four of them
+    clear +400. Greedy never looks at them. Price and the ranking signal are
+    negatively correlated (corr(decimal, coverage) = -0.405; corr(decimal,
+    p_hit) = -0.175 — weaker, but the same direction), so ranking by
+    probability systematically picks the shortest prices. That tension is
+    structural and cannot be greedy-ed away.
+
+    Work is done in logs so both objective and constraint are additive.
+    Two bounds prune:
+      - probability: items are sorted by score DESC, so the best any partial
+        solution can still reach is the next `slots` scores. If that can't
+        beat the incumbent, cut.
+      - odds: suffix maximum of log(decimal) gives the most odds any partial
+        solution can still accumulate. If that can't reach the floor, cut.
+
+    Returns (best_legs, nodes_visited); best_legs is None if no combination
+    satisfies both the odds floor and the constraints.
+    """
+    items = sorted(pool, key=lambda l: l.get(rank_by) or 0.0, reverse=True)
+    n = len(items)
+    if n < k:
+        return None, 0
+
+    NEG = float("-inf")
+    logp = [math.log(s) if (s := (l.get(rank_by) or 0.0)) > 0 else NEG for l in items]
+    logd = [math.log(l["_dec"]) for l in items]
+    target = math.log(min_decimal)
+
+    # suffix maxima for the odds bound
+    suf_max_d = [0.0] * (n + 1)
+    suf_max_d[n] = NEG
+    for i in range(n - 1, -1, -1):
+        suf_max_d[i] = max(logd[i], suf_max_d[i + 1])
+
+    # prefix sums of logp for the probability bound (items are score-sorted)
+    best = {"legs": None, "logp": NEG}
+    nodes = 0
+
+    def dfs(i: int, chosen: list, sum_logp: float, sum_logd: float) -> None:
+        nonlocal nodes
+        nodes += 1
+        slots = k - len(chosen)
+        if slots == 0:
+            if sum_logd >= target and sum_logp > best["logp"]:
+                best["logp"] = sum_logp
+                best["legs"] = list(chosen)
+            return
+        if i >= n or n - i < slots:
+            return
+        # probability bound: best remaining `slots` scores start at i
+        if sum_logp + sum(logp[i:i + slots]) <= best["logp"]:
+            return
+        # odds bound: most odds still reachable
+        if sum_logd + slots * suf_max_d[i] < target:
+            return
+        for j in range(i, n - slots + 1):
+            if sum_logp + sum(logp[j:j + slots]) <= best["logp"]:
+                break  # sorted DESC — no later j can do better either
+            if sum_logd + slots * suf_max_d[j] < target:
+                break
+            if _leg_fits(items[j], chosen):
+                chosen.append(items[j])
+                dfs(j + 1, chosen, sum_logp + logp[j], sum_logd + logd[j])
+                chosen.pop()
+
+    dfs(0, [], 0.0, 0.0)
+    return best["legs"], nodes
+
+
 def _attempt_swap_recovery(
     legs: list, pool: list, min_decimal: float, rank_by: str = "composite_score"
 ) -> tuple[list | None, int]:
@@ -261,6 +365,8 @@ def build_parlays(
     num_games: int = 15,
     rank_by: str = "composite_score",
     max_legs: int | None = None,
+    quality_floor_mode: str | None = None,
+    quality_floor_value: float | None = None,
 ) -> list:
     """
     Build up to top_n parlays from a single flat leg pool.
@@ -341,13 +447,48 @@ def build_parlays(
         # Under v4 that's p_hit (probability of >=1 hit); otherwise composite_score.
         pool_sorted = sorted(avail_pool, key=lambda l: l.get(rank_by) or 0, reverse=True)
 
-        # ── Greedy selection ─────────────────────────────────────────────────
         legs: list = []
         by_pid: dict = {}
         by_game: dict = {}
         in_parlay: set = set()
         combined_dec = 1.0
 
+        # ── Stage 1: constrained MIN_LEGS search (v4 only) ───────────────────
+        # Look for the MIN_LEGS-leg combination with the highest joint
+        # probability that ALSO clears the odds floor, among legs passing the
+        # quality floor. Only if no such combination exists do we fall through
+        # to the greedy extension below.
+        combo_status = None
+        if quality_floor_mode is not None:
+            floor_score = compute_quality_floor(
+                avail_pool, rank_by, quality_floor_mode, quality_floor_value
+            )
+            eligible = [l for l in pool_sorted
+                        if (l.get(rank_by) or 0.0) >= floor_score]
+            combo, nodes = _best_constrained_combo(
+                eligible, MIN_LEGS, MIN_DECIMAL, rank_by
+            )
+            if combo is not None:
+                legs = combo
+                combined_dec = _combined_decimal(legs)
+                joint = 1.0
+                for l in legs:
+                    joint *= (l.get(rank_by) or 0.0)
+                combo_status = (
+                    f"constrained {MIN_LEGS}-leg search — {len(eligible)} legs "
+                    f"above floor {floor_score:.4f}, {nodes} nodes, "
+                    f"joint prob {joint:.4f}"
+                )
+                print(f"  [parlay_builder] Parlay {rank}: {combo_status}")
+            else:
+                print(
+                    f"  [parlay_builder] Parlay {rank}: no {MIN_LEGS}-leg "
+                    f"combination clears +{MIN_PARLAY_ODDS} among "
+                    f"{len(eligible)} legs above floor {floor_score:.4f} "
+                    f"({nodes} nodes) — falling back to extension"
+                )
+
+        # ── Stage 2: greedy extension (fallback, and the only path pre-v4) ───
         # Greedy walk in rank order. The loop only stops early once MIN_LEGS
         # are held AND the odds floor is cleared; otherwise it keeps ADDING
         # legs up to EFF_MAX_LEGS.
@@ -362,7 +503,9 @@ def build_parlays(
         # (b) discards the model's own preference to buy the same odds. So
         # extension is tried first, exhaustively, and _attempt_swap_recovery()
         # below fires only if EFF_MAX_LEGS legs still miss the floor.
-        for leg in pool_sorted:
+        #
+        # Skipped entirely when Stage 1 already found a valid MIN_LEGS combo.
+        for leg in (pool_sorted if not legs else []):
             if len(legs) >= EFF_MAX_LEGS:
                 break
 
@@ -398,10 +541,12 @@ def build_parlays(
 
         # ── Floor-recovery: pure top-N-by-score missed +400 — try single-leg
         # swaps against progressively lower-scored alternatives before giving up ──
-        if len(legs) < MIN_LEGS:
+        if combo_status is not None:
+            recovery_status = combo_status
+        elif len(legs) < MIN_LEGS:
             recovery_status = f"insufficient pool — only {len(legs)} constraint-eligible leg(s)"
         elif combined_dec >= MIN_DECIMAL:
-            recovery_status = "clean top-4 pass"
+            recovery_status = f"clean greedy pass at {len(legs)} legs"
         else:
             recovery_status = None  # set below by the swap attempt
 
@@ -444,10 +589,13 @@ def build_parlays(
             "avg_coverage":  round(avg_cov, 1),
             "avg_composite": round(avg_comp, 4),
             "avg_p_hit":     avg_p_hit,
+            "joint_p_hit":   (round(math.prod(p_hits), 6) if len(p_hits) == len(legs) else None),
             "avg_ev":        avg_ev,
             "parlay_type":   "pool",
             "tier":          TIER,
             "ranked_by":     rank_by,
+            "selection_path": ("constrained_4leg" if combo_status else
+                               f"greedy_{len(legs)}leg"),
         }
 
         for leg in legs:

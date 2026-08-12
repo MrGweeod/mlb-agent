@@ -100,9 +100,36 @@ POOL_MAX_ODDS     = 150
 # mlb_scored_legs but stay NULL.
 V4_HITS_ENABLED = False
 
-# Builder may add a 5th/6th leg to reach the +400 floor rather than swapping
-# down the p_hit ranking. See src/engine/parlay_builder.py.
+# Builder may add a 5th/6th leg to reach the +400 floor, but only as a FALLBACK
+# after the constrained 4-leg search below fails. See src/engine/parlay_builder.py.
 V4_MAX_LEGS = 6
+
+# ── v4 builder: constrained 4-leg search ─────────────────────────────────────
+# Stage 1 searches for the 4-leg combination MAXIMISING joint probability
+# subject to >= +400 and all roster constraints, among legs at or above the
+# quality floor. Only if no such combination exists does it fall back to the
+# greedy 5/6-leg extension.
+#
+# WHY THE FLOOR IS SET LOW: measured on 2026-08-11, the floor value makes
+# essentially no difference to what gets selected. Every percentile from 0 to
+# 75 produced an IDENTICAL top parlay on both the gated (121-leg) and ungated
+# (197-leg) pools, because maximising the product of p_hit already prefers
+# high-p legs — the floor is not doing the optimising, the objective is.
+# Percentile 90 differed only in that it starved parlay #3 into the greedy
+# path. So the floor's real job is a guard rail against the search reaching
+# into the genuinely bad tail (the ungated pool goes down to p_hit 0.32) in
+# some future pool shape where a very long price makes a bad leg attractive.
+# 25 excludes that tail without ever binding on the optimum.
+#
+# WHY PERCENTILE, NOT max_drop: max_drop at tight values collapsed. On the
+# gated pool max_drop=0.02 left 2 eligible legs and max_drop=0.05 left 7,
+# both of which starved the search and fell through to the greedy path —
+# the exact behaviour this change exists to avoid. Percentile adapts to pool
+# shape, and pool shape is about to change a lot (the ungated pool is ~63%
+# larger with a much longer left tail). max_drop is still supported and
+# tested; it is just the more fragile parameterisation here.
+V4_QUALITY_FLOOR_MODE  = "percentile"   # "percentile" | "max_drop"
+V4_QUALITY_FLOOR_VALUE = 25.0
 
 # TotalBases/over sample-size gate (2026-08-05 scoring redesign): no
 # coverage_overall has ever been computed for this direction, so it's gated
@@ -1091,6 +1118,10 @@ def run_pipeline(starts_after_override=None, source: str | None = None, skip_res
         num_games=len(schedule),
         rank_by="p_hit" if builder_pool is not qualifying_legs else "composite_score",
         max_legs=builder_max_legs,
+        quality_floor_mode=(V4_QUALITY_FLOOR_MODE
+                            if builder_pool is not qualifying_legs else None),
+        quality_floor_value=(V4_QUALITY_FLOOR_VALUE
+                             if builder_pool is not qualifying_legs else None),
     )
     print(f"  Built {len(parlays)} parlay(s)")
 

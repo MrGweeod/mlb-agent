@@ -435,6 +435,8 @@ def run_confirmed_lineup_resolution(run_date_str: str, affected_parlay_ids: list
         POOL_MAX_ODDS,
         V4_HITS_ENABLED,
         V4_MAX_LEGS,
+        V4_QUALITY_FLOOR_MODE,
+        V4_QUALITY_FLOOR_VALUE,
     )
     from src.engine.parlay_builder import build_parlays, TOTAL_LEGS
     from src.utils.sorting import sort_legs_by_game_time
@@ -641,6 +643,8 @@ def run_confirmed_lineup_resolution(run_date_str: str, affected_parlay_ids: list
         candidates = build_parlays(
             available_pool, top_n=10, num_games=15,
             rank_by=rebuild_rank_by, max_legs=rebuild_max_legs,
+            quality_floor_mode=(V4_QUALITY_FLOOR_MODE if V4_HITS_ENABLED else None),
+            quality_floor_value=(V4_QUALITY_FLOOR_VALUE if V4_HITS_ENABLED else None),
         )
         if not candidates:
             print(f"[clr] Builder produced no candidates for parlay {parlay_id} — voiding")
