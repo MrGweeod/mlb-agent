@@ -877,6 +877,29 @@ Ranking by probability and requiring +400 pull against each other — higher-pro
 
 Note this partially reopens §26, which reverted 4–6 legs to fixed 4 on EV evidence (4-leg +$0.128/$1 vs 5-leg −$0.416). That evidence was gathered under `composite_score` selection over a gated multi-stat pool — a different pool and a different ranking signal. The 5th leg here is added only when 4 legs miss the floor, and never at the cost of a better-ranked leg. **This needs live EV verification before it can be called settled**; if per-$1 EV on 5-leg v4 parlays comes back negative, cut `V4_MAX_LEGS` to 4 and let swap recovery handle the floor.
 
+### The Decimal boundary bug — and why 55 passing tests didn't catch it
+
+The first live smoke test crashed immediately: `TypeError: unsupported operand type(s) for +: 'decimal.Decimal' and 'float'` in `_shrink()`. psycopg2 maps PostgreSQL `NUMERIC` to `decimal.Decimal`, and Decimal will not mix with float. Every one of the 55 tests fed hand-written floats, so the entire model was verified against a type that production never actually supplies.
+
+Audited with `pg_typeof` rather than by reading the code — exactly four aggregates return `NUMERIC`:
+
+| Field | expression | psycopg2 type |
+|---|---|---|
+| `pitchers.ip` | `sum(round(innings_pitched*3)/3.0)` | **Decimal** |
+| `pitchers.ip_starts` | same, `FILTER`ed to starts | **Decimal** |
+| `bullpens.ip` | same, relief only | **Decimal** |
+| `ders.der` | `1 - (H-HR)::numeric / (AB-K-HR)` | **Decimal** |
+
+Everything else is `bigint` → int, `double precision` → float, or `integer[]` → list[int].
+
+`ders.der` had an ad-hoc `float()` cast at its call site, which is precisely why the problem stayed hidden for the other three — a per-call-site cast fixes one field and conceals the class of bug. **The fix is a single coercion at the DB→model boundary** (`_coerce_row()`/`_num()` inside `load_v4_aggregates()`), and the ad-hoc cast was removed so the boundary is the only place types are handled. `compute_p_hit()` stays a pure float function; pushing Decimal handling into the model would have traded away the property that lets ~40 tests verify the arithmetic without a database.
+
+Casting to float here is safe and was **verified, not assumed** — `round(IP*3)/3` is evaluated by Postgres in exact numeric arithmetic *before* the cast, so the thirds correction never touches float. Across all 333 starters: max |numeric − float| on IP = **0 exactly**, max ERA delta 1.8e-15, max WHIP delta 4.4e-16, and `ip_float*3` lands on exact integers with zero residual. Source encoding unchanged (.000/.300/.700).
+
+`tests/test_hits_v4.py::TestDBBoundary` now drives the real `load_v4_aggregates()` and `score_hits_over_v4()` with a fake cursor returning the types psycopg2 returns, and asserts no Decimal survives. Verified as a genuine regression test by reverting the coercion: 4 tests fail with the exact production error, including the end-to-end one. Test count 55 → 67.
+
+**The general lesson:** a unit test that constructs its own inputs cannot catch a type mismatch at an I/O boundary, no matter how many of them there are. Any function fed by DB rows needs at least one test driven by something shaped like a real driver's output. The batching worked fine on the first live run (0.70s for 121 legs: batters 0.47s, pitchers 0.09s, teams 0.11s, games 0.03s) — the architecture was right, only the types were wrong.
+
 ### Rollback
 
 **`main.V4_HITS_ENABLED = False`.** Single constant, no other file, no migration to revert. It restores the Gate 1 hits/over coverage floor, stops restricting the pool to hits/over, and puts the builder back on `composite_score` at 4 legs. The v4 columns simply stop being populated. `tests/test_main_gates_2026_08_05.py` pins both flag states so the switch cannot silently rot.

@@ -20,9 +20,15 @@ What these tests pin:
      v3 scorer violated (era_adj returned exactly 0 for 70.5% of legs).
   5. The (0,1) guard returns None rather than clamping.
 """
+from decimal import Decimal
+
 import pytest
 
 from src.engine.hits_v4 import (
+    _coerce_row,
+    _num,
+    load_v4_aggregates,
+    score_hits_over_v4,
     F_ERA,
     F_INTERCEPT,
     F_WHIP,
@@ -242,6 +248,202 @@ class TestGuard:
                     ))
                     assert out is not None
                     assert 0.0 < out["p_hit"] < 1.0
+
+
+class _FakeCursor:
+    """
+    Stands in for a psycopg2 RealDictCursor, returning the types psycopg2
+    actually returns: NUMERIC -> Decimal, bigint -> int, integer[] -> list[int],
+    double precision -> float. Queries are matched by a distinctive fragment so
+    the fake doesn't depend on exact SQL text.
+    """
+
+    def __init__(self):
+        self.rows = []
+        self.closed = False
+
+    def execute(self, sql, params=None):
+        if "mlb_player_batting_logs" in sql and "row_number()" in sql:
+            self.rows = [{
+                "player_id": 660271, "prior_g": 100, "cov_overall": 0.62,
+                "prior_h": 120, "prior_ab": 400, "cov_window": 0.66,
+                "ab_recent": [4, 5, 3, 4, 5],
+                "h_vs_l": 30, "ab_vs_l": 100, "h_vs_r": 90, "ab_vs_r": 300,
+            }]
+        elif "FILTER (WHERE p.is_starter)" in sql and "player_id = ANY" in sql:
+            self.rows = [{
+                "player_id": 543037,
+                "ip": Decimal("180.3333333333"), "h": 165, "bb": 50, "er": 78,
+                "ip_starts": Decimal("180.3333333333"), "starts": 30,
+            }]
+        elif "NOT p.is_starter" in sql:
+            self.rows = [{
+                "team_id": 147, "ip": Decimal("423.0"),
+                "h": 380, "bb": 125, "er": 145,
+            }]
+        elif "opponent_team_id" in sql:
+            self.rows = [{"team_id": 147, "der": Decimal("0.7218")}]
+        elif "mlb_games" in sql:
+            self.rows = [{"game_pk": 823917, "home_team_id": 147, "away_team_id": 111}]
+        else:
+            self.rows = []
+
+    def fetchall(self):
+        return self.rows
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeConn:
+    def __init__(self):
+        self._cur = _FakeCursor()
+
+    def cursor(self):
+        return self._cur
+
+
+def _walk(obj):
+    """Yield every scalar in a nested dict/list structure."""
+    if isinstance(obj, dict):
+        for v in obj.values():
+            yield from _walk(v)
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            yield from _walk(v)
+    else:
+        yield obj
+
+
+class TestDBBoundary:
+    """
+    REGRESSION: the first live run crashed in _shrink() on
+    `Decimal + float` while all 55 unit tests passed, because every test fed
+    hand-written floats and psycopg2 returns NUMERIC as decimal.Decimal.
+
+    Four v4 aggregates come back NUMERIC (verified with pg_typeof):
+    pitchers.ip, pitchers.ip_starts, bullpens.ip, ders.der. These tests drive
+    the real load_v4_aggregates() with a cursor returning those types and
+    assert no Decimal survives the boundary.
+    """
+
+    def test_no_decimal_survives_load(self):
+        agg = load_v4_aggregates(
+            _FakeConn(), batter_ids=[660271], pitcher_ids=[543037],
+            game_pks=[823917], cutoff_date="2026-08-11",
+        )
+        offenders = [v for v in _walk(agg) if isinstance(v, Decimal)]
+        assert offenders == [], f"Decimal leaked past the boundary: {offenders}"
+
+    def test_numeric_fields_specifically_are_floats(self):
+        agg = load_v4_aggregates(
+            _FakeConn(), batter_ids=[660271], pitcher_ids=[543037],
+            game_pks=[823917], cutoff_date="2026-08-11",
+        )
+        assert isinstance(agg["pitchers"][543037]["ip"], float)
+        assert isinstance(agg["pitchers"][543037]["ip_starts"], float)
+        assert isinstance(agg["bullpens"][147]["ip"], float)
+        assert isinstance(agg["ders"][147], float)
+
+    def test_ids_and_prior_g_stay_int(self):
+        """
+        Dict keys must stay hashable ints, and prior_g is written to the
+        INTEGER column mlb_scored_legs.v4_prior_games.
+        """
+        agg = load_v4_aggregates(
+            _FakeConn(), batter_ids=[660271], pitcher_ids=[543037],
+            game_pks=[823917], cutoff_date="2026-08-11",
+        )
+        assert isinstance(agg["batters"][660271]["prior_g"], int)
+        assert isinstance(agg["batters"][660271]["player_id"], int)
+        assert isinstance(agg["games"][823917]["home_team_id"], int)
+
+    def test_loaded_aggregates_actually_score(self):
+        """The end-to-end shape: loaded rows must flow into compute_p_hit()."""
+        agg = load_v4_aggregates(
+            _FakeConn(), batter_ids=[660271], pitcher_ids=[543037],
+            game_pks=[823917], cutoff_date="2026-08-11",
+        )
+        b, sp, bp = agg["batters"][660271], agg["pitchers"][543037], agg["bullpens"][147]
+        out = compute_p_hit(
+            prior_h=b["prior_h"], prior_ab=b["prior_ab"],
+            cov_overall=b["cov_overall"], cov_window=b["cov_window"],
+            h_vs_hand=b["h_vs_r"], ab_vs_hand=b["ab_vs_r"],
+            sp_ip=sp["ip"], sp_h=sp["h"], sp_bb=sp["bb"], sp_er=sp["er"],
+            sp_ip_starts=sp["ip_starts"], sp_starts=sp["starts"],
+            bp_ip=bp["ip"], bp_h=bp["h"], bp_bb=bp["bb"], bp_er=bp["er"],
+            opp_der=agg["ders"][147], ab_recent=b["ab_recent"],
+        )
+        assert out is not None
+        assert 0.0 < out["p_hit"] < 1.0
+        assert all(isinstance(v, float) for v in out.values())
+
+    def test_score_hits_over_v4_end_to_end_with_decimals(self):
+        """
+        The exact path that crashed in production: score_hits_over_v4() ->
+        load_v4_aggregates() -> compute_p_hit(), with a cursor returning the
+        Decimals psycopg2 really returns. This is the test that would have
+        caught the live failure.
+        """
+        legs = [{
+            "stat": "hits", "direction": "over", "player_id": 660271,
+            "game_pk": 823917, "team": "NYY", "opposing_pitcher_id": 543037,
+            "pitcher_hand": "R", "player_name": "Test Batter",
+        }]
+        n = score_hits_over_v4(legs, _FakeConn(), cutoff_date="2026-08-11",
+                               abbr_to_team_id={"NYY": 147})
+        assert n == 1
+        leg = legs[0]
+        assert 0.0 < leg["p_hit"] < 1.0
+        assert leg["scorer_version"] == "v4_2026-08-12"
+        assert isinstance(leg["v4_prior_games"], int)
+        leaked = [k for k, v in leg.items() if isinstance(v, Decimal)]
+        assert leaked == [], f"Decimal reached the leg dict: {leaked}"
+
+    def test_non_hits_legs_are_untouched(self):
+        """v4 must not write anything onto other stats' legs."""
+        legs = [{"stat": "totalBases", "direction": "over", "player_id": 1,
+                 "composite_score": 71.0}]
+        n = score_hits_over_v4(legs, _FakeConn(), cutoff_date="2026-08-11",
+                               abbr_to_team_id={})
+        assert n == 0
+        assert "p_hit" not in legs[0]
+        assert legs[0]["composite_score"] == 71.0
+
+    def test_decimal_reaching_the_model_would_still_raise(self):
+        """
+        Confirms the bug is real and the boundary is what prevents it — if
+        someone bypasses load_v4_aggregates() and hands compute_p_hit() a
+        Decimal, it must fail loudly rather than silently coerce.
+        """
+        with pytest.raises(TypeError):
+            compute_p_hit(**_with(sp_ip=Decimal("180.3"), sp_h=165,
+                                  sp_bb=50, sp_er=78,
+                                  sp_ip_starts=Decimal("180.3"), sp_starts=30))
+
+
+class TestNumHelper:
+    def test_preserves_none(self):
+        assert _num(None) is None
+
+    def test_converts_decimal_and_int(self):
+        assert _num(Decimal("1.25")) == 1.25
+        assert isinstance(_num(3), float)
+
+    def test_recurses_into_arrays(self):
+        out = _num([Decimal("1"), 2, None])
+        assert out == [1.0, 2.0, None]
+        assert all(isinstance(x, float) for x in out if x is not None)
+
+    def test_passes_through_non_numerics(self):
+        assert _num("2026-08-11") == "2026-08-11"
+
+    def test_coerce_row_keeps_declared_ints(self):
+        row = {"player_id": 1, "prior_g": 5, "ip": Decimal("10.5")}
+        out = _coerce_row(row)
+        assert isinstance(out["player_id"], int)
+        assert isinstance(out["prior_g"], int)
+        assert isinstance(out["ip"], float)
 
 
 class TestFittedConstants:

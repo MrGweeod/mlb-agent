@@ -17,7 +17,11 @@
 
 ✅ **Migration applied and verified live** in `information_schema.columns`: 16 new `mlb_scored_legs` columns (`p_hit`, `p_per_ab`, `v4_*`), all `DOUBLE PRECISION` (no declared precision to overflow — the 8/5–8/6 zero-save incident was a `NUMERIC` overflow).
 
-✅ **Tests: 55/55 passing** across `test_hits_v4.py` (new, 33 tests), `test_main_gates_2026_08_05.py` (updated to pin both `V4_HITS_ENABLED` states), `test_simple_scorer_2026_08_05.py`.
+✅ **Tests: 67/67 passing** across `test_hits_v4.py` (new, 45 tests), `test_main_gates_2026_08_05.py` (updated to pin both `V4_HITS_ENABLED` states), `test_simple_scorer_2026_08_05.py`.
+
+🐛 **BUG FOUND AND FIXED by the first live smoke test: `Decimal`/`float` TypeError at the DB boundary.** psycopg2 returns `NUMERIC` as `decimal.Decimal`, which won't mix with float. All 55 tests passed while production crashed on the first real row, because every test fed hand-written floats. Four aggregates return `NUMERIC` (audited with `pg_typeof`): `pitchers.ip`, `pitchers.ip_starts`, `bullpens.ip`, `ders.der`. Fixed with a single coercion at the DB→model boundary in `load_v4_aggregates()`; `compute_p_hit()` stays pure-float. Float cast verified lossless (max IP delta 0 exactly, max ERA delta 1.8e-15 across 333 starters — `round(IP*3)/3` runs in exact numeric before the cast). New `TestDBBoundary` drives the real loader with a Decimal-returning fake cursor; verified it catches the bug by reverting the fix (4 failures with the exact production error). Detail in §42.
+
+📊 **Batching confirmed working on the first live run** — aggregates loaded in **0.70s** for 121 gated legs (batters 0.47s / pitchers 0.09s / teams 0.11s / games 0.03s). Keep this as the gated-pool baseline to compare against the ungated pool.
 
 ✅ **Smoke test passed offline** on 2026-08-11's 121 real legs (`scripts/smoke_test_hits_v4.py`): 121/121 scored, no guard rejections, p_hit 0.4007–0.7763, no overflow risk, valid parlay built at 5 legs/+575 using `p_hit` ranks [0,1,2,3,4]. **Top-4 overlap between the `p_hit` and `composite_score` rankings was 0/4** — these are genuinely different orderings.
 

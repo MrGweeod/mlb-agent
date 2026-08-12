@@ -55,6 +55,7 @@ anyway — the model is per-AB — and it removes a walk-rate conversion step.
 from __future__ import annotations
 
 import time
+from decimal import Decimal
 
 SCORER_VERSION_V4 = "v4_2026-08-12"
 
@@ -179,6 +180,75 @@ MU_BP_ERA  = 3.9873
 EXP_AB_WINDOW = 5
 MU_AB         = 3.187   # train-period mean of the last-5 AB average; used
                         # only when a batter has no prior games at all.
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# DB -> model type boundary
+#
+# psycopg2 maps PostgreSQL NUMERIC to decimal.Decimal, and Decimal does not
+# mix with float: `Decimal('180.3') + 61.9` raises TypeError. Four of the v4
+# aggregates come back NUMERIC (audited with pg_typeof, 2026-08-12):
+#
+#     pitchers.ip          numeric   <- sum(round(innings_pitched*3)/3.0)
+#     pitchers.ip_starts   numeric   <- same, FILTERed to starts
+#     bullpens.ip          numeric   <- same, relief only
+#     ders.der             numeric   <- 1 - (H-HR)::numeric / (AB-K-HR)
+#
+# Everything else is bigint (-> int), double precision (-> float), or
+# integer[] (-> list[int]) and mixes with float fine.
+#
+# The coercion lives HERE, at the point rows become dicts, and nowhere else.
+# compute_p_hit() stays a pure float function — that purity is what lets the
+# unit tests verify the model arithmetic without a database, and pushing
+# Decimal handling down into it would trade that away to fix a problem that
+# isn't the model's.
+#
+# This was a real production failure, not a hypothetical: the first live run
+# crashed in _shrink() on `Decimal + float` while 55 unit tests passed, because
+# every test fed hand-written floats. tests/test_hits_v4.py::TestDBBoundary now
+# drives load_v4_aggregates() with a fake cursor returning Decimals and asserts
+# nothing Decimal survives.
+#
+# NOTE ON PRECISION: casting to float here is safe and was verified, not
+# assumed. round(IP*3)/3 is evaluated by Postgres in exact numeric arithmetic
+# BEFORE the cast, so the thirds correction never touches float. Across all
+# 333 starters: max |numeric - float| on IP = 0 exactly, max ERA delta
+# 1.8e-15, max WHIP delta 4.4e-16, and ip_float*3 lands on exact integers with
+# zero residual. Source encoding is unchanged (.000/.300/.700).
+# ────────────────────────────────────────────────────────────────────────────
+
+# Keys that must stay integers: primary/foreign keys used for dict lookup, and
+# prior_g, which is written to the INTEGER column mlb_scored_legs.v4_prior_games.
+_KEEP_INT = frozenset({
+    "player_id", "team_id", "game_pk", "home_team_id", "away_team_id", "prior_g",
+})
+
+
+def _num(v):
+    """
+    Coerce one DB value into plain Python floats, recursing into arrays and
+    preserving None. Decimal, int and float all collapse to float; anything
+    else (str, date, ...) passes through untouched.
+    """
+    if v is None:
+        return None
+    if isinstance(v, Decimal):
+        return float(v)
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (list, tuple)):
+        return [_num(x) for x in v]
+    if isinstance(v, (int, float)):
+        return float(v)
+    return v
+
+
+def _coerce_row(row) -> dict:
+    """Turn one DB row into a dict whose numeric values are all plain floats."""
+    return {
+        k: (int(v) if (k in _KEEP_INT and v is not None) else _num(v))
+        for k, v in dict(row).items()
+    }
 
 
 def _f(whip: float, era: float) -> float:
@@ -385,26 +455,28 @@ def load_v4_aggregates(conn, *, batter_ids, pitcher_ids, game_pks, cutoff_date):
     t0 = time.time()
     cur = conn.cursor()
 
+    # Every fetchall() below goes through _coerce_row() — see the DB -> model
+    # type boundary note above. Nothing downstream should ever see a Decimal.
     cur.execute(_BATTER_SQL, {
         "pids": list(batter_ids), "cutoff": cutoff_date,
         "twin": TREND_WINDOW, "abwin": EXP_AB_WINDOW,
     })
-    batters = {r["player_id"]: dict(r) for r in cur.fetchall()}
+    batters = {r["player_id"]: _coerce_row(r) for r in cur.fetchall()}
     t_bat = time.time()
 
     cur.execute(_PITCHER_SQL, {"pids": list(pitcher_ids), "cutoff": cutoff_date})
-    pitchers = {r["player_id"]: dict(r) for r in cur.fetchall()}
+    pitchers = {r["player_id"]: _coerce_row(r) for r in cur.fetchall()}
     t_pit = time.time()
 
     cur.execute(_BULLPEN_SQL, {"cutoff": cutoff_date})
-    bullpens = {r["team_id"]: dict(r) for r in cur.fetchall()}
+    bullpens = {r["team_id"]: _coerce_row(r) for r in cur.fetchall()}
 
     cur.execute(_DER_SQL, {"cutoff": cutoff_date})
-    ders = {r["team_id"]: r["der"] for r in cur.fetchall()}
+    ders = {r["team_id"]: _num(r["der"]) for r in cur.fetchall()}
     t_team = time.time()
 
     cur.execute(_GAME_SQL, {"gpks": list(game_pks)})
-    games = {r["game_pk"]: dict(r) for r in cur.fetchall()}
+    games = {r["game_pk"]: _coerce_row(r) for r in cur.fetchall()}
     cur.close()
     t_end = time.time()
 
@@ -497,7 +569,10 @@ def score_hits_over_v4(legs: list, conn, *, cutoff_date, abbr_to_team_id: dict) 
             sp_starts=sp.get("starts"),
             bp_ip=bp.get("ip"), bp_h=bp.get("h"), bp_bb=bp.get("bb"),
             bp_er=bp.get("er"),
-            opp_der=float(der) if der is not None else None,
+            # No float() cast here on purpose — load_v4_aggregates() already
+            # coerced at the boundary. An ad-hoc cast at one call site is what
+            # hid the Decimal problem for the other three NUMERIC fields.
+            opp_der=der,
             ab_recent=b.get("ab_recent"),
         )
         if out is None:
