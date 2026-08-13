@@ -139,19 +139,86 @@ def _build_player_stats_index(box: dict) -> dict[int, dict]:
     return index
 
 
+# NOTE: _PITCHER_POSITIONS is already defined at the top of this module and is
+# reused below. The DK must-start rule implemented in resolve_all_legs() is the
+# BATTER rule; pitcher props have their own void conditions (started vs
+# relieved) which this change deliberately does not touch — the batting-order
+# trailing digit says nothing about whether a pitcher started.
+
+
+def _is_substitute(player: dict) -> bool | None:
+    """
+    True if the player did NOT start, derived from the boxscore battingOrder.
+
+    '300' = started in the 3-spot; '301' = first substitute in that spot; '302'
+    = second. A non-zero trailing digit means the player entered as a sub.
+
+    statsapi.boxscore_data() returns gameStatus as an EMPTY DICT (the field is
+    outside its hardcoded `fields` whitelist), so gameStatus.isSubstitute is
+    NOT usable here — the trailing digit is. Verified live: Massey '801',
+    Edman '301', Happ '701', Walker '502' -> True; Seager '300', Kwan '100',
+    Neto '400' -> False. Where both indicators are available (raw
+    /api/v1/game/{pk}/boxscore) they agree 30/30.
+
+    Returns None when the player has no battingOrder at all, which means they
+    never appeared in the batting order — handled separately as DNP.
+    """
+    raw = player.get("battingOrder")
+    if raw is None:
+        return None
+    try:
+        return int(str(raw)) % 100 != 0
+    except (ValueError, TypeError):
+        return None
+
+
+def _build_player_meta_index(box: dict) -> dict[int, dict]:
+    """
+    {player_id: {'battingOrder': str|None, 'is_substitute': bool|None}}.
+
+    Separate from _build_player_stats_index because that one keeps only
+    player['stats'] and drops battingOrder, which is the single field that
+    records whether a player started.
+    """
+    index: dict[int, dict] = {}
+    for side in ("away", "home"):
+        for _key, player in box.get(side, {}).get("players", {}).items():
+            pid = player.get("person", {}).get("id")
+            if pid:
+                index[int(pid)] = {
+                    "battingOrder": player.get("battingOrder"),
+                    "is_substitute": _is_substitute(player),
+                }
+    return index
+
+
 def _batch_commit(updates: list[tuple]) -> None:
     """
-    Commit a batch of (result, actual_value, leg_id) updates to mlb_scored_legs.
+    Commit a batch of (result, actual_value, leg_id[, void_reason]) updates to
+    mlb_scored_legs.
+
+    Accepts both 3- and 4-tuples so existing callers keep working; the 4th
+    element records WHY a leg was voided, which matters now that voids come
+    from several distinct rules (DNP, did-not-start, no plate appearance).
     """
     if not updates:
         return
     conn = get_conn()
     cur  = conn.cursor()
-    for result, actual, leg_id in updates:
-        cur.execute(
-            "UPDATE mlb_scored_legs SET result = %s, actual_value = %s WHERE id = %s",
-            (result, actual, leg_id),
-        )
+    for upd in updates:
+        result, actual, leg_id = upd[0], upd[1], upd[2]
+        void_reason = upd[3] if len(upd) > 3 else None
+        if void_reason is not None:
+            cur.execute(
+                "UPDATE mlb_scored_legs SET result = %s, actual_value = %s, "
+                "void_reason = %s WHERE id = %s",
+                (result, actual, void_reason, leg_id),
+            )
+        else:
+            cur.execute(
+                "UPDATE mlb_scored_legs SET result = %s, actual_value = %s WHERE id = %s",
+                (result, actual, leg_id),
+            )
     conn.commit()
     cur.close()
     conn.close()
@@ -237,11 +304,12 @@ def resolve_all_legs(run_date: str, verbose: bool = True) -> dict:
         except Exception as exc:
             print(f"  [RESOLVER] boxscore fetch failed for {game_pk}: {exc} — voiding legs")
             for leg in game_legs:
-                pending.append(("void", None, leg["id"]))
+                pending.append(("void", None, leg["id"], "boxscore_fetch_failed"))
                 counts["void"] += 1
             continue
 
         player_index = _build_player_stats_index(box)
+        player_meta  = _build_player_meta_index(box)
 
         for leg in game_legs:
             player_id_raw = leg.get("player_id")
@@ -257,7 +325,7 @@ def resolve_all_legs(run_date: str, verbose: bool = True) -> dict:
                 player_id = None
 
             if not player_id:
-                pending.append(("void", None, leg["id"]))
+                pending.append(("void", None, leg["id"], "no_player_id"))
                 counts["void"] += 1
                 if verbose:
                     print(f"  {name}: no player_id → VOID")
@@ -266,15 +334,51 @@ def resolve_all_legs(run_date: str, verbose: bool = True) -> dict:
             p_stats = player_index.get(player_id)
             if p_stats is None:
                 # Player not in box score — scratched, injured, or DNP
-                pending.append(("void", None, leg["id"]))
+                pending.append(("void", None, leg["id"], "dnp_not_in_boxscore"))
                 counts["void"] += 1
                 if verbose:
                     print(f"  {name}: not in boxscore → VOID (DNP/scratched)")
                 continue
 
+            # ── DraftKings must-start rule (batter props only) ───────────────
+            # DK grades pre-live batter props on "must START and record a plate
+            # appearance". A pinch-hitter VOIDS even with an at-bat and a hit.
+            # Grading on box-score presence alone is FanDuel's rule, and it was
+            # settling DK voids as wins and losses: on 2026-08-12 that misgraded
+            # 8 legs and turned three winning parlays into losses (1496, 1498,
+            # 1501). Across all history it affects 437 resolved legs and flips
+            # 59 parlays. See ARCHITECTURE_DECISIONS.md §42.
+            #
+            # Scoped to batter props deliberately. Pitcher props have their own
+            # void conditions (started vs relieved) which this does NOT address
+            # — the trailing-digit signal is about the batting order and says
+            # nothing about whether a pitcher started.
+            if position not in _PITCHER_POSITIONS:
+                meta = player_meta.get(player_id, {})
+                if meta.get("is_substitute"):
+                    pending.append(("void", None, leg["id"], "did_not_start"))
+                    counts["void"] += 1
+                    if verbose:
+                        print(f"  {name}: battingOrder {meta.get('battingOrder')} "
+                              f"→ VOID (entered as substitute, DK must-start)")
+                    continue
+
+                # Second half of the rule: must record a plate appearance.
+                # statsapi.boxscore_data() omits plateAppearances, so AB+BB is
+                # the available proxy — a player with neither took no PA.
+                # Every 0-AB case observed on 2026-08-12 was also a substitute,
+                # so this clause is a backstop rather than the main path.
+                _b = (p_stats or {}).get("batting", {}) or {}
+                if (_b.get("atBats") or 0) == 0 and (_b.get("baseOnBalls") or 0) == 0:
+                    pending.append(("void", None, leg["id"], "no_plate_appearance"))
+                    counts["void"] += 1
+                    if verbose:
+                        print(f"  {name}: started but no PA → VOID (DK must-record-a-PA)")
+                    continue
+
             actual = extract_stat_from_boxscore(p_stats, stat, position)
             if actual is None:
-                pending.append(("void", None, leg["id"]))
+                pending.append(("void", None, leg["id"], "stat_extraction_failed"))
                 counts["void"] += 1
                 if verbose:
                     print(f"  {name} {stat}: extraction failed → VOID")
@@ -296,7 +400,7 @@ def resolve_all_legs(run_date: str, verbose: bool = True) -> dict:
 
     # Void legs without a game_pk
     for leg in no_game:
-        pending.append(("void", None, leg["id"]))
+        pending.append(("void", None, leg["id"], "no_game_pk"))
         counts["void"] += 1
 
     # Flush remainder
@@ -377,6 +481,7 @@ def resolve_all_enriched_legs(run_date: str, verbose: bool = True) -> dict:
             continue
 
         player_index = _build_player_stats_index(box)
+        player_meta  = _build_player_meta_index(box)
 
         for leg in game_legs:
             player_id_raw = leg.get("player_id")
