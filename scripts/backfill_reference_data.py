@@ -155,12 +155,69 @@ def _starter_id(side_data: dict) -> int | None:
 
 
 def _batting_slot(player: dict) -> int | None:
-    """Per-player battingOrder string ('300') -> slot int (3). None if not in lineup."""
+    """
+    Per-player battingOrder string ('300') -> slot int (3). None if not in lineup.
+
+    NOTE: this deliberately discards the trailing digit, which is the
+    substitution marker. Use _batting_order_raw()/_is_substitute() when you
+    need to know whether the player STARTED — see below.
+    """
     raw = player.get("battingOrder")
     if raw is None:
         return None
     try:
         return int(str(raw)) // 100
+    except (ValueError, TypeError):
+        return None
+
+
+def _batting_order_raw(player: dict) -> str | None:
+    """
+    The raw per-player battingOrder string, substitution digit intact.
+
+    '300' = started in the 3-spot. '301' = first substitute in that spot,
+    '302' = second. The trailing digit is the ONLY place the box score records
+    whether a player started, and _batting_slot() throws it away by design
+    (integer-dividing by 100), which is why this exists alongside it.
+    """
+    raw = player.get("battingOrder")
+    return str(raw) if raw is not None else None
+
+
+def _is_substitute(player: dict) -> bool | None:
+    """
+    True if the player did NOT start.
+
+    The trailing digit of battingOrder is the signal that actually works on
+    THIS code path. Two indicators exist in MLB's boxscore and agree on every
+    leg checked from 2026-08-12 (30/30) — gameStatus.isSubstitute and the
+    trailing digit — but statsapi.boxscore_data(), which get_box_score() wraps,
+    returns gameStatus as an EMPTY DICT because the field is outside its
+    hardcoded `fields` whitelist (verified live against game 823916). So the
+    isSubstitute branch below is dead code on the current fetcher and the digit
+    fallback is what runs. It is kept, not deleted, so that this function stays
+    correct if the fetcher is ever pointed at the raw
+    /api/v1/game/{pk}/boxscore endpoint, which does return gameStatus.
+
+    WHY THIS MATTERS: DraftKings grades pre-live batter props on a must-start
+    AND record-a-plate-appearance rule, so a pinch-hitter voids EVEN WITH an
+    at-bat. Grading on box-score presence alone is FanDuel's rule and silently
+    settles DK voids as wins or losses. On 2026-08-12 that misgraded 8 legs and
+    turned three winning parlays (1496, 1498, 1501) into losses.
+
+    Do NOT substitute mlb_scored_legs.lineup_check_status='SCRATCHED' for this.
+    It happened to be correct on all 12 cases that day, but it is a PRE-GAME
+    inference from a possibly non-final lineup, whereas this is post-game
+    ground truth. Grade settled bets from the box score.
+    """
+    status = player.get("gameStatus") or {}
+    if "isSubstitute" in status:
+        return bool(status["isSubstitute"])
+    raw = _batting_order_raw(player)
+    if raw is None:
+        return None
+    try:
+        return int(raw) % 100 != 0
     except (ValueError, TypeError):
         return None
 
@@ -240,8 +297,24 @@ def backfill_date(cur, day: date) -> int:
                 pitching = stats.get("pitching", {})
 
                 # Batting log — gate on non-empty batting stats dict (a real
-                # participation signal; plateAppearances is not returned by
-                # this API path, see module docstring).
+                # participation signal).
+                #
+                # plate_appearances / hit_by_pitch are read through rather than
+                # hardcoded to None. On the CURRENT fetcher this is a no-op —
+                # statsapi.boxscore_data() omits both (module docstring above is
+                # correct; verified live on game 823916), so they stay NULL as
+                # they have been for all 38,147 rows. Passing the getters costs
+                # nothing and makes the row correct automatically if the fetcher
+                # ever moves to the raw /api/v1/game/{pk}/boxscore endpoint,
+                # which does return them.
+                #
+                # This matters because DraftKings' rule is must-start AND
+                # record a plate appearance. The must-start half is covered by
+                # is_substitute below. For the PA half, at_bats + walks is a
+                # sound proxy from what this path DOES return — and in practice
+                # every 0-AB case on 2026-08-12 (Walker '502', Springer '802',
+                # Lukes '801') was also a substitute, so the sub check catches
+                # them regardless.
                 if batting:
                     h = batting.get("hits") or 0
                     d = batting.get("doubles") or 0
@@ -252,15 +325,27 @@ def backfill_date(cur, day: date) -> int:
                         """
                         INSERT INTO mlb_player_batting_logs (
                             player_id, game_pk, team_id, opponent_team_id, opposing_pitcher_id,
-                            batting_order, plate_appearances, at_bats, hits, doubles, triples,
+                            batting_order, batting_order_raw, is_substitute,
+                            plate_appearances, at_bats, hits, doubles, triples,
                             home_runs, rbi, walks, strikeouts, hit_by_pitch, stolen_bases, total_bases
-                        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                        ON CONFLICT (player_id, game_pk) DO NOTHING
+                        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        ON CONFLICT (player_id, game_pk) DO UPDATE SET
+                            -- Backfill-safe: only fields that were previously
+                            -- absent or lossy are refreshed. Everything else
+                            -- keeps its original value, preserving the old
+                            -- DO NOTHING semantics for existing rows.
+                            batting_order_raw = EXCLUDED.batting_order_raw,
+                            is_substitute     = EXCLUDED.is_substitute,
+                            plate_appearances = COALESCE(mlb_player_batting_logs.plate_appearances,
+                                                         EXCLUDED.plate_appearances),
+                            hit_by_pitch      = COALESCE(mlb_player_batting_logs.hit_by_pitch,
+                                                         EXCLUDED.hit_by_pitch)
                         """,
                         (pid, game_pk, team_id, opp_id, opp_starter,
-                         _batting_slot(player), None, batting.get("atBats"), h, d, t, hr,
+                         _batting_slot(player), _batting_order_raw(player), _is_substitute(player),
+                         batting.get("plateAppearances"), batting.get("atBats"), h, d, t, hr,
                          batting.get("rbi"), batting.get("baseOnBalls"), batting.get("strikeOuts"),
-                         None, batting.get("stolenBases"), total_bases),
+                         batting.get("hitByPitch"), batting.get("stolenBases"), total_bases),
                     )
 
                 # Pitching log — only if the player recorded any innings

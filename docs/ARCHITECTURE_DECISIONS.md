@@ -887,6 +887,28 @@ Two sharp edges found while testing, both pre-existing: legs priced outside `[-2
 
 Note the 4-vs-5 comparison also partially reopens §26, which reverted 4–6 legs to fixed 4 on EV evidence (4-leg +$0.128/$1 vs 5-leg −$0.416). That evidence was gathered under `composite_score` selection over a gated multi-stat pool — a different pool and a different ranking signal. The 5th leg here is added only when 4 legs miss the floor, and never at the cost of a better-ranked leg. **This needs live EV verification before it can be called settled**; if per-$1 EV on 5-leg v4 parlays comes back negative, cut `V4_MAX_LEGS` to 4 and let swap recovery handle the floor.
 
+### ⚠️ GRADING CAVEAT: the backtest measures a different target than DK settlement (2026-08-13)
+
+**Everything above — AUC 0.6042, r=0.1838, the decile table, the Platt calibration — grades an outcome that DraftKings would not settle the same way.**
+
+`got_hit` is derived from the presence of a `mlb_player_batting_logs` row with `hits > 0`. That counts **any** appearance, including pinch-hitters and late substitutes. That is FanDuel's rule.
+
+**DraftKings' house rule for pre-live batter props is must START and record a plate appearance.** A pinch-hitter who doesn't start **voids** at DK even with an at-bat and a hit. So every leg in the backtest where the batter entered as a substitute is graded won/lost by the model's target and would be **voided** by the book.
+
+Measured on 2026-08-12, the first v4 production night: **8 of the day's legs were substitutes**, all graded won/lost when DK would have voided them. Two were in built parlays (Massey `'801'`, Edman `'301'`), and correcting them flips **three parlays from loss to win** (1496, 1498, 1501) — v4's first night was 3–3, not 0–6. Ian Happ (`'701'`, 3 AB, 1 hit) was graded a **win** and should have voided.
+
+What this does and does not invalidate:
+
+- **Ranking work stands.** Substitute appearances are a small, roughly random slice of batter-games, and the model was validated on *ordering* legs by `p_hit`. AUC and the decile monotonicity are not meaningfully disturbed.
+- **Anything expressed as a realized win rate or EV does not stand** without regrading — including the calibration curve, since Platt was fitted against `got_hit`. Substitutes skew toward low-PA outcomes, so the observed rates in the low bins are probably depressed relative to DK-settled reality.
+- **Any future comparison against actual settlement must regrade first**, or it will compare a FanDuel-graded model to DK-settled results.
+
+The fix requires data the database did not have: `mlb_player_batting_logs.batting_order` stored only `1–9`, because `_batting_slot()` computed `int(battingOrder) // 100` and threw away the trailing substitution digit. `batting_order_raw` and `is_substitute` were added 2026-08-13 to capture it.
+
+**Note on the fetcher:** `statsapi.boxscore_data()` — which `get_box_score()` wraps — returns `gameStatus` as an **empty dict** and omits `plateAppearances`/`hitByPitch` entirely (its hardcoded `fields` whitelist). The raw `/api/v1/game/{pk}/boxscore` endpoint returns all three. So `is_substitute` is derived from the `battingOrder` trailing digit, not from `gameStatus.isSubstitute`; the two agree 30/30 where both are available.
+
+**Do not derive this from `mlb_scored_legs.lineup_check_status='SCRATCHED'.** It was correct on all 12 cases of 2026-08-12, but it is a *pre-game* inference from a possibly non-final lineup, and it is set for players who go on to start and get hits. Settled bets should be graded from the box score, which is ground truth.
+
 ### Probability calibration (2026-08-12)
 
 `p_hit` is **over-dispersed** — it spreads predictions wider than reality. On the held-out period the bottom ventile predicted 0.248 against an observed 0.402, and the top predicted 0.743 against an observed 0.649.
