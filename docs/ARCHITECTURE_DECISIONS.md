@@ -970,6 +970,47 @@ Casting to float here is safe and was **verified, not assumed** — `round(IP*3)
 
 ---
 
+## §43 — Session 31 (2026-08-19): Ballpark run_factor tested as a hits/over signal — ruled out, does not survive out-of-sample validation
+
+### Motivation
+
+Live parlay win rate since v4 launch (§42) sat at 15.3% (11/72, 2026-08-12 through 08-18), below the ~20% breakeven implied by the +400 floor. Live calibration was checked first and found accurate — `p_hit_cal` on selected legs averaged 64.24% against a realized 63.86% (n=166), a 0.38-point gap. The low win rate is what a 4-leg-all-must-hit structure does to a genuine ~64% per-leg rate (0.639⁴ ≈ 16.6%, matching the observed rate almost exactly) — not a defect. Investigation moved to whether the underlying per-leg hit rate itself could be improved. `hits_v4.py` uses no park adjustment at all, making it a natural first candidate.
+
+### Method
+
+`ballpark_factors.run_factor` (static, per home park) was tested against `mlb_training_data` (hits/over, resolved legs, joined via `game_pk` → `mlb_games.home_team_id` → `mlb_teams` → `ballpark_factors`).
+
+**First pass — pooled full season (n=12,171, later n=10,957 with a second control added):**
+- Partial corr controlling for `pt_avg` alone: **r = −0.0323**, 95% CI [−0.050, −0.014] — excludes zero.
+- Partial corr controlling jointly for `pt_avg` and `opp_pt_era` (proper 2-predictor regression): **r = −0.0279**, 95% CI [−0.047, −0.009] — still excludes zero.
+
+Both looked like a real, if small, effect — comparable in magnitude to the already-accepted `strikeouts/over` (r=0.0713) and `totalBases/under` (r=0.0232) weak signals.
+
+**Second pass — proper train/test split, matching the same cutoff v4's own constants were fit and validated against (§42: fit before 2026-07-01, validated on/after):**
+
+Using Frisch-Waugh-Lovell (residualize both the outcome and `run_factor` against `pt_avg`+`opp_pt_era`, fit on train only, then check the residual-vs-residual relationship on train and on test using the *train-fitted* nuisance coefficients — no re-fitting on test):
+
+| | n | Partial slope | Partial corr |
+|---|---|---|---|
+| Train (games before 07-01) | 8,417 | −0.003868 | −0.0314 |
+| **Test (games on/after 07-01)** | 2,540 | **−0.000007** | **−0.00005** |
+
+The effect that looked statistically significant on pooled data is statistically indistinguishable from exact zero on held-out data.
+
+### Conclusion — NOT SHIPPED
+
+Ruled out. This is the same overfitting signature already documented in this project for isotonic calibration (§42: won in-sample, lost out-of-sample) and DER's original naive-weight assumption — a relationship that is real *within* a sample but does not generalize, because the pooled full-season check let in-sample train-period noise dominate the average. No code changed; `hits_v4.py` is unmodified. Ballpark run_factor is not currently a viable addition to the hits/over model.
+
+### Honest caveat
+
+This does not rule out *all* possible park-related signal — only this specific formulation (`run_factor`, linear, controlling for batter average and opposing-pitcher ERA, fit on the pre-07-01/post-07-01 split). `run_factor` blends run-scoring effects (extra-base hits, home runs) that may not track raw single-hit frequency; a hit-specific park factor, if one existed as a data source, was not tested. Also not tested: `lineup_consistency`, which is logged but unused in v4, same as `run_factor` was before this entry.
+
+### Process note
+
+Any future candidate-signal test for this model should run the train/test split from the start, not as a follow-up check after a pooled correlation looks promising — the pooled read here was convincing enough on its own (CI excluding zero, twice, under two different control specs) that shipping without the split would have been an easy, defensible-looking mistake.
+
+---
+
 ## Lessons Learned
 
 *(Items 1-54 unchanged from prior version — see full list in git history / prior document version.)*
@@ -1019,6 +1060,8 @@ Casting to float here is safe and was **verified, not assumed** — `round(IP*3)
 71. **A task's field names are a claim about the code, not a guarantee — verify them against a live read before implementing "a replacement" for something that may not exist.** The scoring-redesign task instructed replacing "raw `opp_pt_era`/`opp_pt_whip` in `simple_scorer.py`'s existing hits/over bucket logic." Neither field is read anywhere in the live scoring path — they're offline `mlb_training_data` backfill-only columns from a different script entirely, and the live path's actual fields (`pitcher_era`/`pitcher_whip`) come from a different source (`matchup.py`'s season-to-date fetch) with different semantics (season aggregate, not point-in-time). Implementing "the replacement" against the named-but-nonexistent fields would have silently done nothing (no code path reads them), while looking complete against the task's own description. The task's underlying *intent* (blend the exposure-corrected signal into the actual scoring formula) was still correct and implementable — but only after mapping it onto what the code actually does, found by reading `simple_scorer.py`/`enrich_legs.py` directly rather than trusting the task doc's field names. This is the evidence-first-rule skill's principle applied one step upstream: before implementing a described fix, confirm the thing being described (a field, a function, a code shape) actually exists as described, the same way you'd confirm a diagnostic claim before stating it. (Session 27)
 
 72. **A test-isolation fix (stubbing a heavy import chain) can become the next session's test-isolation bug if the stub outlives the import that needed it.** `sys.modules` stubbing to avoid a real DB/network connection at import time — an established, working pattern in this test suite (`test_bug_fixes.py`, `test_lineup_confirmation.py`) — is safe only as long as the stub is removed once the importing module has bound its own copies of the names it needed. Leaving a `src.engine.parlay_builder` stub in `sys.modules` after `import main` completed silently broke `test_parlay_builder.py`'s real import of the same module name, 15 failures, purely a function of file collection order (alphabetical, so invisible until a differently-ordered or filtered run exposed it). The general form: any global, process-wide mutation made "just for this import" needs an equally deliberate undo once that import is done, not just a `setdefault` that assumes nothing else will ever want the real thing. (Session 27)
+
+73. **A candidate signal's correlation on pooled data can have a confidence interval that excludes zero and still be pure in-sample noise — the train/test split isn't optional scaffolding around the real test, it *is* the real test.** Ballpark `run_factor`'s partial correlation with hits/over outcome came back r=−0.028 to −0.032 on the full season pooled together, under two different control specifications, both with 95% CIs excluding zero — exactly what a real, checkable finding looks like. Splitting on the same cutoff already used to validate every other v4 constant (fit before 2026-07-01, check on/after) collapsed it to r=−0.00005, indistinguishable from exactly zero. The pooled check wasn't sloppy — it was a legitimate partial correlation, correctly computed, twice — it just answered a different question (does this relationship hold *within* this sample) than the one that matters for shipping (does it hold on data the fit never saw). Any exploratory signal search, not only the model's own load-bearing constants, needs the split from the first pass, not as confirmation after a promising pooled result — a convincing-looking pooled CI is exactly the point at which the temptation to skip the split is strongest, and exactly when skipping it is most costly. (Session 31)
 
 ---
 
